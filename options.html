@@ -44,7 +44,14 @@
     <div class="row"><label>显示画质提示:</label><input type="checkbox" id="showStatus" style="width:18px;height:18px;"></div>
     <div class="row"><label>开启突破限制:</label><input type="checkbox" id="breakoutView" style="width:18px;height:18px;"></div>
     <div class="row"><label>默认倍数:</label><input type="number" id="zoomLevel" step="0.5" min="1.5"></div>
-    <div class="row"><label>默认视图模式:</label><select id="mode"><option value="partial">局部放大</option><option value="full-follow">整体跟随</option><option value="full-center">智能避让</option></select></div>
+    <div class="row">
+    <label>默认视图模式:</label>
+    <select id="mode">
+        <option value="partial">局部放大</option>
+        <option value="full-follow">整体跟随</option>
+        <option value="full-center">智能避让</option>
+        <option value="immersive">沉浸模式 (图库)</option> </select>
+</div>
     
     <h3 style="margin-top: 20px;">⌨️ 快捷键</h3>
     <div class="row"><label>切换/旋转:</label><div style="display:flex;gap:5px"><input type="text" id="keyMode"><input type="text" id="keyRotate"></div></div>
