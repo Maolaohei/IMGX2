@@ -10,7 +10,7 @@
     
     let activeZoom = 2.0; 
     let keys = { mode: 'v', rotate: 'r', mirror: 'm', zoomIn: '=', zoomOut: '-' };
-    let HD_RULES = [];
+    
     let currentHoveredImg = null;
     let currentHoveredSrc = null; 
     let cachedRect = null; 
@@ -22,16 +22,6 @@
     const badHdUrls = new Set();
 
     const isContextValid = () => !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
-
-    async function loadRules() {
-        if (!isContextValid()) return;
-        try {
-            const resp = await fetch(chrome.runtime.getURL('rules.json'));
-            const data = await resp.json();
-            HD_RULES = data.map(r => ({ ...r, hosts: new RegExp(r.hosts), match: new RegExp(r.match, 'i') }));
-        } catch (e) {}
-    }
-    loadRules();
 
     const syncConfig = (res) => {
         if (!res) return;
@@ -59,18 +49,29 @@
         });
     }
 
+    // --- 消息监听：接入异步 Mix01RuleEngine 引擎 ---
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request.action === "getHDUrl") {
-            const targetUrl = request.clickedUrl ? getHighResUrl(request.clickedUrl) : zoomImg.src;
-            sendResponse({ url: targetUrl });
+            const src = request.clickedUrl || zoomImg.src;
+            const targetEl = request.clickedUrl ? (currentHoveredSrc === request.clickedUrl ? currentHoveredImg : document.createElement('img')) : zoomImg;
+            
+            window.Mix01RuleEngine.getHighResUrl(targetEl, src).then(targetUrl => {
+                sendResponse({ url: targetUrl });
+            });
+            return true; // 告知 Chrome 这是一个异步响应
         } else if (request.action === "copyHDUrl") {
-            // [新增] 拦截复制指令并执行
-            const targetUrl = request.clickedUrl ? getHighResUrl(request.clickedUrl) : zoomImg.src;
-            copyImageToClipboard(targetUrl);
-            sendResponse({ status: "ok" });
+            const src = request.clickedUrl || zoomImg.src;
+            const targetEl = request.clickedUrl ? (currentHoveredSrc === request.clickedUrl ? currentHoveredImg : document.createElement('img')) : zoomImg;
+            
+            window.Mix01RuleEngine.getHighResUrl(targetEl, src).then(targetUrl => {
+                copyImageToClipboard(targetUrl);
+                sendResponse({ status: "ok" });
+            });
+            return true; // 告知 Chrome 这是一个异步响应
         }
     });
-    // --- 新增：复制图片到剪贴板引擎 (自动转换为 PNG) ---
+
+    // --- 复制图片到剪贴板引擎 (自动转换为 PNG) ---
     async function copyImageToClipboard(url) {
         showToast("⏳ 正在获取并处理原图...");
         try {
@@ -164,16 +165,6 @@
         statusLabel.className = type === 'hd' ? 'status-hd' : 'status-original';
     }
 
-    function getHighResUrl(url) {
-        if (!url || url.startsWith('data:')) return url;
-        let hostname = '';
-        try { hostname = new URL(url).hostname; } catch (e) { return url; }
-        for (const rule of HD_RULES) {
-            if (rule.hosts.test(hostname) && rule.match.test(url)) return url.replace(rule.match, rule.replace);
-        }
-        return url;
-    }
-
     function getImgUnderCursor(clientX, clientY, target) {
         if (target && target.tagName === 'IMG' && target.src) return target;
         const elements = document.elementsFromPoint(clientX, clientY);
@@ -186,7 +177,8 @@
         return null;
     }
 
-    function triggerZoom(target) {
+    // --- 核心改动：异步解析与加载 ---
+    async function triggerZoom(target) {
         if (target === currentHoveredImg && target.src === currentHoveredSrc) return;
         hideViewer(); 
 
@@ -198,6 +190,7 @@
             setStyle(noticeBox, 'display', 'none');
             setStyle(zoomImg, 'display', 'block');
             
+            // 兜底：先显示低清图
             zoomImg.src = target.src;
             setStyle(zoomImg, 'max-width', 'none'); 
             setStyle(zoomImg, 'max-height', 'none');
@@ -213,18 +206,27 @@
             renderViewer(null, cachedRect); 
 
             if (config.loadHD === 'true') {
-                const hdUrl = getHighResUrl(target.src);
-                if (hdUrl !== target.src && !badHdUrls.has(hdUrl)) {
-                    const myTask = hdUrl; 
-                    loadingTask = myTask;
-                    const tempImg = new Image();
-                    tempImg.onload = () => { 
-                        if (loadingTask === myTask && currentHoveredImg === target) {
-                            zoomImg.src = hdUrl; renderViewer(null, cachedRect); 
-                        }
-                    };
-                    tempImg.onerror = () => badHdUrls.add(hdUrl);
-                    tempImg.src = hdUrl;
+                const myTask = target.src; 
+                loadingTask = myTask;
+
+                try {
+                    // 调用原生引擎异步获取高清链接
+                    const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, target.src);
+                    
+                    if (hdUrl && hdUrl !== target.src && !badHdUrls.has(hdUrl)) {
+                        const tempImg = new Image();
+                        tempImg.onload = () => { 
+                            // 确保鼠标还没移走才进行替换
+                            if (loadingTask === myTask && currentHoveredImg === target) {
+                                zoomImg.src = hdUrl; 
+                                renderViewer(null, cachedRect); 
+                            }
+                        };
+                        tempImg.onerror = () => badHdUrls.add(hdUrl);
+                        tempImg.src = hdUrl;
+                    }
+                } catch (error) {
+                    console.warn('Mix01 Engine 解析失败:', error);
                 }
             }
         } else { 
@@ -299,22 +301,18 @@
                 setStyle(zoomImg, 'height', cDH + 'px');
                 setStyle(zoomImg, 'position', 'absolute'); 
 
-                // 【全新逻辑：动态自适应透镜 (Smart Adaptive Lens)】
-                // 1. 动态计算透镜尺寸：最大 350，最小 100，否则紧凑贴合图片尺寸 + 20px 留白
                 let lensW = Math.min(350, Math.max(100, cDW + 20));
                 let lensH = Math.min(350, Math.max(100, cDH + 20));
 
                 setStyle(viewer, 'width', lensW + 'px'); 
                 setStyle(viewer, 'height', lensH + 'px');
 
-                // 2. 透镜本身的游标跟随边界逻辑
                 let vX = clientX + 20, vY = clientY + 20;
                 if (vX + lensW > sW) vX = clientX - lensW - 20;
                 if (vY + lensH > sH) vY = clientY - lensH - 20;
                 setStyle(viewer, 'left', `${vX}px`); setStyle(viewer, 'top', `${vY}px`);
                 setStyle(viewer, 'transform', 'none');
 
-                // 3. UI 样式判定：如果是纯小图（双端均小于350），应用精致对焦框背景
                 if (cDW < 350 && cDH < 350) {
                     setStyle(viewer, 'border', '1px solid rgba(255, 255, 255, 0.2)'); 
                     setStyle(viewer, 'background-image', 'radial-gradient(circle, rgba(20,20,20,1) 0%, rgba(0,0,0,1) 100%)'); 
@@ -325,22 +323,18 @@
                     setStyle(viewer, 'border', '1px solid rgba(255, 255, 255, 0.4)'); 
                 }
 
-                // 4. 重置图片定位状态
                 setStyle(zoomImg, 'right', 'auto'); 
                 setStyle(zoomImg, 'bottom', 'auto');
                 setStyle(zoomImg, 'margin', '0');
 
-                // 5. 核心：分离 X 轴和 Y 轴的滑动逻辑
                 let offsetX = 0, offsetY = 0;
                 
-                // 宽度判定：图宽于透镜则开启滑动，否则绝对居中
                 if (cDW > lensW) {
                     offsetX = -(cDW * xP - lensW / 2);
                 } else {
                     offsetX = (lensW - cDW) / 2;
                 }
                 
-                // 高度判定：图高于透镜则开启滑动，否则绝对居中
                 if (cDH > lensH) {
                     offsetY = -(cDH * yP - lensH / 2);
                 } else {
@@ -357,7 +351,6 @@
             setStyle(viewer, 'background-image', 'none');
             setStyle(zoomImg, 'position', 'absolute'); 
             
-            // 防止小图居中属性泄漏到全局模式
             setStyle(zoomImg, 'right', 'auto'); 
             setStyle(zoomImg, 'bottom', 'auto');
             setStyle(zoomImg, 'margin', '0');
@@ -394,7 +387,6 @@
                 if (vY + cDH > sH) vY = clientY - cDH - 20;
                 setStyle(viewer, 'left', `${vX}px`); setStyle(viewer, 'top', `${vY}px`);
             } else {
-                // 智能避让逻辑 (Smart Dock)
                 setStyle(viewer, 'transform', 'none'); 
                 const margin = 30; 
                 let vX, vY;
