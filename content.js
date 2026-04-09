@@ -27,87 +27,187 @@
     let bgClickCount = 0;
     let bgClickTimer = null;
 
+    // 【新增】本地状态记忆库，解决推特信息流不显示关注状态的问题
+    window.__mix01FollowCache = window.__mix01FollowCache || {};
+
     const modeList = ['partial', 'full-follow', 'full-center'];
     const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
     const badHdUrls = new Set();
 
     const isContextValid = () => !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
 
+    function forceClick(el) {
+        if (!el) return;
+        const opts = { bubbles: true, cancelable: true, view: window };
+        el.dispatchEvent(new MouseEvent('mouseover', opts));
+        el.dispatchEvent(new MouseEvent('mousedown', opts));
+        el.dispatchEvent(new MouseEvent('mouseup', opts));
+        el.dispatchEvent(new MouseEvent('click', opts));
+    }
+
     // ==========================================
-    // 🔥 幽灵点击引擎 2.0：支持状态嗅探与自动处理弹窗
+    // 🔥 幽灵点击引擎 5.0：作者 1对1 锁定与状态记忆
     // ==========================================
     const actionAdapters = {
         'twitter_x': {
             match: /(twitter\.com|x\.com)/,
             getContainer: (img) => img.closest('article') || document.body,
             getStates: (container) => {
-                const isLiked = !!container.querySelector('[data-testid="unlike"]');
-                const isFollowed = !!document.querySelector('[data-testid$="-unfollow"]');
-                return { isLiked, isFollowed };
+                const likeBtn = container.querySelector('[data-testid="unlike"]');
+                let isLiked = !!likeBtn;
+
+                // 提取当前推文作者的 @ID
+                let author = "";
+                const userNameEl = container.querySelector('[data-testid="User-Name"]');
+                if (userNameEl) {
+                    const match = userNameEl.textContent.match(/@[\w_]+/);
+                    if (match) author = match[0];
+                }
+
+                let isFollowed = null;
+                // 先尝试读取个人主页 (Profile) 上的直接状态
+                const profileScope = document.querySelector('[data-testid="primaryColumn"]');
+                if (profileScope) {
+                    if (profileScope.querySelector('[data-testid$="-unfollow"]')) isFollowed = true;
+                    else if (profileScope.querySelector('[data-testid$="-follow"]')) isFollowed = false;
+                }
+
+                // 如果读取不到（比如在时间线），且我们缓存里有他，读取缓存
+                if (isFollowed === null && author && window.__mix01FollowCache[author] !== undefined) {
+                    isFollowed = window.__mix01FollowCache[author];
+                }
+
+                return { isLiked, isFollowed, authorName: author };
             },
             like: async (container) => {
-                const btn = container.querySelector('[data-testid="like"], [data-testid="unlike"]');
-                if (btn) { btn.click(); return true; }
-                return false;
+                const btnLike = container.querySelector('[data-testid="like"]');
+                const btnUnlike = container.querySelector('[data-testid="unlike"]');
+                if (btnUnlike) { forceClick(btnUnlike); return false; }
+                if (btnLike) { forceClick(btnLike); return true; }
+                return null;
             },
             follow: async (container) => {
-                const unfollowBtn = document.querySelector('[data-testid$="-unfollow"]');
-                const followBtn = document.querySelector('[data-testid$="-follow"]');
-                
-                if (unfollowBtn) {
-                    unfollowBtn.click(); // 触发取消关注
-                    
-                    // 【核心魔法】：等待 Twitter 的二次确认弹窗出现，并自动将其击杀
-                    await new Promise(resolve => setTimeout(resolve, 150));
-                    
+                let author = "";
+                const userNameEl = container.querySelector('[data-testid="User-Name"]');
+                if (userNameEl) {
+                    const match = userNameEl.textContent.match(/@[\w_]+/);
+                    if (match) author = match[0];
+                }
+
+                // 1. 如果在个人主页有直达按钮，直接点
+                const profileScope = document.querySelector('[data-testid="primaryColumn"]');
+                if (profileScope) {
+                    const btnUnfollow = profileScope.querySelector('[data-testid$="-unfollow"]');
+                    const btnFollow = profileScope.querySelector('[data-testid$="-follow"]');
+                    if (btnUnfollow) {
+                        forceClick(btnUnfollow);
+                        await new Promise(r => setTimeout(r, 150));
+                        const confirm = document.querySelector('[data-testid="confirmationSheetConfirm"]');
+                        if (confirm) forceClick(confirm);
+                        if (author) window.__mix01FollowCache[author] = false;
+                        return false;
+                    } else if (btnFollow) {
+                        forceClick(btnFollow);
+                        if (author) window.__mix01FollowCache[author] = true;
+                        return true;
+                    }
+                }
+
+                // 2. 在时间线，必须找到当前推文的专属 "..." 菜单
+                const caret = container.querySelector('[data-testid="caret"]');
+                if (!caret) return null;
+
+                forceClick(caret); 
+                await new Promise(r => setTimeout(r, 150)); // 等待菜单渲染
+
+                const menus = Array.from(document.querySelectorAll('[role="menu"]'));
+                const menu = menus[menus.length - 1]; // 通常最新弹出的菜单在最上面
+                if (!menu) return null;
+
+                const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+                let targetBtn = null;
+                let willFollow = true;
+
+                for (let item of items) {
+                    const text = item.textContent || '';
+                    // 智能识别菜单内容，判断是关注还是取消关注
+                    if (/Unfollow|取消关注/i.test(text)) {
+                        targetBtn = item;
+                        willFollow = false;
+                        break;
+                    } else if (/Follow|关注/i.test(text)) {
+                        targetBtn = item;
+                        willFollow = true;
+                        break;
+                    }
+                }
+
+                if (!targetBtn) {
+                    forceClick(document.body); // 没找到就关闭菜单
+                    return null;
+                }
+
+                forceClick(targetBtn); 
+
+                // 如果是取消关注，击杀二次弹窗
+                if (!willFollow) {
+                    await new Promise(r => setTimeout(r, 200));
                     const confirmBtn = document.querySelector('[data-testid="confirmationSheetConfirm"]');
                     if (confirmBtn) {
-                        confirmBtn.click();
+                        forceClick(confirmBtn);
                     } else {
-                        // 兜底方案：寻找对话框中的取消按钮
                         const dialog = document.querySelector('[role="dialog"], [data-testid="mask"]');
                         if (dialog) {
                             const btns = Array.from(dialog.querySelectorAll('[role="button"]'));
-                            const target = btns.find(b => /Unfollow|取消关注/i.test(b.textContent));
-                            if (target) target.click();
+                            const confirmTarget = btns.find(b => /Unfollow|取消关注|确认/i.test(b.textContent));
+                            if (confirmTarget) forceClick(confirmTarget);
                         }
                     }
-                    return true;
-                } else if (followBtn) {
-                    followBtn.click(); // 触发关注
-                    return true;
                 }
-                return false;
+
+                // 更新内存缓存库，确保换图后依然能认出他
+                if (author) {
+                    window.__mix01FollowCache[author] = willFollow;
+                }
+
+                return willFollow;
             }
         },
         'pixiv': {
             match: /pixiv\.net/,
             getContainer: (img) => document.body,
             getStates: (container) => {
-                // Pixiv 状态嗅探 (尽量读取 aria 属性或高亮颜色)
                 const likeBtn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], [data-click-label="like"] button, button svg path[d*="M12"]')?.closest('button');
                 let isLiked = false;
                 if (likeBtn) {
-                    isLiked = likeBtn.innerHTML.includes('rgb(255, 64, 96)') || 
-                              likeBtn.innerHTML.includes('#FF4060') || 
-                              likeBtn.getAttribute('aria-pressed') === 'true';
+                    isLiked = likeBtn.innerHTML.includes('rgb(255, 64, 96)') || likeBtn.innerHTML.includes('#FF4060') || likeBtn.getAttribute('aria-pressed') === 'true';
                 }
                 const followBtn = container.querySelector('.gtm-main-follow, [data-click-action="follow"], [data-click-label="follow"]');
                 let isFollowed = false;
                 if (followBtn) {
                     isFollowed = /已关注|Following/i.test(followBtn.textContent) || followBtn.dataset.clickAction === 'unfollow' || followBtn.getAttribute('aria-pressed') === 'true';
                 }
-                return { isLiked, isFollowed };
+                
+                let authorName = container.querySelector('.user-name, [data-click-label="creator"]')?.textContent || '';
+                return { isLiked, isFollowed, authorName };
             },
             like: async (container) => {
                 const btn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], [data-click-label="like"] button, button svg path[d*="M12"]')?.closest('button');
-                if (btn) { btn.click(); return true; }
-                return false;
+                if (btn) {
+                    const isCurrentlyLiked = btn.innerHTML.includes('rgb(255, 64, 96)') || btn.innerHTML.includes('#FF4060') || btn.getAttribute('aria-pressed') === 'true';
+                    forceClick(btn);
+                    return !isCurrentlyLiked;
+                }
+                return null;
             },
             follow: async (container) => {
                 const btn = container.querySelector('.gtm-main-follow, [data-click-action="follow"], [data-click-label="follow"]');
-                if (btn) { btn.click(); return true; }
-                return false;
+                if (btn) {
+                    const isCurrentlyFollowed = /已关注|Following/i.test(btn.textContent) || btn.dataset.clickAction === 'unfollow' || btn.getAttribute('aria-pressed') === 'true';
+                    forceClick(btn);
+                    return !isCurrentlyFollowed;
+                }
+                return null;
             }
         }
     };
@@ -126,23 +226,25 @@
         }
 
         const container = adapter.getContainer(currentHoveredImg) || document.body;
-        const initialStates = adapter.getStates(container);
-        let success = false;
 
         if (actionType === 'like') {
-            success = await adapter.like(container);
-            if (success) showToast(initialStates.isLiked ? "🤍 已取消喜欢" : "❤️ 已喜欢");
+            const newState = await adapter.like(container);
+            if (newState !== null) {
+                showToast(newState ? "❤️ 已喜欢" : "🤍 已取消喜欢");
+            } else {
+                showToast("❌ 未找到喜欢的操作按钮");
+            }
         } else {
-            success = await adapter.follow(container);
-            if (success) showToast(initialStates.isFollowed ? "👋 已取消关注" : "🫂 已成功关注");
+            const newState = await adapter.follow(container);
+            if (newState !== null) {
+                showToast(newState ? "🫂 已成功关注" : "👋 已取消关注");
+            } else {
+                showToast("❌ 未找到当前作者的关注按钮");
+            }
         }
 
-        if (!success) {
-            showToast("❌ 未找到对应的操作按钮");
-        } else {
-            // 动作执行完毕后，延迟 300 毫秒重新读取 DOM，刷新底部 HUD 状态
-            setTimeout(updateImmersiveHUD, 300);
-        }
+        // 延迟刷新 HUD 状态
+        setTimeout(updateImmersiveHUD, 300);
     }
     // ==========================================
 
@@ -262,6 +364,7 @@
     const styleBlock = document.createElement('style');
     styleBlock.innerHTML = `
         .kbd-btn { background:rgba(255,255,255,0.2); padding:2px 6px; border-radius:4px; font-family: monospace; font-weight: bold; margin: 0 2px;}
+        .author-tag { color: #1da1f2; font-weight: bold; margin: 0 4px; }
     `;
     document.head.appendChild(styleBlock);
 
@@ -284,12 +387,12 @@
     };
     initViewer();
 
-    // 【新增】统一更新 HUD 状态的引擎
     function updateImmersiveHUD() {
         if (!config.isImmersive) return;
         
         let likeText = "喜欢"; let likeIcon = "🤍";
         let followText = "关注"; let followIcon = "👤";
+        let authorDisplay = "";
 
         if (currentHoveredImg) {
             const host = window.location.hostname;
@@ -304,9 +407,16 @@
                     likeText = states.isLiked ? "已喜欢" : "未喜欢";
                     likeIcon = states.isLiked ? "❤️" : "🤍";
                 }
+                
+                // 处理关注状态显示
                 if (states.isFollowed !== null) {
                     followText = states.isFollowed ? "已关注" : "未关注";
                     followIcon = states.isFollowed ? "🫂" : "👤";
+                }
+
+                // 注入当前锁定的作者ID
+                if (states.authorName) {
+                    authorDisplay = `<span class="author-tag">${states.authorName}</span>`;
                 }
             }
         }
@@ -314,7 +424,7 @@
         const hintKbdLike = (keys.like || 'l').toUpperCase();
         const hintKbdFollow = (keys.follow || 'f').toUpperCase();
         
-        immersiveHint.innerHTML = `⌨️ 左右切换 &nbsp;|&nbsp; 💾 下载(<kbd class="kbd-btn">S</kbd>) &nbsp;|&nbsp; ${likeIcon} ${likeText}(<kbd class="kbd-btn">${hintKbdLike}</kbd>) &nbsp;&nbsp; ${followIcon} ${followText}(<kbd class="kbd-btn">${hintKbdFollow}</kbd>) &nbsp;|&nbsp; ❌ 双击退出`;
+        immersiveHint.innerHTML = `⌨️ 左右切换 &nbsp;|&nbsp; 💾 下载(<kbd class="kbd-btn">S</kbd>) &nbsp;|&nbsp; ${likeIcon} ${likeText}(<kbd class="kbd-btn">${hintKbdLike}</kbd>) &nbsp;&nbsp; ${followIcon} ${authorDisplay}${followText}(<kbd class="kbd-btn">${hintKbdFollow}</kbd>) &nbsp;|&nbsp; ❌ 双击退出`;
     }
 
     function setStyle(el, prop, val) { el.style.setProperty(prop, val, 'important'); }
@@ -322,7 +432,7 @@
     function handleImmersiveActivity() {
         if (!config.isImmersive || viewer.style.display !== 'block') return;
         
-        updateImmersiveHUD(); // 唤醒时实时更新状态
+        updateImmersiveHUD(); 
         
         setStyle(viewer, 'cursor', 'default');
         setStyle(zoomImg, 'cursor', 'default');
@@ -340,7 +450,7 @@
 
         hintFadeTimer = setTimeout(() => {
             setStyle(immersiveHint, 'opacity', '0');
-        }, 3000); 
+        }, 3500); 
     }
 
     function exitImmersiveMode() {
