@@ -15,7 +15,8 @@ const defaultConfigs = {
     keyImmersive: 'ctrl+f12',
     keyLike: 'l',
     keyFollow: 'f',
-    keyPlayVideo: 'q' // 新增的视频引擎快捷键
+    keyPlayVideo: 'q',
+    keyDownloadVideo: 'd'
 };
 
 const ids = Object.keys(defaultConfigs);
@@ -28,6 +29,7 @@ const msg = document.getElementById('saveMsg');
 
 const isImmersiveEl = document.getElementById('isImmersive');
 const viewModeRow = document.getElementById('viewModeRow');
+
 function updateViewModeUI() {
     if (isImmersiveEl.checked) {
         viewModeRow.style.opacity = '0.4';
@@ -51,6 +53,7 @@ chrome.storage.local.get(ids, (res) => {
 });
 
 agreeBtn.addEventListener('click', () => { chrome.storage.local.set({ hasAgreed: true }, () => { overlay.style.display = 'none'; agreedStatus.style.display = 'block'; }); });
+
 saveBtn.addEventListener('click', () => {
     const data = {};
     ids.forEach(id => {
@@ -61,4 +64,5 @@ saveBtn.addEventListener('click', () => {
     });
     chrome.storage.local.set(data, () => { msg.style.display = 'block'; setTimeout(() => { msg.style.display = 'none'; }, 1500); });
 });
+
 resetBtn.addEventListener('click', () => { chrome.storage.local.set({ ...defaultConfigs, hasAgreed: true }, () => { window.location.reload(); }); });
