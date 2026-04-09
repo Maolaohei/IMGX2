@@ -1,4 +1,3 @@
-// content.js
 (function () {
     if (window.__imgZoomProInitialized) return;
     window.__imgZoomProInitialized = true;
@@ -44,7 +43,6 @@
     window.__mix01UserPaused = false; 
     window.__mix01FollowCache = window.__mix01FollowCache || {};
     
-    // 前端交互状态强制缓存墙，抵御 React/Vue 的 DOM 延迟
     window.__mix01LikeMediaCache = window.__mix01LikeMediaCache || {}; 
     window.__mix01FollowAuthorCache = window.__mix01FollowAuthorCache || {}; 
 
@@ -176,7 +174,6 @@
         } catch (err) { showToast("❌ 获取图片失败，存在跨域限制"); }
     }
 
-    // 【终极后台安全下载通道】：不阻断前台操作，无视跨域防盗链
     function downloadImage(url) {
         showToast("⏳ 正在打通后台进行安全下载...");
         try {
@@ -196,12 +193,10 @@
     const viewer = document.createElement('div'); viewer.id = 'img-zoom-pro-viewer-xyz';
     const zoomImg = document.createElement('img'); zoomImg.id = 'zoom-img-xyz';
     
-    const zoomVideo = document.createElement('video'); 
-    zoomVideo.id = 'zoom-video-xyz';
-    zoomVideo.controls = false;
-    zoomVideo.autoplay = true;
-    zoomVideo.loop = true;
-    zoomVideo.muted = false; // 音画同步解禁声音
+    // 【核心修复】：彻底砍掉没用的 zoomVideo，专心用 Canvas 投屏
+    const zoomCanvas = document.createElement('canvas'); 
+    zoomCanvas.id = 'zoom-canvas-xyz';
+    const canvasCtx = zoomCanvas.getContext('2d', { alpha: false });
 
     const loadingSpinner = document.createElement('div'); 
     loadingSpinner.id = 'zoom-loading-xyz';
@@ -222,18 +217,6 @@
         .kbd-btn { background:rgba(255,255,255,0.2); padding:2px 6px; border-radius:4px; font-family: monospace; font-weight: bold; margin: 0 2px;}
         .author-tag { color: #1da1f2; font-weight: bold; margin: 0 4px; }
         .hud-status-item { font-weight: bold; transition: color 0.3s ease; display: inline-block; }
-        
-        #zoom-video-xyz {
-            display: none !important;
-            position: absolute !important;
-            max-width: none !important;
-            max-height: none !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            border: none !important;
-            transition: transform 0.1s cubic-bezier(0.2, 0, 0.2, 1) !important;
-            box-sizing: border-box !important;
-        }
     `;
     document.head.appendChild(styleBlock);
 
@@ -252,7 +235,7 @@
         });
 
         viewer.appendChild(zoomImg); 
-        viewer.appendChild(zoomVideo); 
+        viewer.appendChild(zoomCanvas); // 【修复挂载】：确保 Canvas 被添加到视图层
         viewer.appendChild(loadingSpinner);
         viewer.appendChild(progressContainer); 
         viewer.appendChild(statusLabel); 
@@ -269,7 +252,6 @@
             const pos = (e.clientX - rect.left) / rect.width;
             if (currentHoveredMedia.duration) {
                 currentHoveredMedia.currentTime = pos * currentHoveredMedia.duration;
-                zoomVideo.currentTime = currentHoveredMedia.currentTime; // 必须同步克隆层的进度
                 progressBar.style.setProperty('width', `${pos * 100}%`, 'important');
             }
             e.stopPropagation(); 
@@ -288,7 +270,6 @@
             const container = adapter.getContainer ? adapter.getContainer(currentHoveredMedia) : document.body;
             const states = adapter.getStates(container);
             
-            // 使用内存缓存覆盖可能落后的 DOM 状态
             if (window.__mix01LikeMediaCache[currentHoveredSrc] !== undefined) {
                 states.isLiked = window.__mix01LikeMediaCache[currentHoveredSrc];
             }
@@ -355,7 +336,7 @@
         hideCursorTimer = setTimeout(() => {
             setStyle(viewer, 'cursor', 'none');
             setStyle(zoomImg, 'cursor', 'none');
-            setStyle(zoomVideo, 'cursor', 'none');
+            setStyle(zoomCanvas, 'cursor', 'none');
         }, 1500);
 
         hintFadeTimer = setTimeout(() => {
@@ -373,7 +354,7 @@
     function hideViewer() {
         setStyle(viewer, 'display', 'none');
         setStyle(zoomImg, 'display', 'none');
-        setStyle(zoomVideo, 'display', 'none'); 
+        setStyle(zoomCanvas, 'display', 'none'); 
         setStyle(loadingSpinner, 'display', 'none');
         setStyle(progressContainer, 'display', 'none'); 
         isHdLoadingState = false; 
@@ -385,10 +366,6 @@
         }
         isCanvasEngineRunning = false;
         cancelAnimationFrame(canvasRafId);
-
-        zoomVideo.pause();
-        zoomVideo.srcObject = null;
-        zoomVideo.src = '';
 
         currentHoveredMedia = null;
         currentHoveredSrc = null;
@@ -483,7 +460,7 @@
         let found = null;
         for (let i = 0; i < elements.length; i++) {
             const el = elements[i];
-            if (el.id === 'img-zoom-pro-viewer-xyz' || el.id === 'zoom-img-xyz' || el.id === 'zoom-video-xyz' || el.id === 'mix01-video-progress-container' || el.id === 'mix01-video-progress-bar') continue;
+            if (el.id === 'img-zoom-pro-viewer-xyz' || el.id === 'zoom-img-xyz' || el.id === 'zoom-canvas-xyz' || el.id === 'mix01-video-progress-container' || el.id === 'mix01-video-progress-bar') continue;
             if ((el.tagName === 'IMG' || el.tagName === 'VIDEO') && (el.src || el.tagName === 'VIDEO')) {
                 found = el;
                 break;
@@ -516,32 +493,15 @@
 
             if (isVideo) {
                 setStyle(zoomImg, 'display', 'none');
-                setStyle(zoomVideo, 'display', 'block');
+                setStyle(zoomCanvas, 'display', 'block');
                 setStyle(loadingSpinner, 'display', 'none');
                 setStyle(progressContainer, 'display', 'block'); 
                 isHdLoadingState = false;
                 
-                try {
-                    if (target.src && target.src.startsWith('blob:')) {
-                        if (target.captureStream) {
-                            zoomVideo.srcObject = target.captureStream();
-                        } else if (target.mozCaptureStream) {
-                            zoomVideo.srcObject = target.mozCaptureStream();
-                        } else {
-                            zoomVideo.src = target.src;
-                        }
-                    } else {
-                        zoomVideo.srcObject = null;
-                        zoomVideo.src = target.src || target.currentSrc;
-                    }
-                } catch (e) {
-                    zoomVideo.srcObject = null;
-                    zoomVideo.src = target.src || target.currentSrc;
-                }
-                
-                zoomVideo.currentTime = target.currentTime || 0;
+                zoomCanvas.width = target.videoWidth || target.clientWidth || 800;
+                zoomCanvas.height = target.videoHeight || target.clientHeight || 600;
+
                 target.muted = false; 
-                zoomVideo.muted = false;
                 
                 let initialPlayPromise = target.play();
                 if (initialPlayPromise !== undefined) {
@@ -552,7 +512,6 @@
                                 setStyle(loadingSpinner, 'display', 'none');
                                 if (!window.__mix01UserPaused) {
                                     target.play().catch(()=>{});
-                                    zoomVideo.play().catch(()=>{});
                                 }
                             }, { once: true });
                         }
@@ -566,22 +525,35 @@
                     
                     if (target.paused && target.readyState >= 3 && !window.__mix01UserPaused) {
                         let playPromise = target.play();
-                        if (playPromise !== undefined) { playPromise.catch(()=>{}); }
-                        zoomVideo.play().catch(()=>{});
+                        if (playPromise !== undefined) {
+                            playPromise.catch(()=>{}); 
+                        }
                     }
                     
+                    if (target.videoWidth && zoomCanvas.width !== target.videoWidth) {
+                        zoomCanvas.width = target.videoWidth;
+                        zoomCanvas.height = target.videoHeight;
+                        renderViewer(null, cachedRect);
+                    }
+
                     if (target.duration) {
                         const percent = (target.currentTime / target.duration) * 100;
                         progressBar.style.setProperty('width', `${percent}%`, 'important');
                     }
                     
+                    canvasCtx.drawImage(target, 0, 0, zoomCanvas.width, zoomCanvas.height);
                     canvasRafId = requestAnimationFrame(drawLoop);
                 }
                 drawLoop();
 
-                zoomVideo.onloadedmetadata = () => {
-                    if (currentHoveredMedia === target) renderViewer(null, cachedRect);
-                };
+                // 原视频元数据加载完成后重新调整 Canvas 大小
+                target.addEventListener('loadedmetadata', () => {
+                    if (currentHoveredMedia === target) {
+                        zoomCanvas.width = target.videoWidth || target.clientWidth || 800;
+                        zoomCanvas.height = target.videoHeight || target.clientHeight || 600;
+                        renderViewer(null, cachedRect);
+                    }
+                });
 
                 renderViewer(null, cachedRect);
                 setStyle(viewer, 'display', 'block');
@@ -589,9 +561,8 @@
                 return;
             } 
             else {
-                setStyle(zoomVideo, 'display', 'none');
+                setStyle(zoomCanvas, 'display', 'none');
                 setStyle(progressContainer, 'display', 'none');
-                zoomVideo.pause();
                 setStyle(zoomImg, 'display', 'block');
                 zoomImg.src = target.src;
                 setStyle(zoomImg, 'max-width', 'none'); 
@@ -725,11 +696,12 @@
         const sW = window.innerWidth, sH = window.innerHeight;
         let cDW = 0, cDH = 0;
 
+        // 【核心修复】：挂载和定位正确的活跃媒体资源 (Canvas)
         const isVideo = currentHoveredMedia.tagName === 'VIDEO';
-        const activeMedia = isVideo ? zoomVideo : zoomImg; 
+        const activeMedia = isVideo ? zoomCanvas : zoomImg; 
 
-        const nw = isVideo ? (activeMedia.videoWidth || rect.width || 1) : (activeMedia.naturalWidth || rect.width || 1);
-        const nh = isVideo ? (activeMedia.videoHeight || rect.height || 1) : (activeMedia.naturalHeight || rect.height || 1);
+        const nw = isVideo ? (activeMedia.width || rect.width || 1) : (activeMedia.naturalWidth || rect.width || 1);
+        const nh = isVideo ? (activeMedia.height || rect.height || 1) : (activeMedia.naturalHeight || rect.height || 1);
         const naturalRatio = nw / nh;
 
         if (config.isImmersive) {
@@ -875,7 +847,7 @@
             return adapter.getGalleryImages();
         }
         return Array.from(document.querySelectorAll('img, video')).filter(media => {
-            if (media.id === 'zoom-img-xyz' || media.id === 'zoom-video-xyz') return false;
+            if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz') return false;
             const rect = media.getBoundingClientRect();
             return rect.width > 50 && rect.height > 50 && window.getComputedStyle(media).display !== 'none';
         });
@@ -939,7 +911,6 @@
                     let playPromise = currentHoveredMedia.play();
                     if (playPromise !== undefined) {
                         playPromise.then(() => {
-                            zoomVideo.play().catch(()=>{});
                             showToast("▶️ 继续播放");
                             updateImmersiveHUD();
                         }).catch(error => {
@@ -950,7 +921,6 @@
                 } else {
                     window.__mix01UserPaused = true;
                     currentHoveredMedia.pause();
-                    zoomVideo.pause();
                     showToast("⏸️ 已暂停");
                     updateImmersiveHUD();
                 }
@@ -1007,7 +977,7 @@
                 if (currentHoveredMedia.tagName === 'VIDEO') {
                     showToast("⚠️ 视频请使用 D 键提取直链下载");
                 } else if (zoomImg.src) {
-                    downloadImage(zoomImg.src); // 已经交给了 background.js，瞬间返回不卡图
+                    downloadImage(zoomImg.src);
                 }
                 e.preventDefault(); return; 
             }
