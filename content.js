@@ -17,6 +17,12 @@
     let loadingTask = null;
     let rAF_ID = null; 
 
+    // 【新增】控制小图优化“自适应放大框”的状态变量
+    let isSmallImageOptimized = false;
+    let customLensWidth = null;
+    let customLensHeight = null;
+    let isZoomManuallyChanged = false;
+
     const modeList = ['partial', 'full-follow', 'full-center'];
     const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
     const badHdUrls = new Set();
@@ -49,24 +55,17 @@
         });
     }
 
-    // --- 消息监听：接入异步 Mix01RuleEngine 引擎 ---
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request.action === "getHDUrl") {
             const src = request.clickedUrl || zoomImg.src;
             const targetEl = request.clickedUrl ? (currentHoveredSrc === request.clickedUrl ? currentHoveredImg : document.createElement('img')) : zoomImg;
-            
             if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
-                window.Mix01RuleEngine.getHighResUrl(targetEl, src).then(targetUrl => {
-                    sendResponse({ url: targetUrl });
-                });
-            } else {
-                sendResponse({ url: src });
-            }
-            return true; // 告知 Chrome 这是一个异步响应
+                window.Mix01RuleEngine.getHighResUrl(targetEl, src).then(targetUrl => sendResponse({ url: targetUrl }));
+            } else sendResponse({ url: src });
+            return true;
         } else if (request.action === "copyHDUrl") {
             const src = request.clickedUrl || zoomImg.src;
             const targetEl = request.clickedUrl ? (currentHoveredSrc === request.clickedUrl ? currentHoveredImg : document.createElement('img')) : zoomImg;
-            
             if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
                 window.Mix01RuleEngine.getHighResUrl(targetEl, src).then(targetUrl => {
                     copyImageToClipboard(targetUrl);
@@ -76,74 +75,46 @@
                 copyImageToClipboard(src);
                 sendResponse({ status: "ok" });
             }
-            return true; // 告知 Chrome 这是一个异步响应
+            return true;
         }
     });
 
-    // --- 复制图片到剪贴板引擎 (自动转换为 PNG) ---
     async function copyImageToClipboard(url) {
         showToast("⏳ 正在获取并处理原图...");
         try {
             const response = await fetch(url);
             const blob = await response.blob();
-            
-            // 浏览器剪贴板 API 严格要求 image/png 格式，其他格式必须用 Canvas 转换
             const img = new Image();
             const blobUrl = URL.createObjectURL(blob);
-            
             img.onload = () => {
                 const canvas = document.createElement('canvas');
-                canvas.width = img.width;
-                canvas.height = img.height;
+                canvas.width = img.width; canvas.height = img.height;
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(img, 0, 0);
-                
                 canvas.toBlob(async (pngBlob) => {
                     try {
-                        await navigator.clipboard.write([
-                            new ClipboardItem({ 'image/png': pngBlob })
-                        ]);
+                        await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
                         showToast("✅ 已成功复制原图到剪切板！");
-                    } catch (err) {
-                        console.error("Clipboard write failed:", err);
-                        showToast("❌ 写入失败，请确保页面保持聚焦");
-                    }
+                    } catch (err) { showToast("❌ 写入失败，请确保页面保持聚焦"); }
                     URL.revokeObjectURL(blobUrl);
                 }, 'image/png');
             };
-            
-            img.onerror = () => {
-                showToast("❌ 图片渲染解析失败");
-                URL.revokeObjectURL(blobUrl);
-            };
-            
+            img.onerror = () => { showToast("❌ 图片渲染解析失败"); URL.revokeObjectURL(blobUrl); };
             img.src = blobUrl;
-
-        } catch (err) {
-            console.error("Fetch failed:", err);
-            showToast("❌ 获取图片失败，可能存在跨域限制");
-        }
+        } catch (err) { showToast("❌ 获取图片失败，可能存在跨域限制"); }
     }
 
-    const viewer = document.createElement('div');
-    viewer.id = 'img-zoom-pro-viewer-xyz';
-    const zoomImg = document.createElement('img');
-    zoomImg.id = 'zoom-img-xyz';
-    const statusLabel = document.createElement('div');
-    statusLabel.id = 'img-zoom-pro-status-label';
-    const toast = document.createElement('div');
-    toast.className = 'img-zoom-toast-xyz';
-    const noticeBox = document.createElement('div');
-    noticeBox.className = 'notice-container-xyz';
+    const viewer = document.createElement('div'); viewer.id = 'img-zoom-pro-viewer-xyz';
+    const zoomImg = document.createElement('img'); zoomImg.id = 'zoom-img-xyz';
+    const statusLabel = document.createElement('div'); statusLabel.id = 'img-zoom-pro-status-label';
+    const toast = document.createElement('div'); toast.className = 'img-zoom-toast-xyz';
+    const noticeBox = document.createElement('div'); noticeBox.className = 'notice-container-xyz';
     noticeBox.innerHTML = '⚠️ 未同意协议<br>请点击右上角图标同意并开启功能';
 
     const initViewer = () => {
         if (!document.body) { setTimeout(initViewer, 100); return; }
-        viewer.appendChild(zoomImg);
-        viewer.appendChild(statusLabel);
-        viewer.appendChild(noticeBox);
-        document.body.appendChild(viewer);
-        document.body.appendChild(toast);
+        viewer.appendChild(zoomImg); viewer.appendChild(statusLabel); viewer.appendChild(noticeBox);
+        document.body.appendChild(viewer); document.body.appendChild(toast);
     };
     initViewer();
 
@@ -155,20 +126,22 @@
         currentHoveredSrc = null;
         cachedRect = null; 
         loadingTask = null;
+        // 【复位状态】
+        isSmallImageOptimized = false;
+        customLensWidth = null;
+        customLensHeight = null;
+        isZoomManuallyChanged = false;
         if (rAF_ID) cancelAnimationFrame(rAF_ID);
     }
 
     function showToast(text) {
         clearTimeout(window.zoomToastTimer);
-        toast.innerText = text; 
-        toast.classList.add('show');
+        toast.innerText = text; toast.classList.add('show');
         window.zoomToastTimer = setTimeout(() => { toast.classList.remove('show'); }, 1200);
     }
 
     function updateStatus(type, currentW, currentH) {
-        if (!config.showStatus || (currentW < 300 || currentH < 200)) {
-            setStyle(statusLabel, 'display', 'none'); return;
-        }
+        if (!config.showStatus || (currentW < 300 || currentH < 200)) { setStyle(statusLabel, 'display', 'none'); return; }
         setStyle(statusLabel, 'display', 'block');
         statusLabel.innerText = type === 'hd' ? '高清图放大' : '原图放大';
         statusLabel.className = type === 'hd' ? 'status-hd' : 'status-original';
@@ -186,7 +159,6 @@
         return null;
     }
 
-    // --- 核心改动：异步解析与加载 ---
     async function triggerZoom(target) {
         if (target === currentHoveredImg && target.src === currentHoveredSrc) return;
         hideViewer(); 
@@ -194,20 +166,24 @@
         currentHoveredImg = target;
         currentHoveredSrc = target.src;
         cachedRect = target.getBoundingClientRect(); 
+        
+        // 【初始化本次 Hover 状态】
+        isSmallImageOptimized = false;
+        customLensWidth = null;
+        customLensHeight = null;
+        isZoomManuallyChanged = false;
 
         if (config.hasAgreed) {
             setStyle(noticeBox, 'display', 'none');
             setStyle(zoomImg, 'display', 'block');
-            
-            // 兜底：先显示低清图
             zoomImg.src = target.src;
             setStyle(zoomImg, 'max-width', 'none'); 
             setStyle(zoomImg, 'max-height', 'none');
 
             if (config.smallImageOptimization) {
-                if (cachedRect.width <= 50 && cachedRect.height <= 50) activeZoom = 9.0;
-                else if (cachedRect.width <= 100 && cachedRect.height <= 100) activeZoom = 6.0;
-                else activeZoom = config.zoom;
+                if (cachedRect.width <= 50 && cachedRect.height <= 50) { activeZoom = 9.0; isSmallImageOptimized = true; }
+                else if (cachedRect.width <= 100 && cachedRect.height <= 100) { activeZoom = 6.0; isSmallImageOptimized = true; }
+                else { activeZoom = config.zoom; }
             } else {
                 activeZoom = config.zoom;
             }
@@ -219,15 +195,32 @@
                 loadingTask = myTask;
 
                 try {
-                    // 调用原生引擎异步获取高清链接
                     if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
                         const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, target.src);
-                        
                         if (hdUrl && hdUrl !== target.src && !badHdUrls.has(hdUrl)) {
                             const tempImg = new Image();
                             tempImg.onload = () => { 
-                                // 确保鼠标还没移走才进行替换
                                 if (loadingTask === myTask && currentHoveredImg === target) {
+                                    
+                                    // 【核心逻辑】：小图优化模式下，高清图加载后自适应放大框
+                                    if (config.mode === 'partial' && isSmallImageOptimized && !isZoomManuallyChanged) {
+                                        const nw = tempImg.naturalWidth;
+                                        const nh = tempImg.naturalHeight;
+                                        const defaultMax = 350; // 原有放大框的死板上限
+                                        
+                                        if (nw > defaultMax || nh > defaultMax) {
+                                            // 限制最大不能超过屏幕的 90%，防止框大到看不到边界
+                                            const maxW = window.innerWidth * 0.9;
+                                            const maxH = window.innerHeight * 0.9;
+                                            
+                                            customLensWidth = Math.min(nw, maxW);
+                                            customLensHeight = Math.min(nh, maxH);
+                                            
+                                            // 强行把当前倍数调整为“1:1 完美展现原图大小”的倍数
+                                            activeZoom = nw / (cachedRect.width || 1);
+                                        }
+                                    }
+
                                     zoomImg.src = hdUrl; 
                                     renderViewer(null, cachedRect); 
                                 }
@@ -236,14 +229,10 @@
                             tempImg.src = hdUrl;
                         }
                     }
-                } catch (error) {
-                    console.warn('Mix01 Engine 解析失败:', error);
-                }
+                } catch (error) { console.warn('Mix01 Engine 解析失败:', error); }
             }
         } else { 
-            setStyle(zoomImg, 'display', 'none');
-            setStyle(statusLabel, 'display', 'none');
-            setStyle(noticeBox, 'display', 'block'); 
+            setStyle(zoomImg, 'display', 'none'); setStyle(statusLabel, 'display', 'none'); setStyle(noticeBox, 'display', 'block'); 
         }
         setStyle(viewer, 'display', 'block');
     }
@@ -255,23 +244,17 @@
 
     document.addEventListener('mousemove', (e) => {
         window.lastMouseX = e.clientX; window.lastMouseY = e.clientY;
-
         const img = getImgUnderCursor(e.clientX, e.clientY, e.target);
-
         if (img && (img !== currentHoveredImg || img.src !== currentHoveredSrc)) {
-            triggerZoom(img);
-            return;
+            triggerZoom(img); return;
         }
 
         if (currentHoveredImg && viewer.style.display === 'block' && cachedRect) {
-            if (img === currentHoveredImg) {
-                cachedRect = currentHoveredImg.getBoundingClientRect();
-            } else {
-                // 【已修复】：严格判定边界，移除 5px 的 pad 容错
+            if (img === currentHoveredImg) cachedRect = currentHoveredImg.getBoundingClientRect();
+            else {
                 if (e.clientX < cachedRect.left || e.clientX > cachedRect.right || 
                     e.clientY < cachedRect.top || e.clientY > cachedRect.bottom) {
-                    hideViewer(); 
-                    return;
+                    hideViewer(); return;
                 }
             }
             if (rAF_ID) cancelAnimationFrame(rAF_ID);
@@ -281,17 +264,12 @@
 
     document.addEventListener('mouseout', (e) => { 
         if (e.target === currentHoveredImg) {
-            if (e.relatedTarget && currentHoveredImg.contains(e.relatedTarget)) {
-                return;
-            }
+            if (e.relatedTarget && currentHoveredImg.contains(e.relatedTarget)) return;
             hideViewer(); 
         }
     }, true);
 
-    // 【新增修复】：防止鼠标缓慢移出浏览器界面导致的残留
-    document.addEventListener('mouseleave', () => {
-        hideViewer();
-    }, true);
+    document.addEventListener('mouseleave', () => hideViewer(), true);
 
     function renderViewer(e = null, rect = null) {
         if (!currentHoveredImg) return;
@@ -307,22 +285,25 @@
         let cDW = 0, cDH = 0;
 
         if (config.mode === 'partial') {
-            setStyle(viewer, 'display', 'block'); 
-            setStyle(viewer, 'position', 'fixed'); 
-            setStyle(viewer, 'overflow', 'hidden'); 
+            setStyle(viewer, 'display', 'block'); setStyle(viewer, 'position', 'fixed'); setStyle(viewer, 'overflow', 'hidden'); 
             
             if (config.hasAgreed) {
-                cDW = rect.width * activeZoom; 
-                cDH = rect.height * activeZoom;
-                setStyle(zoomImg, 'width', cDW + 'px'); 
-                setStyle(zoomImg, 'height', cDH + 'px');
+                cDW = rect.width * activeZoom; cDH = rect.height * activeZoom;
+                setStyle(zoomImg, 'width', cDW + 'px'); setStyle(zoomImg, 'height', cDH + 'px');
                 setStyle(zoomImg, 'position', 'absolute'); 
 
-                let lensW = Math.min(350, Math.max(100, cDW + 20));
-                let lensH = Math.min(350, Math.max(100, cDH + 20));
+                let lensW, lensH;
+                
+                // 【应用新增逻辑】：如果有被撑开的自定义放大框尺寸，优先使用
+                if (isSmallImageOptimized && customLensWidth && customLensHeight) {
+                    lensW = customLensWidth;
+                    lensH = customLensHeight;
+                } else {
+                    lensW = Math.min(350, Math.max(100, cDW + 20));
+                    lensH = Math.min(350, Math.max(100, cDH + 20));
+                }
 
-                setStyle(viewer, 'width', lensW + 'px'); 
-                setStyle(viewer, 'height', lensH + 'px');
+                setStyle(viewer, 'width', lensW + 'px'); setStyle(viewer, 'height', lensH + 'px');
 
                 let vX = clientX + 20, vY = clientY + 20;
                 if (vX + lensW > sW) vX = clientX - lensW - 20;
@@ -330,55 +311,38 @@
                 setStyle(viewer, 'left', `${vX}px`); setStyle(viewer, 'top', `${vY}px`);
                 setStyle(viewer, 'transform', 'none');
 
-                if (cDW < 350 && cDH < 350) {
+                if (cDW < 350 && cDH < 350 && !customLensWidth) {
                     setStyle(viewer, 'border', '1px solid rgba(255, 255, 255, 0.2)'); 
                     setStyle(viewer, 'background-image', 'radial-gradient(circle, rgba(20,20,20,1) 0%, rgba(0,0,0,1) 100%)'); 
                     setStyle(viewer, 'background-color', '#000'); 
                 } else {
-                    setStyle(viewer, 'background-image', 'none'); 
-                    setStyle(viewer, 'background-color', 'transparent'); 
+                    setStyle(viewer, 'background-image', 'none'); setStyle(viewer, 'background-color', 'transparent'); 
                     setStyle(viewer, 'border', '1px solid rgba(255, 255, 255, 0.4)'); 
                 }
 
-                setStyle(zoomImg, 'right', 'auto'); 
-                setStyle(zoomImg, 'bottom', 'auto');
-                setStyle(zoomImg, 'margin', '0');
+                setStyle(zoomImg, 'right', 'auto'); setStyle(zoomImg, 'bottom', 'auto'); setStyle(zoomImg, 'margin', '0');
 
                 let offsetX = 0, offsetY = 0;
+                if (cDW > lensW) offsetX = -(cDW * xP - lensW / 2);
+                else offsetX = (lensW - cDW) / 2;
                 
-                if (cDW > lensW) {
-                    offsetX = -(cDW * xP - lensW / 2);
-                } else {
-                    offsetX = (lensW - cDW) / 2;
-                }
-                
-                if (cDH > lensH) {
-                    offsetY = -(cDH * yP - lensH / 2);
-                } else {
-                    offsetY = (lensH - cDH) / 2;
-                }
+                if (cDH > lensH) offsetY = -(cDH * yP - lensH / 2);
+                else offsetY = (lensH - cDH) / 2;
 
-                setStyle(zoomImg, 'left', offsetX + 'px');
-                setStyle(zoomImg, 'top', offsetY + 'px');
+                setStyle(zoomImg, 'left', offsetX + 'px'); setStyle(zoomImg, 'top', offsetY + 'px');
             }
         } else {
-            setStyle(viewer, 'display', 'block');
-            setStyle(viewer, 'position', 'fixed');
-            setStyle(viewer, 'background-color', 'rgba(20, 20, 20, 0.9)');
-            setStyle(viewer, 'background-image', 'none');
-            setStyle(zoomImg, 'position', 'absolute'); 
-            
-            setStyle(zoomImg, 'right', 'auto'); 
-            setStyle(zoomImg, 'bottom', 'auto');
-            setStyle(zoomImg, 'margin', '0');
+            // [整体跟随和智能避让的渲染逻辑保持原样]
+            setStyle(viewer, 'display', 'block'); setStyle(viewer, 'position', 'fixed');
+            setStyle(viewer, 'background-color', 'rgba(20, 20, 20, 0.9)'); setStyle(viewer, 'background-image', 'none');
+            setStyle(zoomImg, 'position', 'absolute'); setStyle(zoomImg, 'right', 'auto'); setStyle(zoomImg, 'bottom', 'auto'); setStyle(zoomImg, 'margin', '0');
 
             let tW = rect.width * activeZoom, tH = rect.height * activeZoom;
             const maxVW = sW * (config.mode === 'full-follow' ? 0.7 : 0.95);
             const maxVH = sH * (config.mode === 'full-follow' ? 0.7 : 0.95);
             
             if (!config.breakoutView || !config.hasAgreed) {
-                const safeMaxVW = maxVW - 10;
-                const safeMaxVH = maxVH - 10;
+                const safeMaxVW = maxVW - 10; const safeMaxVH = maxVH - 10;
                 const ratio = (rect.width / rect.height) || 1;
                 
                 if (tW > safeMaxVW) { tW = safeMaxVW; tH = tW / ratio; }
@@ -405,21 +369,12 @@
                 setStyle(viewer, 'left', `${vX}px`); setStyle(viewer, 'top', `${vY}px`);
             } else {
                 setStyle(viewer, 'transform', 'none'); 
-                const margin = 30; 
-                let vX, vY;
-
-                if (clientX < sW / 2) {
-                    vX = sW - cDW - margin; 
-                } else {
-                    vX = margin; 
-                }
-
+                const margin = 30; let vX, vY;
+                if (clientX < sW / 2) vX = sW - cDW - margin; else vX = margin; 
                 vY = clientY - (cDH / 2);
                 if (vY < margin) vY = margin;
                 if (vY + cDH > sH - margin) vY = sH - cDH - margin;
-
-                setStyle(viewer, 'left', `${vX}px`); 
-                setStyle(viewer, 'top', `${vY}px`);
+                setStyle(viewer, 'left', `${vX}px`); setStyle(viewer, 'top', `${vY}px`);
             }
         }
         updateStatus(zoomImg.src !== currentHoveredImg.src ? 'hd' : 'original', cDW, cDH);
@@ -434,8 +389,9 @@
         if (k === keys.rotate) { config.rotate = (config.rotate + 90) % 360; up = true; } 
         else if (k === keys.mirror) { config.mirror *= -1; up = true; } 
         else if (k === keys.mode) { config.mode = modeList[(modeList.indexOf(config.mode) + 1) % modeList.length]; save({ mode: config.mode }); up = true; showToast(modeNames[config.mode]); }
-        else if (k === keys.zoomIn || k === '+') { activeZoom += 0.5; showToast(`${activeZoom.toFixed(1)}x`); up = true; } 
-        else if (k === keys.zoomOut || k === '-') { activeZoom = Math.max(1.5, activeZoom - 0.5); showToast(`${activeZoom.toFixed(1)}x`); up = true; }
+        // 【打标记】：只要人工按过缩放，就标记起来，不让异步的图片加载去干扰用户当前的进度
+        else if (k === keys.zoomIn || k === '+') { activeZoom += 0.5; isZoomManuallyChanged = true; showToast(`${activeZoom.toFixed(1)}x`); up = true; } 
+        else if (k === keys.zoomOut || k === '-') { activeZoom = Math.max(1.5, activeZoom - 0.5); isZoomManuallyChanged = true; showToast(`${activeZoom.toFixed(1)}x`); up = true; }
         
         if (up) { 
             e.preventDefault(); 
