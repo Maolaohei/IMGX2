@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Image Pro Zoomer (Mix01 Edition)",
   "version": "6.0",
-  "description": "本地图片利器：原生高性能规则引擎，支持高清解析、右键原图下载 (Mix01 开发)",
+  "description": "本地图片利器：支持高清解析、右键原图下载、复制到剪贴板 (Mix01 开发)",
   "permissions": ["storage", "contextMenus", "downloads", "clipboardWrite"],
   "action": {
     "default_popup": "options.html"
@@ -16,7 +16,7 @@
       "matches": ["<all_urls>"],
       "all_frames": true,
       "match_about_blank": true,
-      "js": ["rules-engine.js", "content.js"],
+      "js": ["rules-engine.js", "immersive-rules.js", "content.js"],
       "css": ["content.css"]
     }
   ]

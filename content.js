@@ -27,7 +27,6 @@
     let bgClickCount = 0;
     let bgClickTimer = null;
 
-    // 【新增】本地状态记忆库，解决推特信息流不显示关注状态的问题
     window.__mix01FollowCache = window.__mix01FollowCache || {};
 
     const modeList = ['partial', 'full-follow', 'full-center'];
@@ -36,196 +35,26 @@
 
     const isContextValid = () => !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
 
-    function forceClick(el) {
-        if (!el) return;
-        const opts = { bubbles: true, cancelable: true, view: window };
-        el.dispatchEvent(new MouseEvent('mouseover', opts));
-        el.dispatchEvent(new MouseEvent('mousedown', opts));
-        el.dispatchEvent(new MouseEvent('mouseup', opts));
-        el.dispatchEvent(new MouseEvent('click', opts));
-    }
-
     // ==========================================
-    // 🔥 幽灵点击引擎 5.0：作者 1对1 锁定与状态记忆
+    // 从独立沉浸引擎获取适配器
     // ==========================================
-    const actionAdapters = {
-        'twitter_x': {
-            match: /(twitter\.com|x\.com)/,
-            getContainer: (img) => img.closest('article') || document.body,
-            getStates: (container) => {
-                const likeBtn = container.querySelector('[data-testid="unlike"]');
-                let isLiked = !!likeBtn;
-
-                // 提取当前推文作者的 @ID
-                let author = "";
-                const userNameEl = container.querySelector('[data-testid="User-Name"]');
-                if (userNameEl) {
-                    const match = userNameEl.textContent.match(/@[\w_]+/);
-                    if (match) author = match[0];
-                }
-
-                let isFollowed = null;
-                // 先尝试读取个人主页 (Profile) 上的直接状态
-                const profileScope = document.querySelector('[data-testid="primaryColumn"]');
-                if (profileScope) {
-                    if (profileScope.querySelector('[data-testid$="-unfollow"]')) isFollowed = true;
-                    else if (profileScope.querySelector('[data-testid$="-follow"]')) isFollowed = false;
-                }
-
-                // 如果读取不到（比如在时间线），且我们缓存里有他，读取缓存
-                if (isFollowed === null && author && window.__mix01FollowCache[author] !== undefined) {
-                    isFollowed = window.__mix01FollowCache[author];
-                }
-
-                return { isLiked, isFollowed, authorName: author };
-            },
-            like: async (container) => {
-                const btnLike = container.querySelector('[data-testid="like"]');
-                const btnUnlike = container.querySelector('[data-testid="unlike"]');
-                if (btnUnlike) { forceClick(btnUnlike); return false; }
-                if (btnLike) { forceClick(btnLike); return true; }
-                return null;
-            },
-            follow: async (container) => {
-                let author = "";
-                const userNameEl = container.querySelector('[data-testid="User-Name"]');
-                if (userNameEl) {
-                    const match = userNameEl.textContent.match(/@[\w_]+/);
-                    if (match) author = match[0];
-                }
-
-                // 1. 如果在个人主页有直达按钮，直接点
-                const profileScope = document.querySelector('[data-testid="primaryColumn"]');
-                if (profileScope) {
-                    const btnUnfollow = profileScope.querySelector('[data-testid$="-unfollow"]');
-                    const btnFollow = profileScope.querySelector('[data-testid$="-follow"]');
-                    if (btnUnfollow) {
-                        forceClick(btnUnfollow);
-                        await new Promise(r => setTimeout(r, 150));
-                        const confirm = document.querySelector('[data-testid="confirmationSheetConfirm"]');
-                        if (confirm) forceClick(confirm);
-                        if (author) window.__mix01FollowCache[author] = false;
-                        return false;
-                    } else if (btnFollow) {
-                        forceClick(btnFollow);
-                        if (author) window.__mix01FollowCache[author] = true;
-                        return true;
-                    }
-                }
-
-                // 2. 在时间线，必须找到当前推文的专属 "..." 菜单
-                const caret = container.querySelector('[data-testid="caret"]');
-                if (!caret) return null;
-
-                forceClick(caret); 
-                await new Promise(r => setTimeout(r, 150)); // 等待菜单渲染
-
-                const menus = Array.from(document.querySelectorAll('[role="menu"]'));
-                const menu = menus[menus.length - 1]; // 通常最新弹出的菜单在最上面
-                if (!menu) return null;
-
-                const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
-                let targetBtn = null;
-                let willFollow = true;
-
-                for (let item of items) {
-                    const text = item.textContent || '';
-                    // 智能识别菜单内容，判断是关注还是取消关注
-                    if (/Unfollow|取消关注/i.test(text)) {
-                        targetBtn = item;
-                        willFollow = false;
-                        break;
-                    } else if (/Follow|关注/i.test(text)) {
-                        targetBtn = item;
-                        willFollow = true;
-                        break;
-                    }
-                }
-
-                if (!targetBtn) {
-                    forceClick(document.body); // 没找到就关闭菜单
-                    return null;
-                }
-
-                forceClick(targetBtn); 
-
-                // 如果是取消关注，击杀二次弹窗
-                if (!willFollow) {
-                    await new Promise(r => setTimeout(r, 200));
-                    const confirmBtn = document.querySelector('[data-testid="confirmationSheetConfirm"]');
-                    if (confirmBtn) {
-                        forceClick(confirmBtn);
-                    } else {
-                        const dialog = document.querySelector('[role="dialog"], [data-testid="mask"]');
-                        if (dialog) {
-                            const btns = Array.from(dialog.querySelectorAll('[role="button"]'));
-                            const confirmTarget = btns.find(b => /Unfollow|取消关注|确认/i.test(b.textContent));
-                            if (confirmTarget) forceClick(confirmTarget);
-                        }
-                    }
-                }
-
-                // 更新内存缓存库，确保换图后依然能认出他
-                if (author) {
-                    window.__mix01FollowCache[author] = willFollow;
-                }
-
-                return willFollow;
-            }
-        },
-        'pixiv': {
-            match: /pixiv\.net/,
-            getContainer: (img) => document.body,
-            getStates: (container) => {
-                const likeBtn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], [data-click-label="like"] button, button svg path[d*="M12"]')?.closest('button');
-                let isLiked = false;
-                if (likeBtn) {
-                    isLiked = likeBtn.innerHTML.includes('rgb(255, 64, 96)') || likeBtn.innerHTML.includes('#FF4060') || likeBtn.getAttribute('aria-pressed') === 'true';
-                }
-                const followBtn = container.querySelector('.gtm-main-follow, [data-click-action="follow"], [data-click-label="follow"]');
-                let isFollowed = false;
-                if (followBtn) {
-                    isFollowed = /已关注|Following/i.test(followBtn.textContent) || followBtn.dataset.clickAction === 'unfollow' || followBtn.getAttribute('aria-pressed') === 'true';
-                }
-                
-                let authorName = container.querySelector('.user-name, [data-click-label="creator"]')?.textContent || '';
-                return { isLiked, isFollowed, authorName };
-            },
-            like: async (container) => {
-                const btn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], [data-click-label="like"] button, button svg path[d*="M12"]')?.closest('button');
-                if (btn) {
-                    const isCurrentlyLiked = btn.innerHTML.includes('rgb(255, 64, 96)') || btn.innerHTML.includes('#FF4060') || btn.getAttribute('aria-pressed') === 'true';
-                    forceClick(btn);
-                    return !isCurrentlyLiked;
-                }
-                return null;
-            },
-            follow: async (container) => {
-                const btn = container.querySelector('.gtm-main-follow, [data-click-action="follow"], [data-click-label="follow"]');
-                if (btn) {
-                    const isCurrentlyFollowed = /已关注|Following/i.test(btn.textContent) || btn.dataset.clickAction === 'unfollow' || btn.getAttribute('aria-pressed') === 'true';
-                    forceClick(btn);
-                    return !isCurrentlyFollowed;
-                }
-                return null;
-            }
+    function getImmersiveAdapter() {
+        if (window.Mix01ImmersiveEngine && window.Mix01ImmersiveEngine.getAdapter) {
+            return window.Mix01ImmersiveEngine.getAdapter(window.location.hostname);
         }
-    };
+        return null;
+    }
 
     async function executePhantomAction(actionType) {
         if (!currentHoveredImg) return;
-        const host = window.location.hostname;
-        let adapter = null;
-        for (let key in actionAdapters) {
-            if (actionAdapters[key].match.test(host)) { adapter = actionAdapters[key]; break; }
-        }
+        const adapter = getImmersiveAdapter();
         
-        if (!adapter) {
+        if (!adapter || (actionType === 'like' && !adapter.like) || (actionType === 'follow' && !adapter.follow)) {
             showToast("⚠️ 该网站暂不支持快捷交互");
             return;
         }
 
-        const container = adapter.getContainer(currentHoveredImg) || document.body;
+        const container = adapter.getContainer ? adapter.getContainer(currentHoveredImg) : document.body;
 
         if (actionType === 'like') {
             const newState = await adapter.like(container);
@@ -243,10 +72,8 @@
             }
         }
 
-        // 延迟刷新 HUD 状态
         setTimeout(updateImmersiveHUD, 300);
     }
-    // ==========================================
 
     const syncConfig = (res) => {
         if (!res) return;
@@ -365,6 +192,7 @@
     styleBlock.innerHTML = `
         .kbd-btn { background:rgba(255,255,255,0.2); padding:2px 6px; border-radius:4px; font-family: monospace; font-weight: bold; margin: 0 2px;}
         .author-tag { color: #1da1f2; font-weight: bold; margin: 0 4px; }
+        .hud-status-item { font-weight: bold; transition: color 0.3s ease; display: inline-block; }
     `;
     document.head.appendChild(styleBlock);
 
@@ -390,41 +218,39 @@
     function updateImmersiveHUD() {
         if (!config.isImmersive) return;
         
-        let likeText = "喜欢"; let likeIcon = "🤍";
-        let followText = "关注"; let followIcon = "👤";
+        const adapter = getImmersiveAdapter();
+        let likeText = "喜欢"; let likeIcon = "🤍"; let likeColor = "#dddddd";
+        let followText = "关注"; let followIcon = "👤"; let followColor = "#dddddd";
         let authorDisplay = "";
 
-        if (currentHoveredImg) {
-            const host = window.location.hostname;
-            let adapter = null;
-            for (let key in actionAdapters) {
-                if (actionAdapters[key].match.test(host)) { adapter = actionAdapters[key]; break; }
+        if (currentHoveredImg && adapter && adapter.getStates) {
+            const container = adapter.getContainer ? adapter.getContainer(currentHoveredImg) : document.body;
+            const states = adapter.getStates(container);
+            
+            if (states.isLiked !== null) {
+                likeText = states.isLiked ? "已喜欢" : "未喜欢";
+                likeIcon = states.isLiked ? "❤️" : "🤍";
+                likeColor = states.isLiked ? "#f91880" : "#aaaaaa";
             }
-            if (adapter) {
-                const container = adapter.getContainer(currentHoveredImg) || document.body;
-                const states = adapter.getStates(container);
-                if (states.isLiked !== null) {
-                    likeText = states.isLiked ? "已喜欢" : "未喜欢";
-                    likeIcon = states.isLiked ? "❤️" : "🤍";
-                }
-                
-                // 处理关注状态显示
-                if (states.isFollowed !== null) {
-                    followText = states.isFollowed ? "已关注" : "未关注";
-                    followIcon = states.isFollowed ? "🫂" : "👤";
-                }
-
-                // 注入当前锁定的作者ID
-                if (states.authorName) {
-                    authorDisplay = `<span class="author-tag">${states.authorName}</span>`;
-                }
+            if (states.isFollowed !== null) {
+                followText = states.isFollowed ? "已关注" : "未关注";
+                followIcon = states.isFollowed ? "🫂" : "👤";
+                followColor = states.isFollowed ? "#00ba7c" : "#ff4b4b"; 
+            }
+            if (states.authorName) {
+                authorDisplay = `<span class="author-tag">${states.authorName}</span>`;
             }
         }
 
         const hintKbdLike = (keys.like || 'l').toUpperCase();
         const hintKbdFollow = (keys.follow || 'f').toUpperCase();
         
-        immersiveHint.innerHTML = `⌨️ 左右切换 &nbsp;|&nbsp; 💾 下载(<kbd class="kbd-btn">S</kbd>) &nbsp;|&nbsp; ${likeIcon} ${likeText}(<kbd class="kbd-btn">${hintKbdLike}</kbd>) &nbsp;&nbsp; ${followIcon} ${authorDisplay}${followText}(<kbd class="kbd-btn">${hintKbdFollow}</kbd>) &nbsp;|&nbsp; ❌ 双击退出`;
+        const hasActions = !!adapter;
+        const actionsHtml = hasActions 
+            ? `&nbsp;|&nbsp; <span class="hud-status-item" style="color: ${likeColor}">${likeIcon} ${likeText}</span>(<kbd class="kbd-btn">${hintKbdLike}</kbd>) &nbsp;&nbsp; <span class="hud-status-item" style="color: ${followColor}">${followIcon} ${authorDisplay}${followText}</span>(<kbd class="kbd-btn">${hintKbdFollow}</kbd>) ` 
+            : '';
+
+        immersiveHint.innerHTML = `⌨️ 左右切换 &nbsp;|&nbsp; 💾 下载(<kbd class="kbd-btn">S</kbd>) ${actionsHtml} &nbsp;|&nbsp; ❌ 双击退出`;
     }
 
     function setStyle(el, prop, val) { el.style.setProperty(prop, val, 'important'); }
@@ -805,6 +631,10 @@
     }
 
     function getGalleryImages() {
+        const adapter = getImmersiveAdapter();
+        if (adapter && adapter.getGalleryImages) {
+            return adapter.getGalleryImages();
+        }
         return Array.from(document.querySelectorAll('img')).filter(img => {
             if (img.id === 'zoom-img-xyz') return false;
             const rect = img.getBoundingClientRect();
