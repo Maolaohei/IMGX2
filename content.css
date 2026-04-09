@@ -8,7 +8,8 @@
 }
 
 /* 强力重置图片，防 Vue/React 样式污染 */
-#img-zoom-pro-viewer-xyz img#zoom-img-xyz {
+#img-zoom-pro-viewer-xyz img#zoom-img-xyz,
+#img-zoom-pro-viewer-xyz canvas#zoom-canvas-xyz {
     all: unset !important;
     display: block !important;
     position: absolute !important;
@@ -20,6 +21,9 @@
     padding: 0 !important;
     border: none !important;
     transition: transform 0.1s cubic-bezier(0.2, 0, 0.2, 1) !important;
+    z-index: 2147483646 !important; /* 确保不发暗，位于最顶层 */
+    filter: none !important;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.8) !important; /* 给 Canvas 增加一点质感悬浮 */
 }
 
 /* 状态标签 */
@@ -52,7 +56,6 @@
     background-color: rgba(20, 20, 20, 0.9) !important;
 }
 
-/* 智能避让模式专属悬浮阴影 */
 #img-zoom-pro-viewer-xyz.mode-full-center {
     box-shadow: 0 20px 50px rgba(0,0,0,0.6) !important; 
 }

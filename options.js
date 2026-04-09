@@ -13,11 +13,11 @@ const defaultConfigs = {
     keyZoomIn: '=', 
     keyZoomOut: '-',
     keyImmersive: 'ctrl+f12',
-    // === 新增这两行默认键 ===
     keyLike: 'l',
-    keyFollow: 'f'
+    keyFollow: 'f',
+    keyPlayVideo: 'q' // 新增的视频引擎快捷键
 };
-// 后面的代码保持不变...
+
 const ids = Object.keys(defaultConfigs);
 const saveBtn = document.getElementById('saveBtn');
 const resetBtn = document.getElementById('resetBtn');
@@ -26,7 +26,6 @@ const overlay = document.getElementById('disclaimerOverlay');
 const agreedStatus = document.getElementById('agreedStatus');
 const msg = document.getElementById('saveMsg');
 
-// 模式屏蔽交互
 const isImmersiveEl = document.getElementById('isImmersive');
 const viewModeRow = document.getElementById('viewModeRow');
 function updateViewModeUI() {
@@ -48,7 +47,7 @@ chrome.storage.local.get(ids, (res) => {
         const el = document.getElementById(id); if (!el) return;
         if (el.type === 'checkbox') el.checked = val; else el.value = val;
     });
-    updateViewModeUI(); // 初始化 UI 状态
+    updateViewModeUI(); 
 });
 
 agreeBtn.addEventListener('click', () => { chrome.storage.local.set({ hasAgreed: true }, () => { overlay.style.display = 'none'; agreedStatus.style.display = 'block'; }); });
