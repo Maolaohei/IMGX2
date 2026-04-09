@@ -1,0 +1,362 @@
+[
+    {
+      "name": "Amazon",
+      "hosts": "amazon\\.(com|co\\.[a-z]+|[a-z]{2})",
+      "match": "(\\._[A-Z0-9_,]+_)\\.(jpe?g|png|gif|webp)",
+      "replace": ".$2"
+    },
+    {
+      "name": "JD",
+      "hosts": "360buyimg\\.com",
+      "match": "\\/[sn]\\d+\\/",
+      "replace": "/n1/"
+    },
+    {
+      "name": "Taobao/Alibaba",
+      "hosts": "(?:alicdn|taobao|tmall|1688|aliexpress)\\.com",
+      "match": "(\\.(?:\\d+x\\d+[a-z]*|search|summ))(\\.(?:jpe?g|gif|png|webp|bmp|svg).*)",
+      "replace": "$2"
+    },
+    {
+      "name": "Suning",
+      "hosts": "suning\\.com",
+      "match": "(\\d+)[wh]_(\\d+)",
+      "replace": "800w_800"
+    },
+    {
+      "name": "eBay",
+      "hosts": "ebayimg\\.com",
+      "match": "\\/s-l\\d+\\.(jpg|jpeg|png|webp)",
+      "replace": "/s-l2000.$1"
+    },
+    {
+      "name": "Etsy",
+      "hosts": "etsystatic\\.com",
+      "match": "(_)(\\d+x(?:\\d+|N))(.*?\\.)",
+      "replace": "_fullxfull$3"
+    },
+    {
+      "name": "Target",
+      "hosts": "target\\.scene7\\.com",
+      "match": "(\\?.*)?$",
+      "replace": "?wid=1000"
+    },
+    {
+      "name": "Walmart",
+      "hosts": "walmartimages\\.com",
+      "match": "\\?.*",
+      "replace": ""
+    },
+    {
+      "name": "Shopify/THCDN",
+      "hosts": "thcdn\\.com",
+      "match": "\\/(x?small|medium|large)(\\/.+)",
+      "replace": "/large$2"
+    },
+    {
+      "name": "Pinduoduo/Kuaishou",
+      "hosts": "pinduoduo\\.com|yangkeduo\\.com",
+      "match": "thumbnail\\/",
+      "replace": ""
+    },
+    {
+      "name": "Twitter/X Content",
+      "hosts": "twimg\\.com",
+      "match": "([?&]name=)\\w+",
+      "replace": "$1orig"
+    },
+    {
+      "name": "Twitter Profile",
+      "hosts": "twimg\\.com",
+      "match": "(profile_images\\/.+)_(?:normal|bigger|mini|200x200)\\.(jpe?g|png)",
+      "replace": "$1.$2"
+    },
+    {
+      "name": "Weibo",
+      "hosts": "sinaimg\\.cn|weibo\\.com",
+      "match": "(\\/)(small|bmiddle|thumbnail|mw\\d+|orj\\d+|sq\\d+|wap\\d+|crop\\.[^/]+)(\\/\\w+\\.(jpe?g|gif|png|webp))",
+      "replace": "$1large$3"
+    },
+    {
+      "name": "WeChat MP",
+      "hosts": "mmbiz\\.q(?:logo|pic)\\.cn",
+      "match": "\\/0\\?.*",
+      "replace": "/0"
+    },
+    {
+      "name": "Zhihu",
+      "hosts": "zhimg\\.com",
+      "match": "(\\/[^/]+?)_[^.]+(\\.[a-z]+)$",
+      "replace": "$1$2"
+    },
+    {
+      "name": "Douban",
+      "hosts": "doubanio\\.com",
+      "match": "(\\/view\\/\\w+\\/)[smp](\\/public\\/)",
+      "replace": "$1l$2"
+    },
+    {
+      "name": "Instagram/Facebook",
+      "hosts": "cdninstagram\\.com|fbcdn\\.net",
+      "match": "\\/s\\d+x\\d+\\/",
+      "replace": "/"
+    },
+    {
+      "name": "Pinterest",
+      "hosts": "pinimg\\.com",
+      "match": "\\/\\d+x(?:\\d+(?:_\\w+)?)?(\\/.+)",
+      "replace": "/originals$1"
+    },
+    {
+      "name": "Reddit Preview",
+      "hosts": "preview\\.redd\\.it",
+      "match": "preview\\.redd\\.it(.+)",
+      "replace": "i.redd.it$1"
+    },
+    {
+      "name": "Reddit Cleanup",
+      "hosts": "redd\\.it",
+      "match": "\\?.*$",
+      "replace": ""
+    },
+    {
+      "name": "Tumblr",
+      "hosts": "tumblr\\.com",
+      "match": "_(75sq|100|250|400|500|540|640)\\.(jpe?g|png|gif)",
+      "replace": "_1280.$2"
+    },
+    {
+      "name": "Weibo Avatar",
+      "hosts": "sinaimg\\.cn",
+      "match": "(\\/)(180|50|30|crop\\.[^/]+)(\\/\\w)",
+      "replace": "$1original$3"
+    },
+    {
+      "name": "Pixiv",
+      "hosts": "pximg\\.net",
+      "match": "\\/c\\/\\d+x\\d+(?:_\\d+)?\\/img-master\\/(.+?)_(?:master|square)\\d+(\\.(?:jpg|png|gif))",
+      "replace": "/img-original/$1$2"
+    },
+    {
+      "name": "Flickr",
+      "hosts": "staticflickr\\.com|static\\.flickr\\.com",
+      "match": "(_[msznqcot])\\.(jpe?g|png)",
+      "replace": "_b.$2"
+    },
+    {
+      "name": "DeviantArt",
+      "hosts": "deviantart\\.net",
+      "match": "\\/f\\/([\\w/]+?)\\/[^/]+_(200|300|400)(\\.[a-z]+)",
+      "replace": "/f/$1/original$3"
+    },
+    {
+      "name": "ArtStation",
+      "hosts": "artstation\\.com",
+      "match": "\\/(?:medium|small|thumbnail)(\\/.+)",
+      "replace": "/large$1"
+    },
+    {
+      "name": "Dribbble",
+      "hosts": "cdn\\.dribbble\\.com",
+      "match": "\\/\\d+x\\d+(\\/.+)",
+      "replace": "$1"
+    },
+    {
+      "name": "Imgur",
+      "hosts": "imgur\\.com",
+      "match": "(i\\.imgur\\.com\\/\\w{7})[bstml]\\.(jpe?g|png|gif)",
+      "replace": "$1.$2"
+    },
+    {
+      "name": "500px",
+      "hosts": "drscdn\\.500px\\.org|marketplace\\.500px\\.com",
+      "match": "\\/w%3D\\d+",
+      "replace": "/w%3D2048"
+    },
+    {
+      "name": "Unsplash",
+      "hosts": "unsplash\\.com",
+      "match": "\\?.*$",
+      "replace": ""
+    },
+    {
+      "name": "Pexels",
+      "hosts": "images\\.pexels\\.com",
+      "match": "\\?.*$",
+      "replace": ""
+    },
+    {
+      "name": "iStock",
+      "hosts": "istockphoto\\.com",
+      "match": "\\?.*$",
+      "replace": ""
+    },
+    {
+      "name": "Wallhaven",
+      "hosts": "wallhaven\\.cc",
+      "match": "\\/th\\/",
+      "replace": "/full/"
+    },
+    {
+      "name": "YouTube Cover",
+      "hosts": "ytimg\\.com",
+      "match": "(\\/vi(?:_webp)?\\/[^/]+\\/)(?:default|mqdefault|hqdefault|sddefault)(\\.[a-z]+)",
+      "replace": "$1maxresdefault$2"
+    },
+    {
+      "name": "Bilibili",
+      "hosts": "hdslb\\.com|bilivideo\\.com",
+      "match": "@\\d+[whcop][^?]*",
+      "replace": ""
+    },
+    {
+      "name": "iQIYI",
+      "hosts": "iqiyipic\\.com",
+      "match": "_\\d+_\\d+(\\.jpe?g)",
+      "replace": "_0_0$1"
+    },
+    {
+      "name": "Youku/Tudou Avatar",
+      "hosts": "ykimg\\.com",
+      "match": "\\?.*$",
+      "replace": ""
+    },
+    {
+      "name": "TikTok/Douyin",
+      "hosts": "tiktokcdn\\.com|douyinpic\\.com",
+      "match": "~[\\w.]+\\.image",
+      "replace": "~noop.image"
+    },
+    {
+      "name": "Qiniu/UpYun",
+      "hosts": ".*",
+      "match": "([?&])(?:imageMogr2\\/thumbnail\\/\\d+x\\d+[^&]*|imageView2\\/\\d+\\/w\\/\\d+[^&]*)",
+      "replace": ""
+    },
+    {
+      "name": "Aliyun OSS",
+      "hosts": "aliyuncs\\.com",
+      "match": "\\?x-oss-process=image.*",
+      "replace": ""
+    },
+    {
+      "name": "Tencent COS",
+      "hosts": "myqcloud\\.com",
+      "match": "\\?imageMogr2.*",
+      "replace": ""
+    },
+    {
+      "name": "Common Size Suffix",
+      "hosts": ".*",
+      "match": "[_-](\\d{2,4})x(\\d{2,4})\\.(jpe?g|png|webp|gif)(\\?.*)?$",
+      "replace": ".$3"
+    },
+    {
+      "name": "Thumb to Large Path",
+      "hosts": ".*",
+      "match": "\\/(thumb(?:nail)?s?)\\/",
+      "replace": "/large/"
+    },
+    {
+      "name": "GitHub Avatar",
+      "hosts": "avatars\\.githubusercontent\\.com",
+      "match": "\\?.*$",
+      "replace": ""
+    },
+    {
+      "name": "Wikipedia/Wikimedia",
+      "hosts": "wikimedia\\.org|wikipedia\\.org",
+      "match": "\\/thumb\\/(.+?\\/[^/]+)\\.\\d+px-[^/]+$",
+      "replace": "/$1"
+    },
+    {
+      "name": "Google Play/Books",
+      "hosts": "googleusercontent\\.com|books\\.google\\.com",
+      "match": "=(?:s\\d+|w\\d+|h\\d+).*",
+      "replace": "=s0"
+    },
+    {
+      "name": "Apple/Amazon Media",
+      "hosts": "ssl-images-amazon\\.com|media-amazon\\.com",
+      "match": "\\._[A-Z0-9_,]+_\\.(jpe?g|png)",
+      "replace": ".$1"
+    },
+    {
+        "name": "Mikan Project (Optimized)",
+        "hosts": "mikanani\\.me|mikanime\\.tv",
+        "match": "([?&]width=)\\d+",
+        "replace": "${1}2048"
+    },
+    {
+        "name": "Discord",
+        "hosts": "cdn\\.discordapp\\.com|media\\.discordapp\\.net",
+        "match": "\\?size=\\d+",
+        "replace": "?size=4096"
+      },
+      {
+        "name": "Steam",
+        "hosts": "avatars\\.akamai\\.steamstatic\\.com|steamcdn-a\\.akamaihd\\.net",
+        "match": "_(?:medium|icon)(\\.(?:jpg|png|webp))",
+        "replace": "_full$1"
+      },
+      {
+        "name": "IMDb",
+        "hosts": "m\\.media-amazon\\.com",
+        "match": "(\\/images\\/M\\/[a-zA-Z0-9_]+)_.+?(\\.[a-zA-Z]+)$",
+        "replace": "$1$2"
+      },
+      {
+        "name": "Medium",
+        "hosts": "miro\\.medium\\.com",
+        "match": "\\/max\\/\\d+\\/",
+        "replace": "/max/2048/"
+      },
+      {
+        "name": "SoundCloud",
+        "hosts": "i\\d*\\.sndcdn\\.com",
+        "match": "-(?:large|t\\d+x\\d+|crop)\\.(jpe?g|png)",
+        "replace": "-original.$1"
+      },
+      {
+        "name": "Behance",
+        "hosts": "mir-s3-cdn-cf\\.behance\\.net",
+        "match": "\\/project_modules\\/(?:disp|max_\\d+|2800_opt_\\d+)\\/",
+        "replace": "/project_modules/source/"
+      },
+      {
+        "name": "MyAnimeList",
+        "hosts": "cdn\\.myanimelist\\.net",
+        "match": "(\\/images\\/(?:anime|manga|characters|voiceactors)\\/(?:\\d+\\/\\d+))[tv](\\.[a-z]+)$",
+        "replace": "$1l$2"
+      },
+      {
+        "name": "Gravatar",
+        "hosts": "gravatar\\.com|secure\\.gravatar\\.com",
+        "match": "\\bs=\\d+",
+        "replace": "s=2048"
+      },
+      {
+        "name": "Twitch Previews",
+        "hosts": "static-cdn\\.jtvnw\\.net",
+        "match": "(live_user_[\\w]+)-\\d+x\\d+",
+        "replace": "$1-1920x1080"
+      },
+      {
+        "name": "Naver (Blog/Cafe/Webtoon)",
+        "hosts": ".*\\.phinf\\.naver\\.net",
+        "match": "\\?type=[a-zA-Z0-9_]+",
+        "replace": ""
+      },
+      {
+        "name": "Notion",
+        "hosts": ".*\\.notion\\.so",
+        "match": "([?&]width=)\\d+",
+        "replace": ""
+      },
+      {
+        "name": "Epic Games",
+        "hosts": "cdn1\\.epicgames\\.com",
+        "match": "(\\?h=)\\d+(&w=)\\d+",
+        "replace": ""
+      }
+  ]

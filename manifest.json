@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Image Pro Zoomer (Mix01 Edition)",
+  "version": "5.6",
+  "description": "本地图片利器：支持高清解析、右键原图下载、复制到剪贴板 (Mix01 开发)",
+  "permissions": ["storage", "contextMenus", "downloads", "clipboardWrite"],
+  "action": {
+    "default_popup": "options.html"
+  },
+  "options_page": "options.html",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["rules.json"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "all_frames": true,
+      "match_about_blank": true,
+      "js": ["content.js"],
+      "css": ["content.css"]
+    }
+  ]
+}

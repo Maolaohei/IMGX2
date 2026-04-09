@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { width: 320px; padding: 15px; font-family: system-ui, sans-serif; background: #f9f9f9; color: #333; }
+        h3 { margin-top: 0; font-size: 16px; border-bottom: 2px solid #ddd; padding-bottom: 8px; }
+        .row { margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
+        input[type="number"] { width: 60px; padding: 4px; border: 1px solid #ccc; border-radius: 4px; }
+        input[type="text"] { width: 40px; padding: 4px; border: 1px solid #ccc; border-radius: 4px; text-align: center; text-transform: uppercase; font-family: monospace; font-weight: bold; }
+        select { padding: 4px; border: 1px solid #ccc; border-radius: 4px; width: 140px; }
+        #disclaimerOverlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #fff; z-index: 100; padding: 20px; box-sizing: border-box;
+            display: none; flex-direction: column;
+        }
+        .disclaimer-box { font-size: 13px; color: #d32f2f; background: #fff5f5; border: 1px solid #feb2b2; padding: 10px; border-radius: 6px; margin-bottom: 15px; line-height: 1.5; }
+        .agree-btn { background: #d32f2f; color: white; border: none; padding: 10px; border-radius: 6px; cursor: pointer; font-weight: bold; transition: background 0.2s; }
+        .agree-btn:hover { background: #b71c1c; }
+        #agreedStatus { font-size: 12px; color: #008a00; font-weight: bold; display: none; margin-bottom: 10px; text-align: center; }
+        .btn-container { margin-top: 15px; display: flex; flex-direction: column; gap: 8px; }
+        button { border: none; padding: 10px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: bold; transition: background 0.2s; }
+        #saveBtn { background: #4A90E2; color: white; }
+        #saveBtn:hover { background: #357ABD; }
+        #resetBtn { background: #e0e0e0; color: #555; }
+        #resetBtn:hover { background: #c8c8c8; }
+        .success-text { color: #008a00; font-size: 13px; display: none; text-align: center; margin-top: 12px; font-weight: bold; }
+        .footer { margin-top: 20px; padding-top: 10px; border-top: 1px dashed #ccc; font-size: 11px; color: #888; }
+    </style>
+</head>
+<body>
+    <div id="disclaimerOverlay">
+        <h3 style="color:#d32f2f">⚠️ 免责声明</h3>
+        <div class="disclaimer-box">
+            本软件承诺完全本地运行，无联网行为。设计初衷仅为方便图片浏览。如使用本软件造成任何法律、数据问题，责任自负。同意后才能使用。
+        </div>
+        <button id="agreeBtn" class="agree-btn">我已阅读并同意以上条款</button>
+    </div>
+
+    <h3>⚙️ 插件设置</h3>
+    <div id="agreedStatus">✅ 您已同意免责声明</div>
+    <div class="row"><label>CDN 高清解析:</label><select id="loadHD"><option value="true">开启</option><option value="false">关闭</option></select></div>
+    <div class="row"><label title="针对特小图自动启用更高初始倍数 (50px->9x, 100px->6x)">小型图片智能优化:</label><input type="checkbox" id="smallImageOptimization" style="width:18px;height:18px;"></div>
+    <div class="row"><label>显示画质提示:</label><input type="checkbox" id="showStatus" style="width:18px;height:18px;"></div>
+    <div class="row"><label>开启突破限制:</label><input type="checkbox" id="breakoutView" style="width:18px;height:18px;"></div>
+    <div class="row"><label>默认倍数:</label><input type="number" id="zoomLevel" step="0.5" min="1.5"></div>
+    <div class="row"><label>默认视图模式:</label><select id="mode"><option value="partial">局部放大</option><option value="full-follow">整体跟随</option><option value="full-center">智能避让</option></select></div>
+    
+    <h3 style="margin-top: 20px;">⌨️ 快捷键</h3>
+    <div class="row"><label>切换/旋转:</label><div style="display:flex;gap:5px"><input type="text" id="keyMode"><input type="text" id="keyRotate"></div></div>
+    <div class="row"><label>缩放 (+/-):</label><div style="display:flex;gap:5px"><input type="text" id="keyZoomIn"><input type="text" id="keyZoomOut"></div></div>
+    <div class="row"><label>镜像反转:</label><input type="text" id="keyMirror"></div>
+    
+    <div class="btn-container">
+        <button id="saveBtn">💾 保存当前设置</button>
+        <button id="resetBtn">↺ 恢复出厂设置</button>
+    </div>
+    <div id="saveMsg" class="success-text">✓ 操作成功！</div>
+    <div class="footer"><b>作者:</b> Mix01<br>本工具仅供学习使用。</div>
+    <script src="options.js"></script>
+</body>
+</html>
