@@ -1,5 +1,5 @@
 // immersive-rules.js
-// Mix01 沉浸模式专属动作库 (内置原生 GraphQL API + Pixiv 混合溯源引擎)
+// Mix01 沉浸模式专属动作库 (内置原生 GraphQL API + Pixiv 纯后台 AJAX API)
 
 (function () {
     const tools = {
@@ -14,9 +14,6 @@
     };
 
     const Mix01ImmersiveRules = {
-        // ==========================================
-        // 1. Twitter / X 沉浸交互规则
-        // ==========================================
         '(?:(?:.+\\.)?twitter|x)\\.com': {
             getContainer: (media) => media.closest('article') || document.body,
             getGalleryImages: () => {
@@ -112,23 +109,6 @@
                 return willFollow;
             },
             downloadVideo: async (container) => {
-                const customSvgBtn = container.querySelector('svg g.download');
-                if (customSvgBtn) {
-                    const btn = customSvgBtn.closest('button') || customSvgBtn.closest('div[role="button"]') || customSvgBtn.closest('a');
-                    if (btn) { btn.click(); return 'NATIVE_CLICKED'; }
-                }
-
-                const shareGroup = container.querySelector('[role="group"]');
-                if (shareGroup) {
-                    const buttons = Array.from(shareGroup.querySelectorAll('[role="button"], a'));
-                    const nativeDownloadBtn = buttons.find(b => {
-                        const label = (b.getAttribute('aria-label') || '').toLowerCase();
-                        const testId = (b.getAttribute('data-testid') || '').toLowerCase();
-                        return label.includes('download') || label.includes('下载') || testId.includes('download');
-                    });
-                    if (nativeDownloadBtn) { nativeDownloadBtn.click(); return 'NATIVE_CLICKED'; }
-                }
-
                 const statusLink = container.querySelector('a[href*="/status/"]');
                 if (!statusLink) return null;
                 const statusId = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
@@ -181,47 +161,32 @@
                         }
                     });
                     return videoUrl;
-                } catch (e) { console.warn("Mix01 官方 API 抓取失败:", e); return null; }
+                } catch (e) {
+                    console.warn("Mix01 官方 API 抓取失败:", e);
+                    return null;
+                }
             }
         },
 
         // ==========================================
-        // 2. Pixiv 沉浸交互规则 (智能 API 溯源脱壳版)
+        // 2. Pixiv 沉浸交互规则 (智能 API 脱离 DOM 限制版)
         // ==========================================
         '(?:.+\\.)?pixiv\\.net': {
             getContainer: (media) => document.body,
             
-            // 【核心溯源】：确保在任何页面下都能扒出身份标识
-            _getPixivContext: async (media) => {
+            // 获取画集ID与全局Token
+            _getContext: (media) => {
                 let illustId = window.location.pathname.match(/artworks\/(\d+)/)?.[1];
                 if (!illustId && media && media.src) {
                     const m = media.src.match(/\/(\d+)_p/);
                     if (m) illustId = m[1];
                 }
-                
-                let userId = null;
-                const container = media ? (media.closest('li') || media.closest('[role="presentation"]') || document.body) : document.body;
-                const authorLink = container.querySelector('a[data-click-label="creator"], a[href*="/users/"]');
-                if (authorLink) {
-                    const m = authorLink.getAttribute('href')?.match(/users\/(\d+)/);
-                    if (m) userId = m[1];
-                }
-
-                let token = document.querySelector('meta[name="csrf-token"]')?.content || window.pixiv?.context?.token || '';
+                let token = window.pixiv?.context?.token || '';
                 if (!token) {
                     const meta = document.querySelector('#meta-global-data');
                     if (meta) { try { token = JSON.parse(meta.content).token; } catch(e){} }
                 }
-
-                // 如果没找到作者ID，强行拉取作品API去查作者
-                if (illustId && !userId) {
-                    try {
-                        const res = await fetch(`/ajax/illust/${illustId}`).then(r => r.json());
-                        userId = res?.body?.userId;
-                    } catch(e) {}
-                }
-
-                return { illustId, userId, token };
+                return { illustId, token };
             },
 
             getStates: (container) => {
@@ -238,59 +203,76 @@
             },
 
             like: async (container, media) => {
-                const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
+                const ctx = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getContext(media);
                 if (ctx.illustId && ctx.token) {
                     try {
-                        const res = await fetch('/ajax/illusts/bookmarks/add', {
+                        // 无视页面上有没有按钮，直接发包点赞
+                        await fetch('/ajax/illusts/bookmarks/add', {
                             method: 'POST',
-                            headers: { 'x-csrf-token': ctx.token, 'content-type': 'application/json', 'accept': 'application/json' },
+                            headers: { 'x-csrf-token': ctx.token, 'content-type': 'application/json' },
                             body: JSON.stringify({ illust_id: ctx.illustId, restrict: 0, comment: '', tags: [] })
                         });
-                        const data = await res.json();
                         
-                        const btn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], button svg path[d*="M12"]')?.closest('button');
-                        if (btn) tools.forceClick(btn); // 辅助 UI 更新
-                        
-                        return !data.error; 
-                    } catch(e) { console.warn("Pixiv API 点赞失效", e); }
+                        // 同步按一下UI
+                        const btn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], [data-click-label="like"] button, button svg path[d*="M12"]')?.closest('button');
+                        if (btn) tools.forceClick(btn);
+                        return true; 
+                    } catch(e) { console.warn("Pixiv API 点赞失败", e); }
                 }
 
-                const btn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], button svg path[d*="M12"]')?.closest('button');
+                // 兜底 DOM
+                const btn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], [data-click-label="like"] button, button svg path[d*="M12"]')?.closest('button');
                 if (btn) { tools.forceClick(btn); return true; }
                 return null;
             },
 
             follow: async (container, media) => {
-                const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
-                if (ctx.userId && ctx.token) {
+                const ctx = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getContext(media);
+                
+                let userId = null;
+                const authorLink = container.querySelector('a[data-click-label="creator"]') || document.querySelector('a.user-name') || (media ? media.closest('a')?.previousElementSibling?.querySelector('a') : null);
+                if (authorLink) {
+                    const m = authorLink.getAttribute('href')?.match(/users\/(\d+)/);
+                    if (m) userId = m[1];
+                }
+
+                // 如果没找到 User ID，但是有 Illust ID，就去 API 拿 User ID
+                if (!userId && ctx.illustId) {
+                    try {
+                        const res = await fetch(`/ajax/illust/${ctx.illustId}`).then(r => r.json());
+                        userId = res?.body?.userId;
+                    } catch(e){}
+                }
+
+                if (userId && ctx.token) {
                     try {
                         const formData = new URLSearchParams();
                         formData.append('mode', 'add');
                         formData.append('type', 'user');
-                        formData.append('user_id', ctx.userId);
+                        formData.append('user_id', userId);
                         formData.append('tag', '');
                         formData.append('restrict', '0');
                         formData.append('format', 'json');
 
-                        const res = await fetch('/bookmark_add.php', {
+                        await fetch('/bookmark_add.php', {
                             method: 'POST',
                             headers: { 'x-csrf-token': ctx.token, 'Content-Type': 'application/x-www-form-urlencoded' },
                             body: formData.toString()
                         });
-                        
-                        const btn = container.querySelector('.gtm-main-follow, [data-click-action="follow"]');
+
+                        const btn = container.querySelector('.gtm-main-follow, [data-click-action="follow"], [data-click-label="follow"]');
                         if (btn) tools.forceClick(btn);
-                        return true; // 默认成功
-                    } catch(e) { console.warn("Pixiv API 关注失效", e); }
+                        return true;
+                    } catch(e) { console.warn("Pixiv API 关注失败", e); }
                 }
                 
-                const btn = container.querySelector('.gtm-main-follow, [data-click-action="follow"]');
+                const btn = container.querySelector('.gtm-main-follow, [data-click-action="follow"], [data-click-label="follow"]');
                 if (btn) { tools.forceClick(btn); return true; }
                 return null;
             },
 
             downloadVideo: async (container, media) => {
-                 const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
+                 const ctx = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getContext(media);
                  if (!ctx.illustId) return null;
                  try {
                      const res = await fetch(`/ajax/illust/${ctx.illustId}/pages`).then(r => r.json());
