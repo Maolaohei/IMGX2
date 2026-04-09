@@ -1,6 +1,6 @@
 # 🌌 Mix01 Immersive Media Engine (Mix01 沉浸式流媒体引擎)
 
-![Version](https://img.shields.io/badge/version-2025.12-blue.svg)
+![Version](https://img.shields.io/badge/version-2026.04-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Edge-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-orange.svg)
 
