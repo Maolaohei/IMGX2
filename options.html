@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <style>
-        body { width: 320px; padding: 15px; font-family: system-ui, sans-serif; background: #f9f9f9; color: #333; }
+        body { width: 340px; padding: 15px; font-family: system-ui, sans-serif; background: #f9f9f9; color: #333; }
         h3 { margin-top: 0; font-size: 16px; border-bottom: 2px solid #ddd; padding-bottom: 8px; }
         .row { margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
         input[type="number"] { width: 60px; padding: 4px; border: 1px solid #ccc; border-radius: 4px; }
@@ -25,6 +25,12 @@
         #resetBtn { background: #e0e0e0; color: #555; }
         #resetBtn:hover { background: #c8c8c8; }
         .success-text { color: #008a00; font-size: 13px; display: none; text-align: center; margin-top: 12px; font-weight: bold; }
+        
+        /* 历史记录面板样式 */
+        .history-box { max-height: 160px; overflow-y: auto; background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 5px; font-size: 12px; margin-bottom: 10px; word-break: break-all; box-shadow: inset 0 2px 4px rgba(0,0,0,0.05); }
+        .history-item { border-bottom: 1px solid #eee; padding: 6px 4px; }
+        .history-item:last-child { border-bottom: none; }
+        
         .footer { margin-top: 20px; padding-top: 10px; border-top: 1px dashed #ccc; font-size: 11px; color: #888; }
     </style>
 </head>
@@ -50,9 +56,7 @@
     
     <h3 style="margin-top: 20px;">⌨️ 快捷键</h3>
     <div class="row"><label>沉浸模式开关:</label><input type="text" id="keyImmersive" style="width: 75px;"></div>
-    
     <div class="row"><label title="Q播放, D提取直链">播放(Q)/提取(D):</label><div style="display:flex;gap:5px"><input type="text" id="keyPlayVideo" placeholder="Q"><input type="text" id="keyDownloadVideo" placeholder="D"></div></div>
-
     <div class="row"><label>喜欢 / 关注 (沉浸):</label><div style="display:flex;gap:5px"><input type="text" id="keyLike" placeholder="L"><input type="text" id="keyFollow" placeholder="F"></div></div>
     <div class="row"><label>切换/旋转:</label><div style="display:flex;gap:5px"><input type="text" id="keyMode"><input type="text" id="keyRotate"></div></div>
     <div class="row"><label>缩放 (+/-):</label><div style="display:flex;gap:5px"><input type="text" id="keyZoomIn"><input type="text" id="keyZoomOut"></div></div>
@@ -63,6 +67,13 @@
         <button id="resetBtn">↺ 恢复出厂设置</button>
     </div>
     <div id="saveMsg" class="success-text">✓ 操作成功！</div>
+
+    <h3 style="margin-top: 20px;">📜 下载历史记录</h3>
+    <div id="historyList" class="history-box">
+        <div style="color: #888; text-align: center; padding: 15px;">暂无记录</div>
+    </div>
+    <button id="clearHistoryBtn" style="width: 100%; background: #f44336; color: white;">🗑️ 清空历史记录</button>
+
     <div class="footer"><b>作者:</b> Mix01<br>本工具仅供学习使用。</div>
     <script src="options.js"></script>
 </body>
