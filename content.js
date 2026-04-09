@@ -10,7 +10,7 @@
     };
     
     let activeZoom = 2.0; 
-    let keys = { mode: 'v', rotate: 'r', mirror: 'm', zoomIn: '=', zoomOut: '-', immersive: 'ctrl+f12' };
+    let keys = { mode: 'v', rotate: 'r', mirror: 'm', zoomIn: '=', zoomOut: '-', immersive: 'ctrl+f12', like: 'l', follow: 'f' };
     let currentHoveredImg = null;
     let currentHoveredSrc = null; 
     let cachedRect = null; 
@@ -24,8 +24,6 @@
     let keyboardSwitchTime = 0; 
     let hideCursorTimer = null;
     let hintFadeTimer = null;
-
-    // 【新增】背景连击防误触计时器
     let bgClickCount = 0;
     let bgClickTimer = null;
 
@@ -34,6 +32,119 @@
     const badHdUrls = new Set();
 
     const isContextValid = () => !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
+
+    // ==========================================
+    // 🔥 幽灵点击引擎 2.0：支持状态嗅探与自动处理弹窗
+    // ==========================================
+    const actionAdapters = {
+        'twitter_x': {
+            match: /(twitter\.com|x\.com)/,
+            getContainer: (img) => img.closest('article') || document.body,
+            getStates: (container) => {
+                const isLiked = !!container.querySelector('[data-testid="unlike"]');
+                const isFollowed = !!document.querySelector('[data-testid$="-unfollow"]');
+                return { isLiked, isFollowed };
+            },
+            like: async (container) => {
+                const btn = container.querySelector('[data-testid="like"], [data-testid="unlike"]');
+                if (btn) { btn.click(); return true; }
+                return false;
+            },
+            follow: async (container) => {
+                const unfollowBtn = document.querySelector('[data-testid$="-unfollow"]');
+                const followBtn = document.querySelector('[data-testid$="-follow"]');
+                
+                if (unfollowBtn) {
+                    unfollowBtn.click(); // 触发取消关注
+                    
+                    // 【核心魔法】：等待 Twitter 的二次确认弹窗出现，并自动将其击杀
+                    await new Promise(resolve => setTimeout(resolve, 150));
+                    
+                    const confirmBtn = document.querySelector('[data-testid="confirmationSheetConfirm"]');
+                    if (confirmBtn) {
+                        confirmBtn.click();
+                    } else {
+                        // 兜底方案：寻找对话框中的取消按钮
+                        const dialog = document.querySelector('[role="dialog"], [data-testid="mask"]');
+                        if (dialog) {
+                            const btns = Array.from(dialog.querySelectorAll('[role="button"]'));
+                            const target = btns.find(b => /Unfollow|取消关注/i.test(b.textContent));
+                            if (target) target.click();
+                        }
+                    }
+                    return true;
+                } else if (followBtn) {
+                    followBtn.click(); // 触发关注
+                    return true;
+                }
+                return false;
+            }
+        },
+        'pixiv': {
+            match: /pixiv\.net/,
+            getContainer: (img) => document.body,
+            getStates: (container) => {
+                // Pixiv 状态嗅探 (尽量读取 aria 属性或高亮颜色)
+                const likeBtn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], [data-click-label="like"] button, button svg path[d*="M12"]')?.closest('button');
+                let isLiked = false;
+                if (likeBtn) {
+                    isLiked = likeBtn.innerHTML.includes('rgb(255, 64, 96)') || 
+                              likeBtn.innerHTML.includes('#FF4060') || 
+                              likeBtn.getAttribute('aria-pressed') === 'true';
+                }
+                const followBtn = container.querySelector('.gtm-main-follow, [data-click-action="follow"], [data-click-label="follow"]');
+                let isFollowed = false;
+                if (followBtn) {
+                    isFollowed = /已关注|Following/i.test(followBtn.textContent) || followBtn.dataset.clickAction === 'unfollow' || followBtn.getAttribute('aria-pressed') === 'true';
+                }
+                return { isLiked, isFollowed };
+            },
+            like: async (container) => {
+                const btn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], [data-click-label="like"] button, button svg path[d*="M12"]')?.closest('button');
+                if (btn) { btn.click(); return true; }
+                return false;
+            },
+            follow: async (container) => {
+                const btn = container.querySelector('.gtm-main-follow, [data-click-action="follow"], [data-click-label="follow"]');
+                if (btn) { btn.click(); return true; }
+                return false;
+            }
+        }
+    };
+
+    async function executePhantomAction(actionType) {
+        if (!currentHoveredImg) return;
+        const host = window.location.hostname;
+        let adapter = null;
+        for (let key in actionAdapters) {
+            if (actionAdapters[key].match.test(host)) { adapter = actionAdapters[key]; break; }
+        }
+        
+        if (!adapter) {
+            showToast("⚠️ 该网站暂不支持快捷交互");
+            return;
+        }
+
+        const container = adapter.getContainer(currentHoveredImg) || document.body;
+        const initialStates = adapter.getStates(container);
+        let success = false;
+
+        if (actionType === 'like') {
+            success = await adapter.like(container);
+            if (success) showToast(initialStates.isLiked ? "🤍 已取消喜欢" : "❤️ 已喜欢");
+        } else {
+            success = await adapter.follow(container);
+            if (success) showToast(initialStates.isFollowed ? "👋 已取消关注" : "🫂 已成功关注");
+        }
+
+        if (!success) {
+            showToast("❌ 未找到对应的操作按钮");
+        } else {
+            // 动作执行完毕后，延迟 300 毫秒重新读取 DOM，刷新底部 HUD 状态
+            setTimeout(updateImmersiveHUD, 300);
+        }
+    }
+    // ==========================================
 
     const syncConfig = (res) => {
         if (!res) return;
@@ -50,6 +161,8 @@
             let storageKey = 'key' + k.charAt(0).toUpperCase() + k.slice(1);
             if (res[storageKey]) keys[k] = res[storageKey];
         });
+        
+        updateImmersiveHUD();
     };
 
     if (isContextValid()) {
@@ -146,20 +259,24 @@
     const noticeBox = document.createElement('div'); noticeBox.className = 'notice-container-xyz';
     noticeBox.innerHTML = '⚠️ 未同意协议<br>请点击右上角图标同意并开启功能';
     
+    const styleBlock = document.createElement('style');
+    styleBlock.innerHTML = `
+        .kbd-btn { background:rgba(255,255,255,0.2); padding:2px 6px; border-radius:4px; font-family: monospace; font-weight: bold; margin: 0 2px;}
+    `;
+    document.head.appendChild(styleBlock);
+
     const immersiveHint = document.createElement('div'); 
     immersiveHint.id = 'img-zoom-pro-immersive-hint';
-    // 【更新】提示文案修正为双击退出
-    immersiveHint.innerHTML = '⌨️ 左右键切换 &nbsp;|&nbsp; 💾 按 <kbd style="background:rgba(255,255,255,0.2);padding:2px 6px;border-radius:4px">S</kbd> 下载 &nbsp;|&nbsp; ❌ 双击背景或 ESC 退出';
 
     const initViewer = () => {
         if (!document.body) { setTimeout(initViewer, 100); return; }
         
         Object.assign(immersiveHint.style, {
             position: 'absolute', bottom: '40px', left: '50%', transform: 'translateX(-50%)',
-            color: 'rgba(255,255,255,0.9)', background: 'rgba(20,20,20,0.8)', padding: '10px 24px',
+            color: 'rgba(255,255,255,0.9)', background: 'rgba(20,20,20,0.8)', padding: '12px 28px',
             borderRadius: '30px', fontSize: '14px', fontFamily: 'system-ui, sans-serif',
             pointerEvents: 'none', transition: 'opacity 0.6s ease', zIndex: '2147483647',
-            display: 'none', opacity: '0', boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+            display: 'none', opacity: '0', boxShadow: '0 4px 12px rgba(0,0,0,0.5)', whiteSpace: 'nowrap'
         });
 
         viewer.appendChild(zoomImg); viewer.appendChild(statusLabel); viewer.appendChild(noticeBox); viewer.appendChild(immersiveHint);
@@ -167,10 +284,45 @@
     };
     initViewer();
 
+    // 【新增】统一更新 HUD 状态的引擎
+    function updateImmersiveHUD() {
+        if (!config.isImmersive) return;
+        
+        let likeText = "喜欢"; let likeIcon = "🤍";
+        let followText = "关注"; let followIcon = "👤";
+
+        if (currentHoveredImg) {
+            const host = window.location.hostname;
+            let adapter = null;
+            for (let key in actionAdapters) {
+                if (actionAdapters[key].match.test(host)) { adapter = actionAdapters[key]; break; }
+            }
+            if (adapter) {
+                const container = adapter.getContainer(currentHoveredImg) || document.body;
+                const states = adapter.getStates(container);
+                if (states.isLiked !== null) {
+                    likeText = states.isLiked ? "已喜欢" : "未喜欢";
+                    likeIcon = states.isLiked ? "❤️" : "🤍";
+                }
+                if (states.isFollowed !== null) {
+                    followText = states.isFollowed ? "已关注" : "未关注";
+                    followIcon = states.isFollowed ? "🫂" : "👤";
+                }
+            }
+        }
+
+        const hintKbdLike = (keys.like || 'l').toUpperCase();
+        const hintKbdFollow = (keys.follow || 'f').toUpperCase();
+        
+        immersiveHint.innerHTML = `⌨️ 左右切换 &nbsp;|&nbsp; 💾 下载(<kbd class="kbd-btn">S</kbd>) &nbsp;|&nbsp; ${likeIcon} ${likeText}(<kbd class="kbd-btn">${hintKbdLike}</kbd>) &nbsp;&nbsp; ${followIcon} ${followText}(<kbd class="kbd-btn">${hintKbdFollow}</kbd>) &nbsp;|&nbsp; ❌ 双击退出`;
+    }
+
     function setStyle(el, prop, val) { el.style.setProperty(prop, val, 'important'); }
     
     function handleImmersiveActivity() {
         if (!config.isImmersive || viewer.style.display !== 'block') return;
+        
+        updateImmersiveHUD(); // 唤醒时实时更新状态
         
         setStyle(viewer, 'cursor', 'default');
         setStyle(zoomImg, 'cursor', 'default');
@@ -188,7 +340,14 @@
 
         hintFadeTimer = setTimeout(() => {
             setStyle(immersiveHint, 'opacity', '0');
-        }, 2500);
+        }, 3000); 
+    }
+
+    function exitImmersiveMode() {
+        config.isImmersive = false;
+        if (isContextValid()) chrome.storage.local.set({ isImmersive: false }); 
+        showToast('❎ 已退出沉浸图库模式');
+        hideViewer();
     }
 
     function hideViewer() {
@@ -201,6 +360,7 @@
         customLensWidth = null;
         customLensHeight = null;
         isZoomManuallyChanged = false;
+        window.isFetchingMore = false; 
         
         clearTimeout(hideCursorTimer);
         clearTimeout(hintFadeTimer);
@@ -212,35 +372,24 @@
         if (rAF_ID) cancelAnimationFrame(rAF_ID);
     }
 
-    // 【新增核心引擎】：全局统一的沉浸模式退出逻辑
-    function exitImmersiveMode() {
-        config.isImmersive = false;
-        if (isContextValid()) chrome.storage.local.set({ isImmersive: false }); // 同步设置到底层
-        showToast('❎ 已退出沉浸图库模式');
-        hideViewer();
-    }
-
-    // 【修改】：支持双击/防误触单击的背景监听器
     viewer.addEventListener('click', (e) => {
         if (e.target === viewer) {
             if (config.isImmersive) {
                 bgClickCount++;
                 if (bgClickCount === 1) {
                     showToast("⚠️ 请再点一次或双击退出");
-                    bgClickTimer = setTimeout(() => { bgClickCount = 0; }, 1000); // 1秒内连击有效
+                    bgClickTimer = setTimeout(() => { bgClickCount = 0; }, 1000); 
                 } else if (bgClickCount >= 2) {
                     clearTimeout(bgClickTimer);
                     bgClickCount = 0;
                     exitImmersiveMode();
                 }
             } else {
-                // 普通模式下，单机依然立即隐藏
                 hideViewer();
             }
         }
     });
 
-    // 兼容用户的原生双击习惯
     viewer.addEventListener('dblclick', (e) => {
         if (config.isImmersive && e.target === viewer) {
             clearTimeout(bgClickTimer);
@@ -578,7 +727,6 @@
         if (matchCombo(e, keys.immersive)) {
             e.preventDefault();
             if (config.isImmersive) {
-                // 【核心修改】交给统一的引擎退出
                 exitImmersiveMode();
             } else {
                 config.isImmersive = true;
@@ -605,11 +753,18 @@
 
         if (viewer.style.display !== 'block') return;
 
+        if (matchCombo(e, keys.like)) {
+            if (config.isImmersive) { executePhantomAction('like'); e.preventDefault(); return; }
+        }
+        else if (matchCombo(e, keys.follow)) {
+            if (config.isImmersive) { executePhantomAction('follow'); e.preventDefault(); return; }
+        }
+
         if (k === keys.rotate) { config.rotate = (config.rotate + 90) % 360; up = true; } 
         else if (k === keys.mirror) { config.mirror *= -1; up = true; } 
         else if (k === keys.mode) { 
             if (config.isImmersive) {
-                showToast(`⚠️ 请先按 ${keys.immersive.toUpperCase()} 退出沉浸模式`);
+                showToast(`⚠️ 请双击背景或按 ${keys.immersive.toUpperCase()} 退出沉浸模式`);
             } else {
                 config.mode = modeList[(modeList.indexOf(config.mode) + 1) % modeList.length]; 
                 save({ mode: config.mode }); 
@@ -628,7 +783,6 @@
         }
         else if (matchCombo(e, 'escape')) {
             if (config.isImmersive) {
-                // 【核心修改】交给统一的引擎退出
                 exitImmersiveMode();
                 e.preventDefault(); return;
             }

@@ -5,15 +5,19 @@ const defaultConfigs = {
     showStatus: true, 
     smallImageOptimization: true, 
     zoomLevel: 2.0, 
-    isImmersive: false, // 沉浸模式默认参数
+    isImmersive: false, 
     mode: 'partial', 
     keyMode: 'v', 
     keyRotate: 'r', 
     keyMirror: 'm', 
     keyZoomIn: '=', 
     keyZoomOut: '-',
-    keyImmersive: 'ctrl+f12' // 沉浸模式快捷键默认参数
+    keyImmersive: 'ctrl+f12',
+    // === 新增这两行默认键 ===
+    keyLike: 'l',
+    keyFollow: 'f'
 };
+// 后面的代码保持不变...
 const ids = Object.keys(defaultConfigs);
 const saveBtn = document.getElementById('saveBtn');
 const resetBtn = document.getElementById('resetBtn');
