@@ -1,5 +1,5 @@
 // immersive-rules.js
-// Mix01 沉浸模式专属动作库 (独立引擎)
+// Mix01 沉浸模式专属动作库 (独立引擎 性能优化版)
 
 (function () {
     const tools = {
@@ -20,7 +20,6 @@
         '(?:(?:.+\\.)?twitter|x)\\.com': {
             getContainer: (img) => img.closest('article') || document.body,
             
-            // 智能过滤去广告
             getGalleryImages: () => {
                 return Array.from(document.querySelectorAll('img')).filter(img => {
                     if (img.id === 'zoom-img-xyz') return false;
@@ -157,12 +156,15 @@
         }
     };
 
-    // 暴露统一调用接口给 Content.js
+    // 【性能优化 3】正则缓存
+    const regexCacheHost = {};
+
     window.Mix01ImmersiveEngine = {
         configs: Mix01ImmersiveRules,
         getAdapter(host) {
             for (const pattern in this.configs) {
-                if (new RegExp(`^${pattern}$`).test(host)) {
+                if (!regexCacheHost[pattern]) regexCacheHost[pattern] = new RegExp(`^${pattern}$`);
+                if (regexCacheHost[pattern].test(host)) {
                     return this.configs[pattern];
                 }
             }

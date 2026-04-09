@@ -27,6 +27,13 @@
     let bgClickCount = 0;
     let bgClickTimer = null;
 
+    // 【性能优化 1】DOM 穿透探测缓存
+    let lastTarget = null;
+    let lastFoundImg = null;
+
+    // 【性能优化 2】CSS 脏检查缓存池
+    const styleCache = new Map();
+
     window.__mix01FollowCache = window.__mix01FollowCache || {};
 
     const modeList = ['partial', 'full-follow', 'full-center'];
@@ -35,9 +42,6 @@
 
     const isContextValid = () => !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
 
-    // ==========================================
-    // 从独立沉浸引擎获取适配器
-    // ==========================================
     function getImmersiveAdapter() {
         if (window.Mix01ImmersiveEngine && window.Mix01ImmersiveEngine.getAdapter) {
             return window.Mix01ImmersiveEngine.getAdapter(window.location.hostname);
@@ -253,7 +257,14 @@
         immersiveHint.innerHTML = `⌨️ 左右切换 &nbsp;|&nbsp; 💾 下载(<kbd class="kbd-btn">S</kbd>) ${actionsHtml} &nbsp;|&nbsp; ❌ 双击退出`;
     }
 
-    function setStyle(el, prop, val) { el.style.setProperty(prop, val, 'important'); }
+    // 【核心性能优化】：极速脏检查机制，拦截冗余的 DOM API 调用
+    function setStyle(el, prop, val) { 
+        const key = (el.id || el.className) + '_' + prop;
+        if (styleCache.get(key) !== val) {
+            el.style.setProperty(prop, val, 'important'); 
+            styleCache.set(key, val);
+        }
+    }
     
     function handleImmersiveActivity() {
         if (!config.isImmersive || viewer.style.display !== 'block') return;
@@ -298,6 +309,10 @@
         isZoomManuallyChanged = false;
         window.isFetchingMore = false; 
         
+        // 释放探测缓存，防止内存泄漏
+        lastTarget = null;
+        lastFoundImg = null;
+
         clearTimeout(hideCursorTimer);
         clearTimeout(hintFadeTimer);
         setStyle(immersiveHint, 'opacity', '0');
@@ -347,16 +362,38 @@
         statusLabel.className = type === 'hd' ? 'status-hd' : 'status-original';
     }
 
+    // 【核心性能优化】：带有靶向记忆的 DOM 穿透探测
     function getImgUnderCursor(clientX, clientY, target) {
-        if (target && target.tagName === 'IMG' && target.src) return target;
+        // 最快路径：如果直接摸在 IMG 标签上
+        if (target && target.tagName === 'IMG' && target.src) {
+            lastTarget = target;
+            lastFoundImg = target;
+            return target;
+        }
+        
+        // 靶向记忆路径：如果在一个遮罩层（如 div）上滑动，且上次找到的图还在，直接免检返回！极大减轻浏览器负担！
+        if (target && target === lastTarget && lastFoundImg) {
+            return lastFoundImg;
+        }
+
+        // 最慢路径：深度穿透扫描（只在跨越元素边界的瞬间触发）
         const elements = document.elementsFromPoint(clientX, clientY);
         if (!elements) return null;
+        
+        let found = null;
         for (let i = 0; i < elements.length; i++) {
             const el = elements[i];
             if (el.id === 'img-zoom-pro-viewer-xyz' || el.id === 'zoom-img-xyz') continue;
-            if (el.tagName === 'IMG' && el.src) return el;
+            if (el.tagName === 'IMG' && el.src) {
+                found = el;
+                break;
+            }
         }
-        return null;
+        
+        // 更新缓存记录
+        lastTarget = target;
+        lastFoundImg = found;
+        return found;
     }
 
     async function triggerZoom(target) {
@@ -426,11 +463,12 @@
         if (config.isImmersive) handleImmersiveActivity();
     }
 
+    // 绑定 passive 属性优化滚动与触控事件
     document.addEventListener('mouseover', (e) => {
         if (config.isImmersive && viewer.style.display === 'block') return; 
         const img = getImgUnderCursor(e.clientX, e.clientY, e.target);
         if (img) triggerZoom(img);
-    }, true); 
+    }, { capture: true, passive: true }); 
 
     document.addEventListener('mousemove', (e) => {
         window.lastMouseX = e.clientX; window.lastMouseY = e.clientY;
@@ -461,7 +499,7 @@
             if (rAF_ID) cancelAnimationFrame(rAF_ID);
             rAF_ID = requestAnimationFrame(() => renderViewer(e, cachedRect));
         }
-    }, true);
+    }, { capture: true, passive: true });
 
     document.addEventListener('mouseout', (e) => { 
         if (config.isImmersive && viewer.style.display === 'block') return; 
@@ -469,12 +507,12 @@
             if (e.relatedTarget && currentHoveredImg.contains(e.relatedTarget)) return;
             if (Date.now() - keyboardSwitchTime > 500) hideViewer(); 
         }
-    }, true);
+    }, { capture: true, passive: true });
 
     document.addEventListener('mouseleave', () => {
         if (config.isImmersive && viewer.style.display === 'block') return;
         if (Date.now() - keyboardSwitchTime > 500) hideViewer();
-    }, true);
+    }, { capture: true, passive: true });
 
     function renderViewer(e = null, rect = null) {
         if (!currentHoveredImg) return;
@@ -498,8 +536,8 @@
             setStyle(viewer, 'position', 'fixed');
             setStyle(viewer, 'width', '100vw');
             setStyle(viewer, 'height', '100vh');
-            setStyle(viewer, 'left', '0');
-            setStyle(viewer, 'top', '0');
+            setStyle(viewer, 'left', '0px');
+            setStyle(viewer, 'top', '0px');
             setStyle(viewer, 'background-color', 'rgba(0, 0, 0, 0.95)'); 
             setStyle(viewer, 'background-image', 'none');
             setStyle(viewer, 'border', 'none'); 
@@ -530,7 +568,7 @@
                 setStyle(zoomImg, 'left', `${(sW - tW) / 2}px`);
                 setStyle(zoomImg, 'top', `${(sH - tH) / 2}px`);
             }
-            setStyle(zoomImg, 'margin', '0');
+            setStyle(zoomImg, 'margin', '0px');
         } 
         else if (config.mode === 'partial') {
             setStyle(viewer, 'display', 'block'); setStyle(viewer, 'position', 'fixed'); setStyle(viewer, 'overflow', 'hidden'); 
@@ -563,7 +601,7 @@
                     setStyle(viewer, 'border', '1px solid rgba(255, 255, 255, 0.4)'); 
                 }
 
-                setStyle(zoomImg, 'right', 'auto'); setStyle(zoomImg, 'bottom', 'auto'); setStyle(zoomImg, 'margin', '0');
+                setStyle(zoomImg, 'right', 'auto'); setStyle(zoomImg, 'bottom', 'auto'); setStyle(zoomImg, 'margin', '0px');
                 let offsetX = 0, offsetY = 0;
                 if (cDW > lensW) offsetX = -(cDW * xP - lensW / 2); else offsetX = (lensW - cDW) / 2;
                 if (cDH > lensH) offsetY = -(cDH * yP - lensH / 2); else offsetY = (lensH - cDH) / 2;
@@ -572,7 +610,7 @@
         } else {
             setStyle(viewer, 'display', 'block'); setStyle(viewer, 'position', 'fixed');
             setStyle(viewer, 'background-color', 'rgba(20, 20, 20, 0.9)'); setStyle(viewer, 'background-image', 'none');
-            setStyle(zoomImg, 'position', 'absolute'); setStyle(zoomImg, 'right', 'auto'); setStyle(zoomImg, 'bottom', 'auto'); setStyle(zoomImg, 'margin', '0');
+            setStyle(zoomImg, 'position', 'absolute'); setStyle(zoomImg, 'right', 'auto'); setStyle(zoomImg, 'bottom', 'auto'); setStyle(zoomImg, 'margin', '0px');
 
             let tW = rect.width * activeZoom, tH = rect.height * activeZoom;
             const maxVW = sW * (config.mode === 'full-follow' ? 0.7 : 0.95);
@@ -587,7 +625,7 @@
                 setStyle(viewer, 'width', `${tW}px`); setStyle(viewer, 'height', `${tH}px`);
                 if (config.hasAgreed) {
                     setStyle(zoomImg, 'width', '100%'); setStyle(zoomImg, 'height', '100%');
-                    setStyle(zoomImg, 'left', '0'); setStyle(zoomImg, 'top', '0');
+                    setStyle(zoomImg, 'left', '0px'); setStyle(zoomImg, 'top', '0px');
                 }
             } else {
                 const vW = Math.min(tW, maxVW), vH = Math.min(tH, maxVH);
