@@ -173,20 +173,18 @@
     }
 
     async function downloadImage(url) {
-        showToast("⏳ 正在解析并打包原图...");
+        showToast("⏳ 正在打通后台进行安全下载...");
         try {
-            const b64 = await fetchAsBase64(url);
-            chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: url, dataUrl: b64 }, (response) => {
+            chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: url }, (response) => {
                 if (chrome.runtime.lastError) {
-                    window.open(url, '_blank');
-                    showToast("⚠️ 扩展通信失败，已在新标签页打开");
+                    console.warn(chrome.runtime.lastError);
+                    showToast("❌ 后台离线！请去扩展管理页【刷新本插件】");
                 } else {
-                    showToast("✅ 已成功保存至 IMG_Download 文件夹！");
+                    showToast("✅ 下载指令已送达后台！");
                 }
             });
         } catch (e) {
-            window.open(url, '_blank');
-            showToast("⚠️ 跨域安全拦截，已在新标签页打开");
+            showToast("❌ 扩展环境已失效，请刷新当前网页重试！");
         }
     }
 
