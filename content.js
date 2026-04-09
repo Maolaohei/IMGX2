@@ -55,18 +55,27 @@
             const src = request.clickedUrl || zoomImg.src;
             const targetEl = request.clickedUrl ? (currentHoveredSrc === request.clickedUrl ? currentHoveredImg : document.createElement('img')) : zoomImg;
             
-            window.Mix01RuleEngine.getHighResUrl(targetEl, src).then(targetUrl => {
-                sendResponse({ url: targetUrl });
-            });
+            if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
+                window.Mix01RuleEngine.getHighResUrl(targetEl, src).then(targetUrl => {
+                    sendResponse({ url: targetUrl });
+                });
+            } else {
+                sendResponse({ url: src });
+            }
             return true; // 告知 Chrome 这是一个异步响应
         } else if (request.action === "copyHDUrl") {
             const src = request.clickedUrl || zoomImg.src;
             const targetEl = request.clickedUrl ? (currentHoveredSrc === request.clickedUrl ? currentHoveredImg : document.createElement('img')) : zoomImg;
             
-            window.Mix01RuleEngine.getHighResUrl(targetEl, src).then(targetUrl => {
-                copyImageToClipboard(targetUrl);
+            if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
+                window.Mix01RuleEngine.getHighResUrl(targetEl, src).then(targetUrl => {
+                    copyImageToClipboard(targetUrl);
+                    sendResponse({ status: "ok" });
+                });
+            } else {
+                copyImageToClipboard(src);
                 sendResponse({ status: "ok" });
-            });
+            }
             return true; // 告知 Chrome 这是一个异步响应
         }
     });
@@ -211,19 +220,21 @@
 
                 try {
                     // 调用原生引擎异步获取高清链接
-                    const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, target.src);
-                    
-                    if (hdUrl && hdUrl !== target.src && !badHdUrls.has(hdUrl)) {
-                        const tempImg = new Image();
-                        tempImg.onload = () => { 
-                            // 确保鼠标还没移走才进行替换
-                            if (loadingTask === myTask && currentHoveredImg === target) {
-                                zoomImg.src = hdUrl; 
-                                renderViewer(null, cachedRect); 
-                            }
-                        };
-                        tempImg.onerror = () => badHdUrls.add(hdUrl);
-                        tempImg.src = hdUrl;
+                    if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
+                        const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, target.src);
+                        
+                        if (hdUrl && hdUrl !== target.src && !badHdUrls.has(hdUrl)) {
+                            const tempImg = new Image();
+                            tempImg.onload = () => { 
+                                // 确保鼠标还没移走才进行替换
+                                if (loadingTask === myTask && currentHoveredImg === target) {
+                                    zoomImg.src = hdUrl; 
+                                    renderViewer(null, cachedRect); 
+                                }
+                            };
+                            tempImg.onerror = () => badHdUrls.add(hdUrl);
+                            tempImg.src = hdUrl;
+                        }
                     }
                 } catch (error) {
                     console.warn('Mix01 Engine 解析失败:', error);
@@ -256,10 +267,11 @@
             if (img === currentHoveredImg) {
                 cachedRect = currentHoveredImg.getBoundingClientRect();
             } else {
-                const pad = 5;
-                if (e.clientX < cachedRect.left - pad || e.clientX > cachedRect.right + pad || 
-                    e.clientY < cachedRect.top - pad || e.clientY > cachedRect.bottom + pad) {
-                    hideViewer(); return;
+                // 【已修复】：严格判定边界，移除 5px 的 pad 容错
+                if (e.clientX < cachedRect.left || e.clientX > cachedRect.right || 
+                    e.clientY < cachedRect.top || e.clientY > cachedRect.bottom) {
+                    hideViewer(); 
+                    return;
                 }
             }
             if (rAF_ID) cancelAnimationFrame(rAF_ID);
@@ -274,6 +286,11 @@
             }
             hideViewer(); 
         }
+    }, true);
+
+    // 【新增修复】：防止鼠标缓慢移出浏览器界面导致的残留
+    document.addEventListener('mouseleave', () => {
+        hideViewer();
     }, true);
 
     function renderViewer(e = null, rect = null) {
