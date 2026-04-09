@@ -5,12 +5,12 @@
     let config = { 
         hasAgreed: false, loadHD: 'true', breakoutView: false, 
         showStatus: true, smallImageOptimization: true, 
-        zoom: 2.0, rotate: 0, mirror: 1, mode: 'partial' 
+        zoom: 2.0, rotate: 0, mirror: 1, mode: 'partial',
+        isImmersive: false
     };
     
     let activeZoom = 2.0; 
-    let keys = { mode: 'v', rotate: 'r', mirror: 'm', zoomIn: '=', zoomOut: '-' };
-    
+    let keys = { mode: 'v', rotate: 'r', mirror: 'm', zoomIn: '=', zoomOut: '-', immersive: 'ctrl+f12' };
     let currentHoveredImg = null;
     let currentHoveredSrc = null; 
     let cachedRect = null; 
@@ -22,17 +22,15 @@
     let customLensHeight = null;
     let isZoomManuallyChanged = false;
     let keyboardSwitchTime = 0; 
-
     let hideCursorTimer = null;
     let hintFadeTimer = null;
 
-    const modeList = ['partial', 'full-follow', 'full-center', 'immersive'];
-    const modeNames = { 
-        'partial': '🔍 局部放大', 
-        'full-follow': '🖼️ 整体跟随', 
-        'full-center': '📐 智能避让',
-        'immersive': '🌌 沉浸图库' 
-    };
+    // 【新增】背景连击防误触计时器
+    let bgClickCount = 0;
+    let bgClickTimer = null;
+
+    const modeList = ['partial', 'full-follow', 'full-center'];
+    const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
     const badHdUrls = new Set();
 
     const isContextValid = () => !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
@@ -44,6 +42,7 @@
         if (res.breakoutView !== undefined) config.breakoutView = res.breakoutView;
         if (res.showStatus !== undefined) config.showStatus = res.showStatus;
         if (res.smallImageOptimization !== undefined) config.smallImageOptimization = res.smallImageOptimization;
+        if (res.isImmersive !== undefined) config.isImmersive = res.isImmersive;
         if (res.mode !== undefined) config.mode = res.mode;
         if (res.zoomLevel !== undefined) config.zoom = parseFloat(res.zoomLevel);
         
@@ -64,25 +63,24 @@
     }
 
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        if (request.action === "getHDUrl") {
+        const getUrlAndProcess = async (actionFn) => {
             const src = request.clickedUrl || zoomImg.src;
             const targetEl = request.clickedUrl ? (currentHoveredSrc === request.clickedUrl ? currentHoveredImg : document.createElement('img')) : zoomImg;
+            let targetUrl = src;
             if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
-                window.Mix01RuleEngine.getHighResUrl(targetEl, src).then(targetUrl => sendResponse({ url: targetUrl }));
-            } else sendResponse({ url: src });
+                targetUrl = await window.Mix01RuleEngine.getHighResUrl(targetEl, src);
+            }
+            actionFn(targetUrl);
+        };
+
+        if (request.action === "getHDUrl") {
+            getUrlAndProcess(url => sendResponse({ url: url }));
             return true;
         } else if (request.action === "copyHDUrl") {
-            const src = request.clickedUrl || zoomImg.src;
-            const targetEl = request.clickedUrl ? (currentHoveredSrc === request.clickedUrl ? currentHoveredImg : document.createElement('img')) : zoomImg;
-            if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
-                window.Mix01RuleEngine.getHighResUrl(targetEl, src).then(targetUrl => {
-                    copyImageToClipboard(targetUrl);
-                    sendResponse({ status: "ok" });
-                });
-            } else {
-                copyImageToClipboard(src);
-                sendResponse({ status: "ok" });
-            }
+            getUrlAndProcess(url => { copyImageToClipboard(url); sendResponse({ status: "ok" }); });
+            return true;
+        } else if (request.action === "saveHDUrl") {
+            getUrlAndProcess(url => { downloadImage(url); sendResponse({ status: "ok" }); });
             return true;
         }
     });
@@ -112,33 +110,32 @@
         } catch (err) { showToast("❌ 获取图片失败，可能存在跨域限制"); }
     }
 
+    async function fetchAsBase64(url) {
+        const response = await fetch(url);
+        const blob = await response.blob();
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    }
+
     async function downloadImage(url) {
-        showToast("⏳ 正在准备下载...");
+        showToast("⏳ 正在解析并打包原图...");
         try {
-            const response = await fetch(url);
-            const blob = await response.blob();
-            const blobUrl = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = blobUrl;
-            
-            let filename = "image";
-            try {
-                const urlObj = new URL(url);
-                const fullPath = urlObj.pathname.split('/').pop();
-                const extMatch = fullPath.match(/\.(jpe?g|png|gif|webp|bmp|svg)/i);
-                if (extMatch) filename = fullPath; 
-                else filename = fullPath + ".jpg";
-            } catch (e) { filename = "image.jpg"; }
-            
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(blobUrl);
-            showToast("✅ 开始下载！");
-        } catch (err) {
+            const b64 = await fetchAsBase64(url);
+            chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: url, dataUrl: b64 }, (response) => {
+                if (chrome.runtime.lastError) {
+                    window.open(url, '_blank');
+                    showToast("⚠️ 扩展通信失败，已在新标签页打开");
+                } else {
+                    showToast("✅ 已成功保存至 IMG_Download 文件夹！");
+                }
+            });
+        } catch (e) {
             window.open(url, '_blank');
-            showToast("⚠️ 跨域限制，已在新标签页打开原图");
+            showToast("⚠️ 跨域安全拦截，已在新标签页打开原图");
         }
     }
 
@@ -151,7 +148,8 @@
     
     const immersiveHint = document.createElement('div'); 
     immersiveHint.id = 'img-zoom-pro-immersive-hint';
-    immersiveHint.innerHTML = '⌨️ 左右键切换 &nbsp;|&nbsp; 💾 按 <kbd style="background:rgba(255,255,255,0.2);padding:2px 6px;border-radius:4px">S</kbd> 下载 &nbsp;|&nbsp; ❌ 点击背景或 ESC 退出';
+    // 【更新】提示文案修正为双击退出
+    immersiveHint.innerHTML = '⌨️ 左右键切换 &nbsp;|&nbsp; 💾 按 <kbd style="background:rgba(255,255,255,0.2);padding:2px 6px;border-radius:4px">S</kbd> 下载 &nbsp;|&nbsp; ❌ 双击背景或 ESC 退出';
 
     const initViewer = () => {
         if (!document.body) { setTimeout(initViewer, 100); return; }
@@ -172,7 +170,7 @@
     function setStyle(el, prop, val) { el.style.setProperty(prop, val, 'important'); }
     
     function handleImmersiveActivity() {
-        if (config.mode !== 'immersive' || viewer.style.display !== 'block') return;
+        if (!config.isImmersive || viewer.style.display !== 'block') return;
         
         setStyle(viewer, 'cursor', 'default');
         setStyle(zoomImg, 'cursor', 'default');
@@ -214,8 +212,41 @@
         if (rAF_ID) cancelAnimationFrame(rAF_ID);
     }
 
+    // 【新增核心引擎】：全局统一的沉浸模式退出逻辑
+    function exitImmersiveMode() {
+        config.isImmersive = false;
+        if (isContextValid()) chrome.storage.local.set({ isImmersive: false }); // 同步设置到底层
+        showToast('❎ 已退出沉浸图库模式');
+        hideViewer();
+    }
+
+    // 【修改】：支持双击/防误触单击的背景监听器
     viewer.addEventListener('click', (e) => {
-        if (config.mode === 'immersive' && e.target === viewer) hideViewer();
+        if (e.target === viewer) {
+            if (config.isImmersive) {
+                bgClickCount++;
+                if (bgClickCount === 1) {
+                    showToast("⚠️ 请再点一次或双击退出");
+                    bgClickTimer = setTimeout(() => { bgClickCount = 0; }, 1000); // 1秒内连击有效
+                } else if (bgClickCount >= 2) {
+                    clearTimeout(bgClickTimer);
+                    bgClickCount = 0;
+                    exitImmersiveMode();
+                }
+            } else {
+                // 普通模式下，单机依然立即隐藏
+                hideViewer();
+            }
+        }
+    });
+
+    // 兼容用户的原生双击习惯
+    viewer.addEventListener('dblclick', (e) => {
+        if (config.isImmersive && e.target === viewer) {
+            clearTimeout(bgClickTimer);
+            bgClickCount = 0;
+            exitImmersiveMode();
+        }
     });
 
     function showToast(text) {
@@ -284,7 +315,7 @@
                             const tempImg = new Image();
                             tempImg.onload = () => { 
                                 if (loadingTask === myTask && currentHoveredImg === target) {
-                                    if (config.mode === 'partial' && isSmallImageOptimized && !isZoomManuallyChanged) {
+                                    if (!config.isImmersive && config.mode === 'partial' && isSmallImageOptimized && !isZoomManuallyChanged) {
                                         const nw = tempImg.naturalWidth, nh = tempImg.naturalHeight;
                                         if (nw > 350 || nh > 350) {
                                             customLensWidth = Math.min(nw, window.innerWidth * 0.9);
@@ -307,13 +338,11 @@
         }
         setStyle(viewer, 'display', 'block');
         
-        // 如果触发时默认就是沉浸模式，立刻唤醒 UI
-        if (config.mode === 'immersive') handleImmersiveActivity();
+        if (config.isImmersive) handleImmersiveActivity();
     }
 
     document.addEventListener('mouseover', (e) => {
-        // 【已修复】：只有沉浸模式且【正在显示大图时】才屏蔽外部鼠标探测
-        if (config.mode === 'immersive' && viewer.style.display === 'block') return; 
+        if (config.isImmersive && viewer.style.display === 'block') return; 
         const img = getImgUnderCursor(e.clientX, e.clientY, e.target);
         if (img) triggerZoom(img);
     }, true); 
@@ -321,8 +350,7 @@
     document.addEventListener('mousemove', (e) => {
         window.lastMouseX = e.clientX; window.lastMouseY = e.clientY;
 
-        // 【已修复】：只有沉浸模式且【正在显示大图时】才接管滑动逻辑，防止关闭后死锁
-        if (config.mode === 'immersive' && viewer.style.display === 'block') {
+        if (config.isImmersive && viewer.style.display === 'block') {
             handleImmersiveActivity();
             if (rAF_ID) cancelAnimationFrame(rAF_ID);
             if (cachedRect) rAF_ID = requestAnimationFrame(() => renderViewer(e, cachedRect));
@@ -351,7 +379,7 @@
     }, true);
 
     document.addEventListener('mouseout', (e) => { 
-        if (config.mode === 'immersive' && viewer.style.display === 'block') return; 
+        if (config.isImmersive && viewer.style.display === 'block') return; 
         if (e.target === currentHoveredImg) {
             if (e.relatedTarget && currentHoveredImg.contains(e.relatedTarget)) return;
             if (Date.now() - keyboardSwitchTime > 500) hideViewer(); 
@@ -359,7 +387,7 @@
     }, true);
 
     document.addEventListener('mouseleave', () => {
-        if (config.mode === 'immersive' && viewer.style.display === 'block') return;
+        if (config.isImmersive && viewer.style.display === 'block') return;
         if (Date.now() - keyboardSwitchTime > 500) hideViewer();
     }, true);
 
@@ -376,7 +404,11 @@
         const sW = window.innerWidth, sH = window.innerHeight;
         let cDW = 0, cDH = 0;
 
-        if (config.mode === 'immersive') {
+        const nw = zoomImg.naturalWidth || rect.width || 1;
+        const nh = zoomImg.naturalHeight || rect.height || 1;
+        const naturalRatio = nw / nh;
+
+        if (config.isImmersive) {
             setStyle(viewer, 'display', 'block');
             setStyle(viewer, 'position', 'fixed');
             setStyle(viewer, 'width', '100vw');
@@ -390,15 +422,17 @@
             setStyle(viewer, 'transform', 'none');
             setStyle(viewer, 'pointer-events', 'auto'); 
             
-            let tW = rect.width * activeZoom, tH = rect.height * activeZoom;
-            const ratio = (rect.width / rect.height) || 1;
-            
             if (!isZoomManuallyChanged) {
                 const maxW = sW * 0.95, maxH = sH * 0.95;
-                if (tW > maxW) { tW = maxW; tH = tW / ratio; }
-                if (tH > maxH) { tH = maxH; tW = tH * ratio; }
-                activeZoom = tW / (rect.width || 1); 
+                let fitW = nw, fitH = nh;
+                
+                if (fitW > maxW) { fitW = maxW; fitH = fitW / naturalRatio; }
+                if (fitH > maxH) { fitH = maxH; fitW = fitH * naturalRatio; }
+                
+                activeZoom = fitW / nw; 
             }
+            
+            let tW = nw * activeZoom, tH = nh * activeZoom;
             cDW = tW; cDH = tH;
             
             setStyle(zoomImg, 'position', 'absolute');
@@ -498,83 +532,166 @@
         if (config.hasAgreed) setStyle(zoomImg, 'transform', `scaleX(${config.mirror}) rotate(${config.rotate}deg)`);
     }
 
+    function matchCombo(e, comboStr) {
+        if (!comboStr) return false;
+        const parts = comboStr.toLowerCase().split('+').map(s => s.trim());
+        const key = parts.pop();
+        const ctrl = parts.includes('ctrl');
+        const shift = parts.includes('shift');
+        const alt = parts.includes('alt');
+        if (e.ctrlKey !== ctrl) return false;
+        if (e.shiftKey !== shift) return false;
+        if (e.altKey !== alt) return false;
+        return e.key.toLowerCase() === key || e.code.toLowerCase() === key;
+    }
+
+    function getGalleryImages() {
+        return Array.from(document.querySelectorAll('img')).filter(img => {
+            if (img.id === 'zoom-img-xyz') return false;
+            const rect = img.getBoundingClientRect();
+            return rect.width > 50 && rect.height > 50 && window.getComputedStyle(img).display !== 'none';
+        });
+    }
+
+    function performSwitch(nextImg, msgText) {
+        if (msgText) showToast(msgText);
+        keyboardSwitchTime = Date.now();
+        nextImg.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        triggerZoom(nextImg);
+
+        setTimeout(() => {
+            if (currentHoveredImg === nextImg) {
+                const newRect = nextImg.getBoundingClientRect();
+                window.lastMouseX = newRect.left + newRect.width / 2;
+                window.lastMouseY = newRect.top + newRect.height / 2;
+                renderViewer(null, newRect);
+                handleImmersiveActivity(); 
+            }
+        }, 50); 
+    }
+
     document.addEventListener('keydown', (e) => {
-        if (viewer.style.display !== 'block' || !config.hasAgreed) return;
+        if (!config.hasAgreed) return;
         const k = e.key.toLowerCase(); let up = false;
         const save = (d) => { if (isContextValid()) chrome.storage.local.set(d); };
         
+        if (matchCombo(e, keys.immersive)) {
+            e.preventDefault();
+            if (config.isImmersive) {
+                // 【核心修改】交给统一的引擎退出
+                exitImmersiveMode();
+            } else {
+                config.isImmersive = true;
+                save({ isImmersive: true });
+                showToast('🌌 开启沉浸图库模式');
+
+                if (!currentHoveredImg || viewer.style.display !== 'block') {
+                    const galleryImages = getGalleryImages();
+                    if (galleryImages.length > 0) {
+                        const nextImg = galleryImages[0];
+                        nextImg.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        triggerZoom(nextImg);
+                    } else {
+                        showToast("⚠️ 当前页面未发现可用图片");
+                        config.isImmersive = false;
+                        save({ isImmersive: false });
+                    }
+                } else {
+                    handleImmersiveActivity();
+                }
+            }
+            return;
+        }
+
+        if (viewer.style.display !== 'block') return;
+
         if (k === keys.rotate) { config.rotate = (config.rotate + 90) % 360; up = true; } 
         else if (k === keys.mirror) { config.mirror *= -1; up = true; } 
         else if (k === keys.mode) { 
-            config.mode = modeList[(modeList.indexOf(config.mode) + 1) % modeList.length]; 
-            save({ mode: config.mode }); 
-            up = true; 
-            showToast(modeNames[config.mode]); 
-            
-            if (config.mode !== 'immersive') {
-                setStyle(viewer, 'pointer-events', 'none'); 
-                setStyle(immersiveHint, 'opacity', '0');
-                setStyle(viewer, 'cursor', 'default');
-                setStyle(zoomImg, 'cursor', 'default');
+            if (config.isImmersive) {
+                showToast(`⚠️ 请先按 ${keys.immersive.toUpperCase()} 退出沉浸模式`);
             } else {
-                handleImmersiveActivity(); 
+                config.mode = modeList[(modeList.indexOf(config.mode) + 1) % modeList.length]; 
+                save({ mode: config.mode }); 
+                up = true; 
+                showToast(modeNames[config.mode]); 
             }
         }
         else if (k === keys.zoomIn || k === '+') { activeZoom += 0.5; isZoomManuallyChanged = true; showToast(`${activeZoom.toFixed(1)}x`); up = true; } 
-        else if (k === keys.zoomOut || k === '-') { activeZoom = Math.max(1.5, activeZoom - 0.5); isZoomManuallyChanged = true; showToast(`${activeZoom.toFixed(1)}x`); up = true; }
+        else if (k === keys.zoomOut || k === '-') { activeZoom = Math.max(0.5, activeZoom - 0.5); isZoomManuallyChanged = true; showToast(`${activeZoom.toFixed(1)}x`); up = true; }
         
-        else if (k === 's') {
-            if (config.mode === 'immersive' && zoomImg.src) {
+        else if (matchCombo(e, 's')) {
+            if (config.isImmersive && zoomImg.src) {
                 downloadImage(zoomImg.src);
                 e.preventDefault(); return; 
             }
         }
-        else if (k === 'escape') {
-            if (config.mode === 'immersive') {
-                hideViewer();
+        else if (matchCombo(e, 'escape')) {
+            if (config.isImmersive) {
+                // 【核心修改】交给统一的引擎退出
+                exitImmersiveMode();
                 e.preventDefault(); return;
             }
         }
         else if (k === 'arrowleft' || k === 'a' || k === 'arrowright' || k === 'd') {
-            if (config.mode !== 'immersive') return;
+            if (!config.isImmersive || window.isFetchingMore) return;
 
-            const galleryImages = Array.from(document.querySelectorAll('img')).filter(img => {
-                if (img.id === 'zoom-img-xyz') return false;
-                const rect = img.getBoundingClientRect();
-                return rect.width > 50 && rect.height > 50 && window.getComputedStyle(img).display !== 'none';
-            });
+            const galleryImages = getGalleryImages();
+            if (galleryImages.length === 0) return;
 
-            if (galleryImages.length > 1 && currentHoveredImg) {
-                let currentIndex = galleryImages.indexOf(currentHoveredImg);
-                if (currentIndex === -1) currentIndex = 0;
-
-                let targetIndex;
-                if (k === 'arrowleft' || k === 'a') {
-                    targetIndex = (currentIndex - 1 + galleryImages.length) % galleryImages.length;
-                    showToast("⬅️ 上一张");
-                } else {
-                    targetIndex = (currentIndex + 1) % galleryImages.length;
-                    showToast("下一张 ➡️");
-                }
-
-                const nextImg = galleryImages[targetIndex];
-                keyboardSwitchTime = Date.now();
-                nextImg.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                triggerZoom(nextImg);
-
-                setTimeout(() => {
-                    if (currentHoveredImg === nextImg) {
-                        const newRect = nextImg.getBoundingClientRect();
-                        window.lastMouseX = newRect.left + newRect.width / 2;
-                        window.lastMouseY = newRect.top + newRect.height / 2;
-                        renderViewer(null, newRect);
-                        handleImmersiveActivity(); 
-                    }
-                }, 50); 
-                
-                e.preventDefault(); 
-                return; 
+            let currentIndex = galleryImages.indexOf(currentHoveredImg);
+            if (currentIndex === -1 && currentHoveredSrc) {
+                currentIndex = galleryImages.findIndex(img => img.src === currentHoveredSrc);
             }
+            if (currentIndex === -1) currentIndex = 0;
+
+            const isNext = (k === 'arrowright' || k === 'd');
+
+            if (isNext) {
+                if (currentIndex < galleryImages.length - 1) {
+                    performSwitch(galleryImages[currentIndex + 1], "下一张 ➡️");
+                } else {
+                    window.isFetchingMore = true;
+                    showToast("⏳ 正在加载更多动态...");
+                    window.scrollBy({ top: window.innerHeight * 0.8, behavior: 'smooth' });
+                    
+                    setTimeout(() => {
+                        const newGallery = getGalleryImages();
+                        let newIdx = newGallery.indexOf(currentHoveredImg);
+                        if (newIdx === -1) newIdx = newGallery.findIndex(img => img.src === currentHoveredSrc);
+                        
+                        if (newIdx !== -1 && newIdx < newGallery.length - 1) {
+                            performSwitch(newGallery[newIdx + 1], "下一张 ➡️");
+                        } else {
+                            showToast("🚧 到底啦！没有更多图片了");
+                        }
+                        window.isFetchingMore = false;
+                    }, 800);
+                }
+            } else {
+                if (currentIndex > 0) {
+                    performSwitch(galleryImages[currentIndex - 1], "⬅️ 上一张");
+                } else {
+                    window.isFetchingMore = true;
+                    showToast("⏳ 正在向上翻阅...");
+                    window.scrollBy({ top: -window.innerHeight * 0.8, behavior: 'smooth' });
+                    
+                    setTimeout(() => {
+                        const newGallery = getGalleryImages();
+                        let newIdx = newGallery.indexOf(currentHoveredImg);
+                        if (newIdx === -1) newIdx = newGallery.findIndex(img => img.src === currentHoveredSrc);
+                        
+                        if (newIdx !== -1 && newIdx > 0) {
+                            performSwitch(newGallery[newIdx - 1], "⬅️ 上一张");
+                        } else {
+                            showToast("🚧 到顶啦！");
+                        }
+                        window.isFetchingMore = false;
+                    }, 800);
+                }
+            }
+            e.preventDefault(); 
+            return; 
         }
         
         if (up) { 
