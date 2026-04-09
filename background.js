@@ -19,12 +19,22 @@ chrome.runtime.onInstalled.addListener(() => {
                 },
                 condition: {
                     urlFilter: "||pximg.net/*",
-                    resourceTypes: ["xmlhttprequest", "image", "main_frame", "sub_frame"]
+                    resourceTypes: ["xmlhttprequest", "image", "main_frame", "sub_frame", "other"]
                 }
             }]
         });
     }
 });
+
+function saveToHistory(filename, statusMsg) {
+    chrome.storage.local.get(['mix01_download_history'], (res) => {
+        let history = res.mix01_download_history || [];
+        const timeStr = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        history.unshift({ time: timeStr, filename: filename, status: statusMsg });
+        if (history.length > 50) history = history.slice(0, 50); 
+        chrome.storage.local.set({ mix01_download_history: history });
+    });
+}
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
     if (info.menuItemId === "saveOriginalImgMix01") {
@@ -56,7 +66,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         filename = filename.replace(/[\\/:*?"<>|]/g, "_");
         const finalDownloadName = `IMG_Download/${filename}_Mix01${ext}`;
 
-        // 此时 Fetch 请求会被上面的 DNR 规则自动注入 Referer，Pixiv 会乖乖交出原图
+        // DNR 规则自动注入 Referer，直接无视跨域与防盗链
         fetch(url)
             .then(res => {
                 if (!res.ok) throw new Error("Fetch 被拦截，状态码: " + res.status);
@@ -65,23 +75,34 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             .then(blob => {
                 const reader = new FileReader();
                 reader.onloadend = () => {
-                    // 转为 Base64 后交给 Chrome 原生下载，100% 成功，无视任何跨域限制
                     chrome.downloads.download({
                         url: reader.result,
                         filename: finalDownloadName,
                         saveAs: false,
                         conflictAction: "uniquify"
+                    }, (downloadId) => {
+                        if (chrome.runtime.lastError) {
+                            saveToHistory(finalDownloadName, "❌ 失败: " + chrome.runtime.lastError.message);
+                        } else {
+                            saveToHistory(finalDownloadName, "✅ 成功");
+                        }
                     });
                 };
                 reader.readAsDataURL(blob);
             })
             .catch(err => {
                 console.error("Mix01 后台安全下载失败:", err);
-                // 终极兜底方案：交由浏览器自己去下（如果上面的 DNR 规则生效，这里也能成）
                 chrome.downloads.download({
                     url: url,
                     filename: finalDownloadName,
-                    saveAs: false
+                    saveAs: false,
+                    conflictAction: "uniquify"
+                }, (downloadId) => {
+                     if (chrome.runtime.lastError) {
+                        saveToHistory(finalDownloadName, "❌ 失败: 防盗链拦截");
+                    } else {
+                        saveToHistory(finalDownloadName, "✅ 成功 (原生通道)");
+                    }
                 });
             });
             

@@ -26,9 +26,11 @@ const agreeBtn = document.getElementById('agreeBtn');
 const overlay = document.getElementById('disclaimerOverlay');
 const agreedStatus = document.getElementById('agreedStatus');
 const msg = document.getElementById('saveMsg');
-
 const isImmersiveEl = document.getElementById('isImmersive');
 const viewModeRow = document.getElementById('viewModeRow');
+
+const historyList = document.getElementById('historyList');
+const clearHistoryBtn = document.getElementById('clearHistoryBtn');
 
 function updateViewModeUI() {
     if (isImmersiveEl.checked) {
@@ -41,6 +43,23 @@ function updateViewModeUI() {
 }
 isImmersiveEl.addEventListener('change', updateViewModeUI);
 
+function renderHistory() {
+    chrome.storage.local.get(['mix01_download_history'], (res) => {
+        const history = res.mix01_download_history || [];
+        if (history.length === 0) {
+            historyList.innerHTML = '<div style="color: #888; text-align: center; padding: 15px;">暂无记录</div>';
+            return;
+        }
+        historyList.innerHTML = history.map(item => `
+            <div class="history-item">
+                <strong style="color: ${item.status.includes('成功') ? '#4CAF50' : '#F44336'}">${item.status}</strong> 
+                <span style="color: #999; margin-left: 5px;">${item.time}</span><br>
+                <div style="color: #333; margin-top: 3px;">${item.filename}</div>
+            </div>
+        `).join('');
+    });
+}
+
 chrome.storage.local.get(ids, (res) => {
     if (!res.hasAgreed) overlay.style.display = 'flex';
     else agreedStatus.style.display = 'block';
@@ -51,6 +70,8 @@ chrome.storage.local.get(ids, (res) => {
     });
     updateViewModeUI(); 
 });
+
+renderHistory(); 
 
 agreeBtn.addEventListener('click', () => { chrome.storage.local.set({ hasAgreed: true }, () => { overlay.style.display = 'none'; agreedStatus.style.display = 'block'; }); });
 
@@ -66,3 +87,11 @@ saveBtn.addEventListener('click', () => {
 });
 
 resetBtn.addEventListener('click', () => { chrome.storage.local.set({ ...defaultConfigs, hasAgreed: true }, () => { window.location.reload(); }); });
+
+clearHistoryBtn.addEventListener('click', () => {
+    chrome.storage.local.set({ mix01_download_history: [] }, () => {
+        renderHistory();
+        msg.innerText = "✓ 历史记录已清空！";
+        msg.style.display = 'block'; setTimeout(() => { msg.style.display = 'none'; msg.innerText = "✓ 操作成功！"; }, 1500);
+    });
+});

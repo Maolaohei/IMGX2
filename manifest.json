@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Image Pro Zoomer (Mix01 Edition)",
-  "version": "7.0",
-  "description": "本地图片利器：支持高清解析、右键原图下载、复制到剪贴板 (Mix01 开发)",
+  "name": "Mix01 Immersive Engine",
+  "version": "2026.04.09",
+  "description": "极客级流媒体沉浸浏览与下载引擎",
   "permissions": [
     "storage",
     "downloads",
@@ -10,21 +10,21 @@
     "declarativeNetRequest",
     "declarativeNetRequestWithHostAccess"
   ],
-  "host_permissions": ["<all_urls>"],
-  "action": {
-    "default_popup": "options.html"
-  },
-  "options_page": "options.html",
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "all_frames": true,
-      "match_about_blank": true,
       "js": ["rules-engine.js", "immersive-rules.js", "content.js"],
-      "css": ["content.css"]
+      "css": ["content.css"],
+      "run_at": "document_end"
     }
-  ]
+  ],
+  "action": {
+    "default_popup": "options.html"
+  }
 }

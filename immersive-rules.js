@@ -1,6 +1,4 @@
 // immersive-rules.js
-// Mix01 沉浸模式专属动作库 (内置原生 GraphQL API + Pixiv 纯后台 AJAX API)
-
 (function () {
     const tools = {
         forceClick: function(el) {
@@ -18,7 +16,7 @@
             getContainer: (media) => media.closest('article') || document.body,
             getGalleryImages: () => {
                 return Array.from(document.querySelectorAll('img, video')).filter(media => {
-                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz') return false;
+                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') return false;
                     const rect = media.getBoundingClientRect();
                     if (rect.width <= 50 || rect.height <= 50 || window.getComputedStyle(media).display === 'none') return false;
                     const article = media.closest('article');
@@ -109,6 +107,23 @@
                 return willFollow;
             },
             downloadVideo: async (container) => {
+                const customSvgBtn = container.querySelector('svg g.download');
+                if (customSvgBtn) {
+                    const btn = customSvgBtn.closest('button') || customSvgBtn.closest('div[role="button"]') || customSvgBtn.closest('a');
+                    if (btn) { btn.click(); return 'NATIVE_CLICKED'; }
+                }
+
+                const shareGroup = container.querySelector('[role="group"]');
+                if (shareGroup) {
+                    const buttons = Array.from(shareGroup.querySelectorAll('[role="button"], a'));
+                    const nativeDownloadBtn = buttons.find(b => {
+                        const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                        const testId = (b.getAttribute('data-testid') || '').toLowerCase();
+                        return label.includes('download') || label.includes('下载') || testId.includes('download');
+                    });
+                    if (nativeDownloadBtn) { nativeDownloadBtn.click(); return 'NATIVE_CLICKED'; }
+                }
+
                 const statusLink = container.querySelector('a[href*="/status/"]');
                 if (!statusLink) return null;
                 const statusId = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
@@ -161,32 +176,42 @@
                         }
                     });
                     return videoUrl;
-                } catch (e) {
-                    console.warn("Mix01 官方 API 抓取失败:", e);
-                    return null;
-                }
+                } catch (e) { console.warn("Mix01 官方 API 抓取失败:", e); return null; }
             }
         },
 
-        // ==========================================
-        // 2. Pixiv 沉浸交互规则 (智能 API 脱离 DOM 限制版)
-        // ==========================================
         '(?:.+\\.)?pixiv\\.net': {
             getContainer: (media) => document.body,
             
-            // 获取画集ID与全局Token
-            _getContext: (media) => {
+            _getPixivContext: async (media) => {
                 let illustId = window.location.pathname.match(/artworks\/(\d+)/)?.[1];
                 if (!illustId && media && media.src) {
                     const m = media.src.match(/\/(\d+)_p/);
                     if (m) illustId = m[1];
                 }
-                let token = window.pixiv?.context?.token || '';
+                
+                let userId = null;
+                const container = media ? (media.closest('li') || media.closest('[role="presentation"]') || document.body) : document.body;
+                const authorLink = container.querySelector('a[data-click-label="creator"], a[href*="/users/"]');
+                if (authorLink) {
+                    const m = authorLink.getAttribute('href')?.match(/users\/(\d+)/);
+                    if (m) userId = m[1];
+                }
+
+                let token = document.querySelector('meta[name="csrf-token"]')?.content || window.pixiv?.context?.token || '';
                 if (!token) {
                     const meta = document.querySelector('#meta-global-data');
                     if (meta) { try { token = JSON.parse(meta.content).token; } catch(e){} }
                 }
-                return { illustId, token };
+
+                if (illustId && !userId) {
+                    try {
+                        const res = await fetch(`/ajax/illust/${illustId}`).then(r => r.json());
+                        userId = res?.body?.userId;
+                    } catch(e) {}
+                }
+
+                return { illustId, userId, token };
             },
 
             getStates: (container) => {
@@ -203,76 +228,97 @@
             },
 
             like: async (container, media) => {
-                const ctx = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getContext(media);
-                if (ctx.illustId && ctx.token) {
-                    try {
-                        // 无视页面上有没有按钮，直接发包点赞
-                        await fetch('/ajax/illusts/bookmarks/add', {
-                            method: 'POST',
-                            headers: { 'x-csrf-token': ctx.token, 'content-type': 'application/json' },
-                            body: JSON.stringify({ illust_id: ctx.illustId, restrict: 0, comment: '', tags: [] })
-                        });
-                        
-                        // 同步按一下UI
-                        const btn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], [data-click-label="like"] button, button svg path[d*="M12"]')?.closest('button');
-                        if (btn) tools.forceClick(btn);
-                        return true; 
-                    } catch(e) { console.warn("Pixiv API 点赞失败", e); }
+                const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
+                const btn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], button svg path[d*="M12"]')?.closest('button');
+                
+                let isCurrentlyLiked = false;
+                if (btn) {
+                    isCurrentlyLiked = btn.innerHTML.includes('rgb(255, 64, 96)') || btn.innerHTML.includes('#FF4060') || btn.getAttribute('aria-pressed') === 'true';
+                }
+                
+                const src = media ? (media.src || 'video') : '';
+                if (window.__mix01LikeMediaCache && window.__mix01LikeMediaCache[src] !== undefined) {
+                    isCurrentlyLiked = window.__mix01LikeMediaCache[src];
                 }
 
-                // 兜底 DOM
-                const btn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], [data-click-label="like"] button, button svg path[d*="M12"]')?.closest('button');
-                if (btn) { tools.forceClick(btn); return true; }
+                if (!isCurrentlyLiked) {
+                    if (ctx.illustId && ctx.token) {
+                        try {
+                            await fetch('/ajax/illusts/bookmarks/add', {
+                                method: 'POST',
+                                headers: { 'x-csrf-token': ctx.token, 'content-type': 'application/json', 'accept': 'application/json' },
+                                body: JSON.stringify({ illust_id: ctx.illustId, restrict: 0, comment: '', tags: [] })
+                            });
+                            if (btn) tools.forceClick(btn);
+                            return true; 
+                        } catch(e) { console.warn("Pixiv API 点赞失败", e); }
+                    }
+                    if (btn) { tools.forceClick(btn); return true; }
+                } else {
+                    if (btn) { tools.forceClick(btn); return false; }
+                }
                 return null;
             },
 
             follow: async (container, media) => {
-                const ctx = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getContext(media);
+                const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
+                const btn = container.querySelector('.gtm-main-follow, [data-click-action="follow"]');
                 
-                let userId = null;
-                const authorLink = container.querySelector('a[data-click-label="creator"]') || document.querySelector('a.user-name') || (media ? media.closest('a')?.previousElementSibling?.querySelector('a') : null);
-                if (authorLink) {
-                    const m = authorLink.getAttribute('href')?.match(/users\/(\d+)/);
-                    if (m) userId = m[1];
-                }
-
-                // 如果没找到 User ID，但是有 Illust ID，就去 API 拿 User ID
-                if (!userId && ctx.illustId) {
-                    try {
-                        const res = await fetch(`/ajax/illust/${ctx.illustId}`).then(r => r.json());
-                        userId = res?.body?.userId;
-                    } catch(e){}
-                }
-
-                if (userId && ctx.token) {
-                    try {
-                        const formData = new URLSearchParams();
-                        formData.append('mode', 'add');
-                        formData.append('type', 'user');
-                        formData.append('user_id', userId);
-                        formData.append('tag', '');
-                        formData.append('restrict', '0');
-                        formData.append('format', 'json');
-
-                        await fetch('/bookmark_add.php', {
-                            method: 'POST',
-                            headers: { 'x-csrf-token': ctx.token, 'Content-Type': 'application/x-www-form-urlencoded' },
-                            body: formData.toString()
-                        });
-
-                        const btn = container.querySelector('.gtm-main-follow, [data-click-action="follow"], [data-click-label="follow"]');
-                        if (btn) tools.forceClick(btn);
-                        return true;
-                    } catch(e) { console.warn("Pixiv API 关注失败", e); }
+                let isCurrentlyFollowed = false;
+                if (btn) {
+                    isCurrentlyFollowed = /已关注|Following/i.test(btn.textContent) || btn.dataset.clickAction === 'unfollow' || btn.getAttribute('aria-pressed') === 'true';
                 }
                 
-                const btn = container.querySelector('.gtm-main-follow, [data-click-action="follow"], [data-click-label="follow"]');
-                if (btn) { tools.forceClick(btn); return true; }
+                const authorName = container.querySelector('.user-name, [data-click-label="creator"]')?.textContent || '';
+                if (authorName && window.__mix01FollowAuthorCache && window.__mix01FollowAuthorCache[authorName] !== undefined) {
+                    isCurrentlyFollowed = window.__mix01FollowAuthorCache[authorName];
+                }
+
+                if (!isCurrentlyFollowed) {
+                    if (ctx.userId && ctx.token) {
+                        try {
+                            const formData = new URLSearchParams();
+                            formData.append('mode', 'add');
+                            formData.append('type', 'user');
+                            formData.append('user_id', ctx.userId);
+                            formData.append('tag', '');
+                            formData.append('restrict', '0');
+                            formData.append('format', 'json');
+
+                            await fetch('/bookmark_add.php', {
+                                method: 'POST',
+                                headers: { 'x-csrf-token': ctx.token, 'Content-Type': 'application/x-www-form-urlencoded' },
+                                body: formData.toString()
+                            });
+                            if (btn) tools.forceClick(btn);
+                            return true;
+                        } catch(e) { console.warn("Pixiv API 关注失败", e); }
+                    }
+                    if (btn) { tools.forceClick(btn); return true; }
+                } else {
+                    if (btn) {
+                        tools.forceClick(btn);
+                        return false;
+                    } else if (ctx.userId && ctx.token) {
+                         try {
+                            const formData = new URLSearchParams();
+                            formData.append('mode', 'delete');
+                            formData.append('type', 'user');
+                            formData.append('user_id', ctx.userId);
+                            await fetch('/bookmark_add.php', {
+                                method: 'POST',
+                                headers: { 'x-csrf-token': ctx.token, 'Content-Type': 'application/x-www-form-urlencoded' },
+                                body: formData.toString()
+                            });
+                            return false;
+                         } catch(e) { console.warn("Pixiv API 取关失败", e); }
+                    }
+                }
                 return null;
             },
 
             downloadVideo: async (container, media) => {
-                 const ctx = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getContext(media);
+                 const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
                  if (!ctx.illustId) return null;
                  try {
                      const res = await fetch(`/ajax/illust/${ctx.illustId}/pages`).then(r => r.json());

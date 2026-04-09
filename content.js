@@ -1,3 +1,4 @@
+// content.js
 (function () {
     if (window.__imgZoomProInitialized) return;
     window.__imgZoomProInitialized = true;
@@ -10,7 +11,6 @@
     };
     
     let siteModes = {}; 
-    
     let activeZoom = 2.0; 
     let keys = { 
         mode: 'v', rotate: 'r', mirror: 'm', zoomIn: '=', zoomOut: '-', 
@@ -43,6 +43,10 @@
     let isHdLoadingState = false; 
     window.__mix01UserPaused = false; 
     window.__mix01FollowCache = window.__mix01FollowCache || {};
+    
+    // 前端交互状态强制缓存墙，抵御 React/Vue 的 DOM 延迟
+    window.__mix01LikeMediaCache = window.__mix01LikeMediaCache || {}; 
+    window.__mix01FollowAuthorCache = window.__mix01FollowAuthorCache || {}; 
 
     const modeList = ['partial', 'full-follow', 'full-center'];
     const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
@@ -69,15 +73,26 @@
         const container = adapter.getContainer ? adapter.getContainer(currentHoveredMedia) : document.body;
 
         if (actionType === 'like') {
-            const newState = await adapter.like(container);
-            if (newState !== null) showToast(newState ? "❤️ 已喜欢" : "🤍 已取消喜欢");
-            else showToast("❌ 未找到喜欢的操作按钮");
+            const newState = await adapter.like(container, currentHoveredMedia);
+            if (newState !== null) {
+                window.__mix01LikeMediaCache[currentHoveredSrc] = newState;
+                showToast(newState ? "❤️ 已喜欢" : "🤍 已取消喜欢 (如果失败请在文章页重试)");
+            } else {
+                showToast("❌ 交互失败，未找到API上下文或按钮");
+            }
         } else {
-            const newState = await adapter.follow(container);
-            if (newState !== null) showToast(newState ? "🫂 已成功关注" : "👋 已取消关注");
-            else showToast("❌ 未找到当前作者的关注按钮");
+            const newState = await adapter.follow(container, currentHoveredMedia);
+            if (newState !== null) {
+                const tempStates = adapter.getStates ? adapter.getStates(container) : null;
+                if (tempStates && tempStates.authorName) {
+                    window.__mix01FollowAuthorCache[tempStates.authorName] = newState;
+                }
+                showToast(newState ? "🫂 已成功关注" : "👋 已取消关注 (如果失败请在文章页重试)");
+            } else {
+                showToast("❌ 交互失败，未找到API上下文或按钮");
+            }
         }
-        setTimeout(updateImmersiveHUD, 300);
+        updateImmersiveHUD();
     }
 
     const syncConfig = (res) => {
@@ -161,18 +176,8 @@
         } catch (err) { showToast("❌ 获取图片失败，存在跨域限制"); }
     }
 
-    async function fetchAsBase64(url) {
-        const response = await fetch(url);
-        const blob = await response.blob();
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-        });
-    }
-
-    async function downloadImage(url) {
+    // 【终极后台安全下载通道】：不阻断前台操作，无视跨域防盗链
+    function downloadImage(url) {
         showToast("⏳ 正在打通后台进行安全下载...");
         try {
             chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: url }, (response) => {
@@ -191,14 +196,16 @@
     const viewer = document.createElement('div'); viewer.id = 'img-zoom-pro-viewer-xyz';
     const zoomImg = document.createElement('img'); zoomImg.id = 'zoom-img-xyz';
     
-    const zoomCanvas = document.createElement('canvas'); 
-    zoomCanvas.id = 'zoom-canvas-xyz';
-    const canvasCtx = zoomCanvas.getContext('2d', { alpha: false });
+    const zoomVideo = document.createElement('video'); 
+    zoomVideo.id = 'zoom-video-xyz';
+    zoomVideo.controls = false;
+    zoomVideo.autoplay = true;
+    zoomVideo.loop = true;
+    zoomVideo.muted = false; // 音画同步解禁声音
 
     const loadingSpinner = document.createElement('div'); 
     loadingSpinner.id = 'zoom-loading-xyz';
 
-    // 【新增】自定义极简进度条组件
     const progressContainer = document.createElement('div');
     progressContainer.id = 'mix01-video-progress-container';
     const progressBar = document.createElement('div');
@@ -215,6 +222,18 @@
         .kbd-btn { background:rgba(255,255,255,0.2); padding:2px 6px; border-radius:4px; font-family: monospace; font-weight: bold; margin: 0 2px;}
         .author-tag { color: #1da1f2; font-weight: bold; margin: 0 4px; }
         .hud-status-item { font-weight: bold; transition: color 0.3s ease; display: inline-block; }
+        
+        #zoom-video-xyz {
+            display: none !important;
+            position: absolute !important;
+            max-width: none !important;
+            max-height: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            border: none !important;
+            transition: transform 0.1s cubic-bezier(0.2, 0, 0.2, 1) !important;
+            box-sizing: border-box !important;
+        }
     `;
     document.head.appendChild(styleBlock);
 
@@ -233,9 +252,9 @@
         });
 
         viewer.appendChild(zoomImg); 
-        viewer.appendChild(zoomCanvas); 
+        viewer.appendChild(zoomVideo); 
         viewer.appendChild(loadingSpinner);
-        viewer.appendChild(progressContainer); // 挂载进度条
+        viewer.appendChild(progressContainer); 
         viewer.appendChild(statusLabel); 
         viewer.appendChild(noticeBox); 
         viewer.appendChild(immersiveHint);
@@ -244,16 +263,16 @@
     };
     initViewer();
 
-    // 【新增】：进度条全局点击快进事件
     progressContainer.addEventListener('click', (e) => {
         if (config.isImmersive && currentHoveredMedia && currentHoveredMedia.tagName === 'VIDEO') {
             const rect = progressContainer.getBoundingClientRect();
             const pos = (e.clientX - rect.left) / rect.width;
             if (currentHoveredMedia.duration) {
                 currentHoveredMedia.currentTime = pos * currentHoveredMedia.duration;
+                zoomVideo.currentTime = currentHoveredMedia.currentTime; // 必须同步克隆层的进度
                 progressBar.style.setProperty('width', `${pos * 100}%`, 'important');
             }
-            e.stopPropagation(); // 阻止事件冒泡，防止关闭画廊
+            e.stopPropagation(); 
         }
     });
 
@@ -268,6 +287,14 @@
         if (currentHoveredMedia && adapter && adapter.getStates) {
             const container = adapter.getContainer ? adapter.getContainer(currentHoveredMedia) : document.body;
             const states = adapter.getStates(container);
+            
+            // 使用内存缓存覆盖可能落后的 DOM 状态
+            if (window.__mix01LikeMediaCache[currentHoveredSrc] !== undefined) {
+                states.isLiked = window.__mix01LikeMediaCache[currentHoveredSrc];
+            }
+            if (states.authorName && window.__mix01FollowAuthorCache[states.authorName] !== undefined) {
+                states.isFollowed = window.__mix01FollowAuthorCache[states.authorName];
+            }
             
             if (states.isLiked !== null) {
                 likeText = states.isLiked ? "已喜欢" : "未喜欢";
@@ -297,7 +324,7 @@
             const playLabel = window.__mix01UserPaused ? "▶️ 播放" : "⏸️ 暂停";
             playHtml = `&nbsp;|&nbsp; ${playLabel}(<kbd class="kbd-btn">${(keys.playVideo || 'q').toUpperCase()}</kbd>) &nbsp; 💾 下载(<kbd class="kbd-btn">${(keys.downloadVideo || 'd').toUpperCase()}</kbd>)`;
         } else {
-            playHtml = `&nbsp;|&nbsp; 💾 下载(<kbd class="kbd-btn">S</kbd>)`;
+            playHtml = `&nbsp;|&nbsp; 💾 下载(<kbd class="kbd-btn">S</kbd>) &nbsp; 提取原图直链(<kbd class="kbd-btn">${(keys.downloadVideo || 'd').toUpperCase()}</kbd>)`;
         }
 
         immersiveHint.innerHTML = `⌨️ 左右切换 ${actionsHtml} ${playHtml} &nbsp;|&nbsp; ❌ 双击退出`;
@@ -328,7 +355,7 @@
         hideCursorTimer = setTimeout(() => {
             setStyle(viewer, 'cursor', 'none');
             setStyle(zoomImg, 'cursor', 'none');
-            setStyle(zoomCanvas, 'cursor', 'none');
+            setStyle(zoomVideo, 'cursor', 'none');
         }, 1500);
 
         hintFadeTimer = setTimeout(() => {
@@ -346,9 +373,9 @@
     function hideViewer() {
         setStyle(viewer, 'display', 'none');
         setStyle(zoomImg, 'display', 'none');
-        setStyle(zoomCanvas, 'display', 'none'); 
+        setStyle(zoomVideo, 'display', 'none'); 
         setStyle(loadingSpinner, 'display', 'none');
-        setStyle(progressContainer, 'display', 'none'); // 隐藏进度条
+        setStyle(progressContainer, 'display', 'none'); 
         isHdLoadingState = false; 
         window.__mix01UserPaused = false; 
         
@@ -358,6 +385,10 @@
         }
         isCanvasEngineRunning = false;
         cancelAnimationFrame(canvasRafId);
+
+        zoomVideo.pause();
+        zoomVideo.srcObject = null;
+        zoomVideo.src = '';
 
         currentHoveredMedia = null;
         currentHoveredSrc = null;
@@ -452,7 +483,7 @@
         let found = null;
         for (let i = 0; i < elements.length; i++) {
             const el = elements[i];
-            if (el.id === 'img-zoom-pro-viewer-xyz' || el.id === 'zoom-img-xyz' || el.id === 'zoom-canvas-xyz' || el.id === 'mix01-video-progress-container' || el.id === 'mix01-video-progress-bar') continue;
+            if (el.id === 'img-zoom-pro-viewer-xyz' || el.id === 'zoom-img-xyz' || el.id === 'zoom-video-xyz' || el.id === 'mix01-video-progress-container' || el.id === 'mix01-video-progress-bar') continue;
             if ((el.tagName === 'IMG' || el.tagName === 'VIDEO') && (el.src || el.tagName === 'VIDEO')) {
                 found = el;
                 break;
@@ -485,15 +516,32 @@
 
             if (isVideo) {
                 setStyle(zoomImg, 'display', 'none');
-                setStyle(zoomCanvas, 'display', 'block');
+                setStyle(zoomVideo, 'display', 'block');
                 setStyle(loadingSpinner, 'display', 'none');
-                setStyle(progressContainer, 'display', 'block'); // 【新增】激活进度条
+                setStyle(progressContainer, 'display', 'block'); 
                 isHdLoadingState = false;
                 
-                zoomCanvas.width = target.videoWidth || target.clientWidth || 800;
-                zoomCanvas.height = target.videoHeight || target.clientHeight || 600;
-
+                try {
+                    if (target.src && target.src.startsWith('blob:')) {
+                        if (target.captureStream) {
+                            zoomVideo.srcObject = target.captureStream();
+                        } else if (target.mozCaptureStream) {
+                            zoomVideo.srcObject = target.mozCaptureStream();
+                        } else {
+                            zoomVideo.src = target.src;
+                        }
+                    } else {
+                        zoomVideo.srcObject = null;
+                        zoomVideo.src = target.src || target.currentSrc;
+                    }
+                } catch (e) {
+                    zoomVideo.srcObject = null;
+                    zoomVideo.src = target.src || target.currentSrc;
+                }
+                
+                zoomVideo.currentTime = target.currentTime || 0;
                 target.muted = false; 
+                zoomVideo.muted = false;
                 
                 let initialPlayPromise = target.play();
                 if (initialPlayPromise !== undefined) {
@@ -504,6 +552,7 @@
                                 setStyle(loadingSpinner, 'display', 'none');
                                 if (!window.__mix01UserPaused) {
                                     target.play().catch(()=>{});
+                                    zoomVideo.play().catch(()=>{});
                                 }
                             }, { once: true });
                         }
@@ -517,27 +566,22 @@
                     
                     if (target.paused && target.readyState >= 3 && !window.__mix01UserPaused) {
                         let playPromise = target.play();
-                        if (playPromise !== undefined) {
-                            playPromise.catch(()=>{}); 
-                        }
+                        if (playPromise !== undefined) { playPromise.catch(()=>{}); }
+                        zoomVideo.play().catch(()=>{});
                     }
                     
-                    if (target.videoWidth && zoomCanvas.width !== target.videoWidth) {
-                        zoomCanvas.width = target.videoWidth;
-                        zoomCanvas.height = target.videoHeight;
-                        renderViewer(null, cachedRect);
-                    }
-
-                    // 【核心】：在 60FPS 的渲染循环中更新进度条，丝般顺滑
                     if (target.duration) {
                         const percent = (target.currentTime / target.duration) * 100;
                         progressBar.style.setProperty('width', `${percent}%`, 'important');
                     }
                     
-                    canvasCtx.drawImage(target, 0, 0, zoomCanvas.width, zoomCanvas.height);
                     canvasRafId = requestAnimationFrame(drawLoop);
                 }
                 drawLoop();
+
+                zoomVideo.onloadedmetadata = () => {
+                    if (currentHoveredMedia === target) renderViewer(null, cachedRect);
+                };
 
                 renderViewer(null, cachedRect);
                 setStyle(viewer, 'display', 'block');
@@ -545,8 +589,9 @@
                 return;
             } 
             else {
-                setStyle(zoomCanvas, 'display', 'none');
-                setStyle(progressContainer, 'display', 'none'); // 【隐藏】图片模式不需要进度条
+                setStyle(zoomVideo, 'display', 'none');
+                setStyle(progressContainer, 'display', 'none');
+                zoomVideo.pause();
                 setStyle(zoomImg, 'display', 'block');
                 zoomImg.src = target.src;
                 setStyle(zoomImg, 'max-width', 'none'); 
@@ -681,10 +726,10 @@
         let cDW = 0, cDH = 0;
 
         const isVideo = currentHoveredMedia.tagName === 'VIDEO';
-        const activeMedia = isVideo ? zoomCanvas : zoomImg; 
+        const activeMedia = isVideo ? zoomVideo : zoomImg; 
 
-        const nw = isVideo ? (activeMedia.width || rect.width || 1) : (activeMedia.naturalWidth || rect.width || 1);
-        const nh = isVideo ? (activeMedia.height || rect.height || 1) : (activeMedia.naturalHeight || rect.height || 1);
+        const nw = isVideo ? (activeMedia.videoWidth || rect.width || 1) : (activeMedia.naturalWidth || rect.width || 1);
+        const nh = isVideo ? (activeMedia.videoHeight || rect.height || 1) : (activeMedia.naturalHeight || rect.height || 1);
         const naturalRatio = nw / nh;
 
         if (config.isImmersive) {
@@ -830,7 +875,7 @@
             return adapter.getGalleryImages();
         }
         return Array.from(document.querySelectorAll('img, video')).filter(media => {
-            if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz') return false;
+            if (media.id === 'zoom-img-xyz' || media.id === 'zoom-video-xyz') return false;
             const rect = media.getBoundingClientRect();
             return rect.width > 50 && rect.height > 50 && window.getComputedStyle(media).display !== 'none';
         });
@@ -894,6 +939,7 @@
                     let playPromise = currentHoveredMedia.play();
                     if (playPromise !== undefined) {
                         playPromise.then(() => {
+                            zoomVideo.play().catch(()=>{});
                             showToast("▶️ 继续播放");
                             updateImmersiveHUD();
                         }).catch(error => {
@@ -904,6 +950,7 @@
                 } else {
                     window.__mix01UserPaused = true;
                     currentHoveredMedia.pause();
+                    zoomVideo.pause();
                     showToast("⏸️ 已暂停");
                     updateImmersiveHUD();
                 }
@@ -912,23 +959,22 @@
         }
 
         if (matchCombo(e, keys.downloadVideo || 'd')) {
-            if (config.isImmersive && currentHoveredMedia && currentHoveredMedia.tagName === 'VIDEO') {
-                const adapter = getImmersiveAdapter();
-                if (adapter && adapter.downloadVideo) {
-                    showToast("⏳ 尝试触发一键视频下载...");
-                    adapter.downloadVideo(adapter.getContainer(currentHoveredMedia)).then(videoUrl => {
-                        if (videoUrl === 'NATIVE_CLICKED') {
-                            showToast("✅ 已调用浏览器插件原生下载机制！");
-                        } else if (videoUrl) {
-                            showToast("✅ 提取成功，开始下载！");
-                            chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: videoUrl, dataUrl: videoUrl });
-                        } else {
-                            showToast("❌ 无法解析该视频的直链");
-                        }
-                    });
-                } else {
-                    showToast("⚠️ 当前站点暂未适配一键视频提取");
-                }
+            const adapter = getImmersiveAdapter();
+            if (adapter && adapter.downloadVideo) {
+                showToast("⏳ 正在打通后台提取原版最高清文件...");
+                adapter.downloadVideo(adapter.getContainer(currentHoveredMedia), currentHoveredMedia).then(videoUrl => {
+                    if (videoUrl === 'NATIVE_CLICKED') {
+                        showToast("✅ 已调用浏览器插件原生下载机制！");
+                    } else if (videoUrl) {
+                        showToast("✅ 提取成功，开始强制下载！");
+                        chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: videoUrl, dataUrl: videoUrl });
+                    } else {
+                        showToast("❌ 无法解析该媒体的直链");
+                    }
+                });
+                e.preventDefault(); return;
+            } else if (currentHoveredMedia.tagName === 'VIDEO') {
+                showToast("⚠️ 当前站点暂未适配一键视频提取");
                 e.preventDefault(); return;
             }
         }
@@ -961,7 +1007,7 @@
                 if (currentHoveredMedia.tagName === 'VIDEO') {
                     showToast("⚠️ 视频请使用 D 键提取直链下载");
                 } else if (zoomImg.src) {
-                    downloadImage(zoomImg.src);
+                    downloadImage(zoomImg.src); // 已经交给了 background.js，瞬间返回不卡图
                 }
                 e.preventDefault(); return; 
             }
