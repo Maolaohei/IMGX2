@@ -1,4 +1,4 @@
-# 🌌 Mix01 Immersive Media Engine (Mix01 沉浸式流媒体引擎)
+# 🌌IMGX2 浏览器媒体扩展
 
 ![Version](https://img.shields.io/badge/version-2026.04-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Edge-green.svg)
