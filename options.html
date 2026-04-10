@@ -5,7 +5,7 @@
     <style>
         body { width: 340px; padding: 15px; font-family: system-ui, sans-serif; background: #f9f9f9; color: #333; }
         h3 { margin-top: 0; font-size: 16px; border-bottom: 2px solid #ddd; padding-bottom: 8px; }
-        .row { margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
+        .row { margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; transition: opacity 0.3s; }
         input[type="number"] { width: 60px; padding: 4px; border: 1px solid #ccc; border-radius: 4px; }
         input[type="text"] { width: 40px; padding: 4px; border: 1px solid #ccc; border-radius: 4px; text-align: center; text-transform: uppercase; font-family: monospace; font-weight: bold; }
         select { padding: 4px; border: 1px solid #ccc; border-radius: 4px; width: 140px; }
@@ -48,9 +48,10 @@
     <div class="row"><label>显示画质提示:</label><input type="checkbox" id="showStatus" style="width:18px;height:18px;"></div>
     <div class="row"><label>开启突破限制:</label><input type="checkbox" id="breakoutView" style="width:18px;height:18px;"></div>
     <div class="row"><label>默认倍数:</label><input type="number" id="zoomLevel" step="0.5" min="1.5"></div>
-    
-    <div class="row"><label style="font-weight:bold;color:#4A90E2">🌌 开启沉浸图库模式:</label><input type="checkbox" id="isImmersive" style="width:18px;height:18px;"></div>
     <div class="row" id="viewModeRow"><label>默认视图模式:</label><select id="mode"><option value="partial">局部放大</option><option value="full-follow">整体跟随</option><option value="full-center">智能避让</option></select></div>
+    
+    <div class="row" style="margin-top: 15px;"><label style="font-weight:bold;color:#4A90E2">🌌 开启沉浸图库模式:</label><input type="checkbox" id="isImmersive" style="width:18px;height:18px;"></div>
+    <div class="row" id="preloadRow"><label title="设置沉浸模式下自动提前解析并加载的高清图片数量">沉浸预加载张数:</label><input type="number" id="preloadCount" min="0" max="20"></div>
     
     <h3 style="margin-top: 20px;">⌨️ 快捷键</h3>
     <div class="row"><label>沉浸模式开关:</label><input type="text" id="keyImmersive" style="width: 75px;"></div>

@@ -6,7 +6,7 @@
         hasAgreed: false, loadHD: 'true', breakoutView: false, 
         showStatus: true, smallImageOptimization: true, 
         zoom: 2.0, rotate: 0, mirror: 1, mode: 'partial',
-        isImmersive: false
+        isImmersive: false, preloadCount: 5 // 初始化预加载配置
     };
     
     let siteModes = {}; 
@@ -49,6 +49,9 @@
     const modeList = ['partial', 'full-follow', 'full-center'];
     const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
     const badHdUrls = new Set();
+    
+    // 【新增】：预加载 LRU 缓存池，防止长期浏览导致内存溢出
+    const preloadedUrls = new Set();
 
     const isContextValid = () => !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
 
@@ -101,6 +104,7 @@
         if (res.showStatus !== undefined) config.showStatus = res.showStatus;
         if (res.smallImageOptimization !== undefined) config.smallImageOptimization = res.smallImageOptimization;
         if (res.isImmersive !== undefined) config.isImmersive = res.isImmersive;
+        if (res.preloadCount !== undefined) config.preloadCount = parseInt(res.preloadCount, 10); // 同步预加载张数
         if (res.zoomLevel !== undefined) config.zoom = parseFloat(res.zoomLevel);
         
         if (res.siteModes !== undefined) siteModes = res.siteModes;
@@ -193,7 +197,6 @@
     const viewer = document.createElement('div'); viewer.id = 'img-zoom-pro-viewer-xyz';
     const zoomImg = document.createElement('img'); zoomImg.id = 'zoom-img-xyz';
     
-    // 【核心修复】：彻底砍掉没用的 zoomVideo，专心用 Canvas 投屏
     const zoomCanvas = document.createElement('canvas'); 
     zoomCanvas.id = 'zoom-canvas-xyz';
     const canvasCtx = zoomCanvas.getContext('2d', { alpha: false });
@@ -235,7 +238,7 @@
         });
 
         viewer.appendChild(zoomImg); 
-        viewer.appendChild(zoomCanvas); // 【修复挂载】：确保 Canvas 被添加到视图层
+        viewer.appendChild(zoomCanvas); 
         viewer.appendChild(loadingSpinner);
         viewer.appendChild(progressContainer); 
         viewer.appendChild(statusLabel); 
@@ -245,6 +248,55 @@
         document.body.appendChild(toast);
     };
     initViewer();
+
+    // 【新增】：核心预加载器
+    function triggerPreload() {
+        if (!config.isImmersive || config.preloadCount <= 0 || !currentHoveredMedia) return;
+
+        // 使用 setTimeout 进行让步，优先保证当前大图的渲染不卡顿
+        setTimeout(async () => {
+            const galleryImages = getGalleryImages();
+            let currentIndex = galleryImages.indexOf(currentHoveredMedia);
+            
+            if (currentIndex === -1 && currentHoveredSrc) {
+                currentIndex = galleryImages.findIndex(media => (media.src||'video') === currentHoveredSrc);
+            }
+            if (currentIndex === -1) return;
+
+            // 往后预加载指定张数
+            for (let i = 1; i <= config.preloadCount; i++) {
+                const targetIndex = currentIndex + i;
+                if (targetIndex >= galleryImages.length) break;
+
+                const media = galleryImages[targetIndex];
+                if (media.tagName === 'IMG') {
+                    const src = media.src;
+                    let targetUrl = src;
+                    
+                    // 利用 Mix01RuleEngine 提前提取高清直链
+                    if (config.loadHD === 'true' && window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
+                        try {
+                            targetUrl = await window.Mix01RuleEngine.getHighResUrl(media, src);
+                        } catch (e) { console.warn("预加载解析失败", e); }
+                    }
+
+                    if (targetUrl && !preloadedUrls.has(targetUrl) && !badHdUrls.has(targetUrl)) {
+                        preloadedUrls.add(targetUrl);
+                        
+                        // 超过 200 张自动清理旧缓存，防止爆内存
+                        if (preloadedUrls.size > 200) {
+                            const firstItem = preloadedUrls.keys().next().value;
+                            preloadedUrls.delete(firstItem);
+                        }
+                        
+                        // 生成一个无影替身 Image 来触发浏览器网络层的 GET 缓存
+                        const preloaderImg = new Image();
+                        preloaderImg.src = targetUrl;
+                    }
+                }
+            }
+        }, 300);
+    }
 
     progressContainer.addEventListener('click', (e) => {
         if (config.isImmersive && currentHoveredMedia && currentHoveredMedia.tagName === 'VIDEO') {
@@ -546,7 +598,6 @@
                 }
                 drawLoop();
 
-                // 原视频元数据加载完成后重新调整 Canvas 大小
                 target.addEventListener('loadedmetadata', () => {
                     if (currentHoveredMedia === target) {
                         zoomCanvas.width = target.videoWidth || target.clientWidth || 800;
@@ -630,7 +681,10 @@
         }
         setStyle(viewer, 'display', 'block');
         
-        if (config.isImmersive) handleImmersiveActivity();
+        if (config.isImmersive) {
+            handleImmersiveActivity();
+            triggerPreload(); // 触发静默预加载
+        }
     }
 
     document.addEventListener('mouseover', (e) => {
@@ -696,7 +750,6 @@
         const sW = window.innerWidth, sH = window.innerHeight;
         let cDW = 0, cDH = 0;
 
-        // 【核心修复】：挂载和定位正确的活跃媒体资源 (Canvas)
         const isVideo = currentHoveredMedia.tagName === 'VIDEO';
         const activeMedia = isVideo ? zoomCanvas : zoomImg; 
 

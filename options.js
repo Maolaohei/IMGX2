@@ -7,6 +7,7 @@ const defaultConfigs = {
     zoomLevel: 2.0, 
     isImmersive: false, 
     mode: 'partial', 
+    preloadCount: 5, // 新增：预加载默认5张
     keyMode: 'v', 
     keyRotate: 'r', 
     keyMirror: 'm', 
@@ -28,6 +29,7 @@ const agreedStatus = document.getElementById('agreedStatus');
 const msg = document.getElementById('saveMsg');
 const isImmersiveEl = document.getElementById('isImmersive');
 const viewModeRow = document.getElementById('viewModeRow');
+const preloadRow = document.getElementById('preloadRow'); // 获取预加载Row
 
 const historyList = document.getElementById('historyList');
 const clearHistoryBtn = document.getElementById('clearHistoryBtn');
@@ -36,9 +38,13 @@ function updateViewModeUI() {
     if (isImmersiveEl.checked) {
         viewModeRow.style.opacity = '0.4';
         viewModeRow.style.pointerEvents = 'none';
+        preloadRow.style.opacity = '1';
+        preloadRow.style.pointerEvents = 'auto';
     } else {
         viewModeRow.style.opacity = '1';
         viewModeRow.style.pointerEvents = 'auto';
+        preloadRow.style.opacity = '0.4';
+        preloadRow.style.pointerEvents = 'none';
     }
 }
 isImmersiveEl.addEventListener('change', updateViewModeUI);
