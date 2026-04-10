@@ -6,7 +6,7 @@
         hasAgreed: false, loadHD: 'true', breakoutView: false, 
         showStatus: true, smallImageOptimization: true, 
         zoom: 2.0, rotate: 0, mirror: 1, mode: 'partial',
-        isImmersive: false, preloadCount: 5 // 初始化预加载配置
+        isImmersive: false, preloadCount: 5
     };
     
     let siteModes = {}; 
@@ -37,12 +37,13 @@
 
     let lastTarget = null;
     let lastFoundMedia = null;
-    const styleCache = new Map();
+
+    // [优化] 使用 WeakMap 以元素本身为 key，彻底消除 id/className 碰撞问题
+    const styleCache = new WeakMap();
 
     let isHdLoadingState = false; 
     window.__mix01UserPaused = false; 
     window.__mix01FollowCache = window.__mix01FollowCache || {};
-    
     window.__mix01LikeMediaCache = window.__mix01LikeMediaCache || {}; 
     window.__mix01FollowAuthorCache = window.__mix01FollowAuthorCache || {}; 
 
@@ -50,8 +51,9 @@
     const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
     const badHdUrls = new Set();
     
-    // 【新增】：预加载 LRU 缓存池，防止长期浏览导致内存溢出
+    // [优化] 预加载 LRU 缓存：改用 Array 维护插入顺序，O(1) 删头
     const preloadedUrls = new Set();
+    const preloadedUrlsQueue = [];
 
     const isContextValid = () => !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
 
@@ -104,7 +106,7 @@
         if (res.showStatus !== undefined) config.showStatus = res.showStatus;
         if (res.smallImageOptimization !== undefined) config.smallImageOptimization = res.smallImageOptimization;
         if (res.isImmersive !== undefined) config.isImmersive = res.isImmersive;
-        if (res.preloadCount !== undefined) config.preloadCount = parseInt(res.preloadCount, 10); // 同步预加载张数
+        if (res.preloadCount !== undefined) config.preloadCount = parseInt(res.preloadCount, 10);
         if (res.zoomLevel !== undefined) config.zoom = parseFloat(res.zoomLevel);
         
         if (res.siteModes !== undefined) siteModes = res.siteModes;
@@ -197,9 +199,15 @@
     const viewer = document.createElement('div'); viewer.id = 'img-zoom-pro-viewer-xyz';
     const zoomImg = document.createElement('img'); zoomImg.id = 'zoom-img-xyz';
     
+    // [修复] canvas 初始化改为防御性写法，避免 Gemini 等 SPA 的 CSP 导致 getContext 失败
     const zoomCanvas = document.createElement('canvas'); 
     zoomCanvas.id = 'zoom-canvas-xyz';
-    const canvasCtx = zoomCanvas.getContext('2d', { alpha: false });
+    let canvasCtx = null;
+    try {
+        canvasCtx = zoomCanvas.getContext('2d', { alpha: false });
+    } catch(e) {
+        console.warn('Mix01: Canvas context init failed on this page', e);
+    }
 
     const loadingSpinner = document.createElement('div'); 
     loadingSpinner.id = 'zoom-loading-xyz';
@@ -226,9 +234,13 @@
     const immersiveHint = document.createElement('div'); 
     immersiveHint.id = 'img-zoom-pro-immersive-hint';
 
+    // [修复] initViewer 改为幂等函数：先检查 viewer 是否已在 DOM 中，避免 SPA 路由后重复挂载
     const initViewer = () => {
         if (!document.body) { setTimeout(initViewer, 100); return; }
         
+        // 如果 viewer 已在 DOM 中则跳过挂载，只重设样式
+        if (document.getElementById('img-zoom-pro-viewer-xyz')) return;
+
         Object.assign(immersiveHint.style, {
             position: 'absolute', bottom: '40px', left: '50%', transform: 'translateX(-50%)',
             color: 'rgba(255,255,255,0.9)', background: 'rgba(20,20,20,0.8)', padding: '12px 28px',
@@ -249,11 +261,25 @@
     };
     initViewer();
 
-    // 【新增】：核心预加载器
+    // [修复] SPA 守卫：监听 body 子节点变化，检测 viewer 被 React/Vue 重新渲染清除后自动重新挂载
+    const domGuardObserver = new MutationObserver(() => {
+        if (!document.getElementById('img-zoom-pro-viewer-xyz') && document.body) {
+            document.body.appendChild(viewer);
+            document.body.appendChild(toast);
+        }
+    });
+    if (document.body) {
+        domGuardObserver.observe(document.body, { childList: true });
+    } else {
+        document.addEventListener('DOMContentLoaded', () => {
+            domGuardObserver.observe(document.body, { childList: true });
+        });
+    }
+
+    // 核心预加载器
     function triggerPreload() {
         if (!config.isImmersive || config.preloadCount <= 0 || !currentHoveredMedia) return;
 
-        // 使用 setTimeout 进行让步，优先保证当前大图的渲染不卡顿
         setTimeout(async () => {
             const galleryImages = getGalleryImages();
             let currentIndex = galleryImages.indexOf(currentHoveredMedia);
@@ -263,7 +289,6 @@
             }
             if (currentIndex === -1) return;
 
-            // 往后预加载指定张数
             for (let i = 1; i <= config.preloadCount; i++) {
                 const targetIndex = currentIndex + i;
                 if (targetIndex >= galleryImages.length) break;
@@ -273,7 +298,6 @@
                     const src = media.src;
                     let targetUrl = src;
                     
-                    // 利用 Mix01RuleEngine 提前提取高清直链
                     if (config.loadHD === 'true' && window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
                         try {
                             targetUrl = await window.Mix01RuleEngine.getHighResUrl(media, src);
@@ -282,14 +306,14 @@
 
                     if (targetUrl && !preloadedUrls.has(targetUrl) && !badHdUrls.has(targetUrl)) {
                         preloadedUrls.add(targetUrl);
-                        
-                        // 超过 200 张自动清理旧缓存，防止爆内存
-                        if (preloadedUrls.size > 200) {
-                            const firstItem = preloadedUrls.keys().next().value;
-                            preloadedUrls.delete(firstItem);
+                        preloadedUrlsQueue.push(targetUrl);
+
+                        // [优化] O(1) 删头：直接 shift() 而非 keys().next()
+                        if (preloadedUrlsQueue.length > 200) {
+                            const oldest = preloadedUrlsQueue.shift();
+                            preloadedUrls.delete(oldest);
                         }
                         
-                        // 生成一个无影替身 Image 来触发浏览器网络层的 GET 缓存
                         const preloaderImg = new Image();
                         preloaderImg.src = targetUrl;
                     }
@@ -363,11 +387,13 @@
         immersiveHint.innerHTML = `⌨️ 左右切换 ${actionsHtml} ${playHtml} &nbsp;|&nbsp; ❌ 双击退出`;
     }
 
-    function setStyle(el, prop, val) { 
-        const key = (el.id || el.className) + '_' + prop;
-        if (styleCache.get(key) !== val) {
-            el.style.setProperty(prop, val, 'important'); 
-            styleCache.set(key, val);
+    // [优化] setStyle 改用 WeakMap，以 DOM 元素本身为 key，彻底消除 id/className 相同导致的缓存碰撞
+    function setStyle(el, prop, val) {
+        if (!styleCache.has(el)) styleCache.set(el, {});
+        const elCache = styleCache.get(el);
+        if (elCache[prop] !== val) {
+            el.style.setProperty(prop, val, 'important');
+            elCache[prop] = val;
         }
     }
     
@@ -572,8 +598,9 @@
                 
                 isCanvasEngineRunning = true;
                 
+                // [修复] drawLoop 加入 canvasCtx 空值守卫，防止 CSP 环境下 getContext 返回 null 导致崩溃
                 function drawLoop() {
-                    if (!isCanvasEngineRunning || !currentHoveredMedia) return;
+                    if (!isCanvasEngineRunning || !currentHoveredMedia || !canvasCtx) return;
                     
                     if (target.paused && target.readyState >= 3 && !window.__mix01UserPaused) {
                         let playPromise = target.play();
@@ -598,8 +625,9 @@
                 }
                 drawLoop();
 
+                // [修复] loadedmetadata 回调加入 zoomCanvas / canvasCtx 守卫
                 target.addEventListener('loadedmetadata', () => {
-                    if (currentHoveredMedia === target) {
+                    if (currentHoveredMedia === target && zoomCanvas && canvasCtx) {
                         zoomCanvas.width = target.videoWidth || target.clientWidth || 800;
                         zoomCanvas.height = target.videoHeight || target.clientHeight || 600;
                         renderViewer(null, cachedRect);
@@ -683,7 +711,7 @@
         
         if (config.isImmersive) {
             handleImmersiveActivity();
-            triggerPreload(); // 触发静默预加载
+            triggerPreload();
         }
     }
 
