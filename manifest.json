@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Mix01 Immersive Engine",
-  "version": "2026.04.09",
+  "version": "20260409",
   "description": "极客级流媒体沉浸浏览与下载引擎",
   "permissions": [
     "storage",
