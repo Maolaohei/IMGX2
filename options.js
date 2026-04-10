@@ -4,6 +4,7 @@ const defaultConfigs = {
     breakoutView: false, 
     showStatus: true, 
     smallImageOptimization: true, 
+    disableVideoDefaultView: true, // [新增] 默认禁止视频在默认视图放大
     zoomLevel: 2.0, 
     isImmersive: false, 
     mode: 'partial', 

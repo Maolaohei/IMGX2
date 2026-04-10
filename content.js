@@ -5,6 +5,7 @@
     let config = { 
         hasAgreed: false, loadHD: 'true', breakoutView: false, 
         showStatus: true, smallImageOptimization: true, 
+        disableVideoDefaultView: true, // [新增] 初始默认值
         zoom: 2.0, rotate: 0, mirror: 1, mode: 'partial',
         isImmersive: false, preloadCount: 5
     };
@@ -37,6 +38,7 @@
 
     let lastTarget = null;
     let lastFoundMedia = null;
+    let originalVideoState = null; // [新增] 用于缓存视频原本的播放和静音状态
 
     // [优化] 使用 WeakMap 以元素本身为 key，彻底消除 id/className 碰撞问题
     const styleCache = new WeakMap();
@@ -105,6 +107,7 @@
         if (res.breakoutView !== undefined) config.breakoutView = res.breakoutView;
         if (res.showStatus !== undefined) config.showStatus = res.showStatus;
         if (res.smallImageOptimization !== undefined) config.smallImageOptimization = res.smallImageOptimization;
+        if (res.disableVideoDefaultView !== undefined) config.disableVideoDefaultView = res.disableVideoDefaultView; // [新增] 同步存储配置
         if (res.isImmersive !== undefined) config.isImmersive = res.isImmersive;
         if (res.preloadCount !== undefined) config.preloadCount = parseInt(res.preloadCount, 10);
         if (res.zoomLevel !== undefined) config.zoom = parseFloat(res.zoomLevel);
@@ -438,9 +441,22 @@
         isHdLoadingState = false; 
         window.__mix01UserPaused = false; 
         
+        // [修改] 恢复视频原始的播放和静音状态
         if (isCanvasEngineRunning && currentHoveredMedia && currentHoveredMedia.tagName === 'VIDEO') {
-            currentHoveredMedia.muted = true; 
-            currentHoveredMedia.pause();
+            if (originalVideoState) {
+                currentHoveredMedia.muted = originalVideoState.muted;
+                if (originalVideoState.paused) {
+                    currentHoveredMedia.pause();
+                } else {
+                    let p = currentHoveredMedia.play();
+                    if (p !== undefined) p.catch(()=>{});
+                }
+                originalVideoState = null; // 状态用完清空
+            } else {
+                // 兜底逻辑
+                currentHoveredMedia.muted = true; 
+                currentHoveredMedia.pause();
+            }
         }
         isCanvasEngineRunning = false;
         cancelAnimationFrame(canvasRafId);
@@ -552,6 +568,10 @@
 
     async function triggerZoom(target) {
         if (target === currentHoveredMedia && (target.src || 'video') === currentHoveredSrc) return;
+        // [新增] 视频拦截逻辑：如果是视频 + 禁用了视频放大 + 当前不在沉浸模式，则直接放弃接管
+        if (target.tagName === 'VIDEO' && config.disableVideoDefaultView && !config.isImmersive) {
+            return;
+        }
         hideViewer(); 
 
         currentHoveredMedia = target;
@@ -578,6 +598,11 @@
                 
                 zoomCanvas.width = target.videoWidth || target.clientWidth || 800;
                 zoomCanvas.height = target.videoHeight || target.clientHeight || 600;
+                // [新增] 接管前先记录宿主视频的真实状态
+                originalVideoState = {
+                    paused: target.paused,
+                    muted: target.muted
+                };
 
                 target.muted = false; 
                 
