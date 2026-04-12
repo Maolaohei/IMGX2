@@ -53,6 +53,11 @@
     
     <div class="row" style="margin-top: 15px;"><label style="font-weight:bold;color:#4A90E2">🌌 开启沉浸图库模式:</label><input type="checkbox" id="isImmersive" style="width:18px;height:18px;"></div>
     <div class="row" id="preloadRow"><label title="设置沉浸模式下自动提前解析并加载的高清图片数量">沉浸预加载张数:</label><input type="number" id="preloadCount" min="0" max="20"></div>
+
+    <div class="row" style="margin-top: 10px;">
+        <label title="针对防盗链限制极强的网站，强制使用Base64下载。支持通配符，多个用逗号分隔，如: *.aa.com, bb.cc.com">Base64特权域名:</label>
+        <input type="text" id="base64Domains" placeholder="*.aa.com, bb.cc.com" style="width: 140px; text-transform: none; font-family: monospace; font-weight: normal;">
+    </div>
     
     <h3 style="margin-top: 20px;">⌨️ 快捷键</h3>
     <div class="row"><label>沉浸模式开关:</label><input type="text" id="keyImmersive" style="width: 75px;"></div>

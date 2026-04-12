@@ -21,7 +21,8 @@ const defaultConfigs = {
     keyPlayVideo: 'space',   
     keyDownloadVideo: 'd',
     keyDouble: 's',          
-    keyTriple: 'q'           
+    keyTriple: 'q',
+    base64Domains: '' // 新增 Base64 域名配置
 };
 
 const ids = Object.keys(defaultConfigs);
@@ -90,7 +91,13 @@ saveBtn.addEventListener('click', () => {
     ids.forEach(id => {
         const el = document.getElementById(id); if (!el) return;
         let val; if (el.type === 'checkbox') val = el.checked;
-        else { val = el.value.trim(); if (val === '') val = defaultConfigs[id]; if (el.type === 'text') val = val.toLowerCase(); if (el.type === 'number') val = parseFloat(val); }
+        else { 
+            val = el.value.trim(); 
+            if (val === '') val = defaultConfigs[id]; 
+            // 避免把 Base64 的域名转成小写带来意外行为，只有这些设定的 id 强制小写
+            if (el.type === 'text' && id !== 'base64Domains') val = val.toLowerCase(); 
+            if (el.type === 'number') val = parseFloat(val); 
+        }
         data[id] = val;
     });
     chrome.storage.local.set(data, () => { msg.style.display = 'block'; setTimeout(() => { msg.style.display = 'none'; }, 1500); });
