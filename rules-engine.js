@@ -60,13 +60,14 @@
                 { srcRegExp: '(.+\\.pixiv\\.net/images/post/\\d+)/w/\\d+(/.+@IMG@)', processor: '$1$2' },
                 {
                     selectors: 'img, [style*="background"], .kTOQSN',
-                    srcRegExp: '(//.+\\.pximg\\.net/).+(/img/.+?)(_p\\d+)?_.+(@IMG@)',
+                    srcRegExp: '(//.+\\.pximg\\.net/).+(/img/.+?)(_p\\d+)?(?:_.+)?(@IMG@)',
                     processor: async (trigger, src, srcRegExpObj) => {
                         const finalSrc = src || tools.getLargestImgSrc(trigger.parentElement);
-                        if (srcRegExpObj.test(finalSrc)) {
+                        const match = finalSrc.match(srcRegExpObj);
+                        if (match) {
                             return await tools.detectImage(
-                                `${RegExp.$1}img-original${RegExp.$2}${RegExp.$3 || '_ugoira0'}${RegExp.$4}`,
-                                `${RegExp.$1}img-original${RegExp.$2}${RegExp.$3 || '_ugoira0'}.png`
+                                `${match[1]}img-original${match[2]}${match[3] || '_p0'}${match[4]}`,
+                                `${match[1]}img-original${match[2]}${match[3] || '_p0'}.png`
                             );
                         }
                         return '';

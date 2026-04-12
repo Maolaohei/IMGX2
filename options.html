@@ -3,12 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <style>
-        body { width: 340px; padding: 15px; font-family: system-ui, sans-serif; background: #f9f9f9; color: #333; }
+        body { width: 360px; padding: 15px; font-family: system-ui, sans-serif; background: #f9f9f9; color: #333; margin: 0; }
         h3 { margin-top: 0; font-size: 16px; border-bottom: 2px solid #ddd; padding-bottom: 8px; }
+        
+        /* 标签页导航样式 */
+        .tabs { display: flex; border-bottom: 2px solid #ddd; margin-bottom: 15px; }
+        .tab-btn { flex: 1; padding: 8px 0; border: none; background: transparent; cursor: pointer; font-size: 14px; font-weight: bold; color: #777; transition: all 0.2s; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+        .tab-btn:hover { color: #4A90E2; }
+        .tab-btn.active { color: #4A90E2; border-bottom: 2px solid #4A90E2; }
+        
+        /* 标签页内容容器 */
+        .tab-content { display: none; min-height: 280px; }
+        .tab-content.active { display: block; animation: mix01-fade-in 0.2s ease; }
+        @keyframes mix01-fade-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
         .row { margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; transition: opacity 0.3s; }
         input[type="number"] { width: 60px; padding: 4px; border: 1px solid #ccc; border-radius: 4px; }
         input[type="text"] { width: 40px; padding: 4px; border: 1px solid #ccc; border-radius: 4px; text-align: center; text-transform: uppercase; font-family: monospace; font-weight: bold; }
         select { padding: 4px; border: 1px solid #ccc; border-radius: 4px; width: 140px; }
+        
         #disclaimerOverlay {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: #fff; z-index: 100; padding: 20px; box-sizing: border-box;
@@ -18,7 +31,8 @@
         .agree-btn { background: #d32f2f; color: white; border: none; padding: 10px; border-radius: 6px; cursor: pointer; font-weight: bold; transition: background 0.2s; }
         .agree-btn:hover { background: #b71c1c; }
         #agreedStatus { font-size: 12px; color: #008a00; font-weight: bold; display: none; margin-bottom: 10px; text-align: center; }
-        .btn-container { margin-top: 15px; display: flex; flex-direction: column; gap: 8px; }
+        
+        .btn-container { margin-top: 15px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid #ddd; padding-top: 15px; }
         button { border: none; padding: 10px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: bold; transition: background 0.2s; }
         #saveBtn { background: #4A90E2; color: white; }
         #saveBtn:hover { background: #357ABD; }
@@ -29,7 +43,7 @@
         .history-box { max-height: 160px; overflow-y: auto; background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 5px; font-size: 12px; margin-bottom: 10px; word-break: break-all; box-shadow: inset 0 2px 4px rgba(0,0,0,0.05); }
         .history-item { border-bottom: 1px solid #eee; padding: 6px 4px; }
         .history-item:last-child { border-bottom: none; }
-        .footer { margin-top: 20px; padding-top: 10px; border-top: 1px dashed #ccc; font-size: 11px; color: #888; }
+        .footer { margin-top: 10px; font-size: 11px; color: #888; text-align: center; }
     </style>
 </head>
 <body>
@@ -41,44 +55,58 @@
         <button id="agreeBtn" class="agree-btn">我已阅读并同意以上条款</button>
     </div>
 
-    <h3>⚙️ 插件设置</h3>
     <div id="agreedStatus">✅ 您已同意免责声明</div>
-    <div class="row"><label>CDN 高清解析:</label><select id="loadHD"><option value="true">开启</option><option value="false">关闭</option></select></div>
-    <div class="row"><label title="针对特小图自动启用更高初始倍数">小型图片智能优化:</label><input type="checkbox" id="smallImageOptimization" style="width:18px;height:18px;"></div>
-    <div class="row"><label>显示画质提示:</label><input type="checkbox" id="showStatus" style="width:18px;height:18px;"></div>
-    <div class="row"><label>开启突破限制:</label><input type="checkbox" id="breakoutView" style="width:18px;height:18px;"></div>
-    <div class="row"><label title="开启后，鼠标悬停不会在原位放大视频（沉浸模式不受影响）">默认视图禁止视频放大:</label><input type="checkbox" id="disableVideoDefaultView" style="width:18px;height:18px;"></div>
-    <div class="row"><label>默认倍数:</label><input type="number" id="zoomLevel" step="0.5" min="1.5"></div>
-    <div class="row" id="viewModeRow"><label>默认视图模式:</label><select id="mode"><option value="partial">局部放大</option><option value="full-follow">整体跟随</option><option value="full-center">智能避让</option></select></div>
-    
-    <div class="row" style="margin-top: 15px;"><label style="font-weight:bold;color:#4A90E2">🌌 开启沉浸图库模式:</label><input type="checkbox" id="isImmersive" style="width:18px;height:18px;"></div>
-    <div class="row" id="preloadRow"><label title="设置沉浸模式下自动提前解析并加载的高清图片数量">沉浸预加载张数:</label><input type="number" id="preloadCount" min="0" max="20"></div>
 
-    <div class="row" style="margin-top: 10px;">
-        <label title="针对防盗链限制极强的网站，强制使用Base64下载。支持通配符，多个用逗号分隔，如: *.aa.com, bb.cc.com">Base64特权域名:</label>
-        <input type="text" id="base64Domains" placeholder="*.aa.com, bb.cc.com" style="width: 140px; text-transform: none; font-family: monospace; font-weight: normal;">
+    <div class="tabs">
+        <button class="tab-btn active" data-target="tab-basic">基础与视图</button>
+        <button class="tab-btn" data-target="tab-keys">快捷键</button>
+        <button class="tab-btn" data-target="tab-adv">高级与历史</button>
     </div>
-    
-    <h3 style="margin-top: 20px;">⌨️ 快捷键</h3>
-    <div class="row"><label>沉浸模式开关:</label><input type="text" id="keyImmersive" style="width: 75px;"></div>
-    <div class="row"><label>播放(Space)/全局提取(D):</label><div style="display:flex;gap:5px"><input type="text" id="keyPlayVideo" placeholder="Space"><input type="text" id="keyDownloadVideo" placeholder="D"></div></div>
-    <div class="row"><label>喜欢(L)/关注(F):</label><div style="display:flex;gap:5px"><input type="text" id="keyLike" placeholder="L"><input type="text" id="keyFollow" placeholder="F"></div></div>
-    <div class="row"><label style="color:#f91880; font-weight:bold;">一键双连(S)/三连(Q):</label><div style="display:flex;gap:5px"><input type="text" id="keyDouble" placeholder="S"><input type="text" id="keyTriple" placeholder="Q"></div></div>
-    <div class="row"><label>切换/旋转:</label><div style="display:flex;gap:5px"><input type="text" id="keyMode"><input type="text" id="keyRotate"></div></div>
-    <div class="row"><label>缩放 (+/-):</label><div style="display:flex;gap:5px"><input type="text" id="keyZoomIn"><input type="text" id="keyZoomOut"></div></div>
-    <div class="row"><label>镜像反转:</label><input type="text" id="keyMirror"></div>
+
+    <div id="tab-basic" class="tab-content active">
+        <div class="row"><label>CDN 高清解析:</label><select id="loadHD"><option value="true">开启</option><option value="false">关闭</option></select></div>
+        <div class="row"><label title="针对特小图自动启用更高初始倍数">小型图片智能优化:</label><input type="checkbox" id="smallImageOptimization" style="width:18px;height:18px;"></div>
+        <div class="row"><label>显示画质提示:</label><input type="checkbox" id="showStatus" style="width:18px;height:18px;"></div>
+        <div class="row"><label>开启突破限制:</label><input type="checkbox" id="breakoutView" style="width:18px;height:18px;"></div>
+        <div class="row"><label title="开启后，鼠标悬停不会在原位放大视频（沉浸模式不受影响）">默认视图禁止视频放大:</label><input type="checkbox" id="disableVideoDefaultView" style="width:18px;height:18px;"></div>
+        <div class="row"><label>默认倍数:</label><input type="number" id="zoomLevel" step="0.5" min="1.5"></div>
+        <div class="row" id="viewModeRow"><label>默认视图模式:</label><select id="mode"><option value="partial">局部放大</option><option value="full-follow">整体跟随</option><option value="full-center">智能避让</option></select></div>
+        
+        <div style="border-top: 1px dashed #ccc; margin: 15px 0;"></div>
+
+        <div class="row"><label style="font-weight:bold;color:#4A90E2">🌌 开启沉浸图库模式:</label><input type="checkbox" id="isImmersive" style="width:18px;height:18px;"></div>
+        <div class="row" id="preloadRow"><label title="设置沉浸模式下自动提前解析并加载的高清图片数量">沉浸预加载张数:</label><input type="number" id="preloadCount" min="0" max="20"></div>
+    </div>
+
+    <div id="tab-keys" class="tab-content">
+        <div class="row"><label>沉浸模式开关:</label><input type="text" id="keyImmersive" style="width: 75px;"></div>
+        <div class="row"><label>播放(Space)/全局提取(D):</label><div style="display:flex;gap:5px"><input type="text" id="keyPlayVideo" placeholder="Space"><input type="text" id="keyDownloadVideo" placeholder="D"></div></div>
+        <div class="row"><label>喜欢(L)/关注(F):</label><div style="display:flex;gap:5px"><input type="text" id="keyLike" placeholder="L"><input type="text" id="keyFollow" placeholder="F"></div></div>
+        <div class="row"><label style="color:#f91880; font-weight:bold;">一键双连(S)/三连(Q):</label><div style="display:flex;gap:5px"><input type="text" id="keyDouble" placeholder="S"><input type="text" id="keyTriple" placeholder="Q"></div></div>
+        <div class="row"><label>切换/旋转:</label><div style="display:flex;gap:5px"><input type="text" id="keyMode"><input type="text" id="keyRotate"></div></div>
+        <div class="row"><label>缩放 (+/-):</label><div style="display:flex;gap:5px"><input type="text" id="keyZoomIn"><input type="text" id="keyZoomOut"></div></div>
+        <div class="row"><label>镜像反转:</label><input type="text" id="keyMirror"></div>
+    </div>
+
+    <div id="tab-adv" class="tab-content">
+        <div class="row" style="flex-direction: column; align-items: flex-start;">
+            <label style="margin-bottom: 5px;" title="支持通配符，多个用逗号分隔。(Pixiv域名已内置免配)">自定义 Base64 特权域名:</label>
+            <input type="text" id="base64Domains" placeholder="*.aa.com, bb.cc.com" style="width: 100%; box-sizing: border-box; text-transform: none; font-family: monospace; font-weight: normal; text-align: left;">
+            <span style="font-size: 11px; color: #888; margin-top: 4px;">注: *.pixiv.net, *.pximg.net 默认已开启。</span>
+        </div>
+
+        <h3 style="margin-top: 15px; font-size: 14px;">📜 下载历史记录</h3>
+        <div id="historyList" class="history-box"></div>
+        <button id="clearHistoryBtn" style="width: 100%; background: #f44336; color: white; padding: 6px;">🗑️ 清空历史记录</button>
+    </div>
     
     <div class="btn-container">
         <button id="saveBtn">💾 保存当前设置</button>
         <button id="resetBtn">↺ 恢复出厂设置</button>
     </div>
     <div id="saveMsg" class="success-text">✓ 操作成功！</div>
-
-    <h3 style="margin-top: 20px;">📜 下载历史记录</h3>
-    <div id="historyList" class="history-box"></div>
-    <button id="clearHistoryBtn" style="width: 100%; background: #f44336; color: white;">🗑️ 清空历史记录</button>
-
-    <div class="footer"><b>作者:</b> Mix01<br>本工具仅供学习使用。</div>
+    
+    <div class="footer"><b>Mix01 Immersive Engine</b> - 仅供学习使用</div>
     <script src="options.js"></script>
 </body>
 </html>

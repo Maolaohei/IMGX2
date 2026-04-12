@@ -22,7 +22,7 @@ const defaultConfigs = {
     keyDownloadVideo: 'd',
     keyDouble: 's',          
     keyTriple: 'q',
-    base64Domains: '' // 新增 Base64 域名配置
+    base64Domains: '' 
 };
 
 const ids = Object.keys(defaultConfigs);
@@ -35,9 +35,21 @@ const msg = document.getElementById('saveMsg');
 const isImmersiveEl = document.getElementById('isImmersive');
 const viewModeRow = document.getElementById('viewModeRow');
 const preloadRow = document.getElementById('preloadRow');
-
 const historyList = document.getElementById('historyList');
 const clearHistoryBtn = document.getElementById('clearHistoryBtn');
+
+// --- 标签页切换逻辑 ---
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        // 移除所有激活状态
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        // 激活当前点击的标签
+        btn.classList.add('active');
+        document.getElementById(btn.getAttribute('data-target')).classList.add('active');
+    });
+});
+// ----------------------
 
 function updateViewModeUI() {
     if (isImmersiveEl.checked) {
@@ -94,7 +106,6 @@ saveBtn.addEventListener('click', () => {
         else { 
             val = el.value.trim(); 
             if (val === '') val = defaultConfigs[id]; 
-            // 避免把 Base64 的域名转成小写带来意外行为，只有这些设定的 id 强制小写
             if (el.type === 'text' && id !== 'base64Domains') val = val.toLowerCase(); 
             if (el.type === 'number') val = parseFloat(val); 
         }
