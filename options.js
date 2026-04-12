@@ -1,14 +1,15 @@
+// options.js
 const defaultConfigs = { 
     hasAgreed: false, 
     loadHD: 'true', 
     breakoutView: false, 
     showStatus: true, 
     smallImageOptimization: true, 
-    disableVideoDefaultView: true, // [新增] 默认禁止视频在默认视图放大
+    disableVideoDefaultView: true,
     zoomLevel: 2.0, 
     isImmersive: false, 
     mode: 'partial', 
-    preloadCount: 5, // 新增：预加载默认5张
+    preloadCount: 5, 
     keyMode: 'v', 
     keyRotate: 'r', 
     keyMirror: 'm', 
@@ -17,8 +18,10 @@ const defaultConfigs = {
     keyImmersive: 'ctrl+f12',
     keyLike: 'l',
     keyFollow: 'f',
-    keyPlayVideo: 'q',
-    keyDownloadVideo: 'd'
+    keyPlayVideo: 'space',   
+    keyDownloadVideo: 'd',
+    keyDouble: 's',          
+    keyTriple: 'q'           
 };
 
 const ids = Object.keys(defaultConfigs);
@@ -30,7 +33,7 @@ const agreedStatus = document.getElementById('agreedStatus');
 const msg = document.getElementById('saveMsg');
 const isImmersiveEl = document.getElementById('isImmersive');
 const viewModeRow = document.getElementById('viewModeRow');
-const preloadRow = document.getElementById('preloadRow'); // 获取预加载Row
+const preloadRow = document.getElementById('preloadRow');
 
 const historyList = document.getElementById('historyList');
 const clearHistoryBtn = document.getElementById('clearHistoryBtn');

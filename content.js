@@ -1,16 +1,14 @@
-// content.js - Mix01 高性能解耦渲染引擎 (完整交付版)
+// content.js - Mix01 高性能解耦渲染引擎 (幽灵连招完整版)
 (function () {
     if (window.__imgZoomProInitialized) return;
     window.__imgZoomProInitialized = true;
 
-    // 全局状态缓存
     window.__mix01UserPaused = false;
     window.isFetchingMore = false;
     window.__mix01FollowCache = window.__mix01FollowCache || {};
     window.__mix01LikeMediaCache = window.__mix01LikeMediaCache || {};
     window.__mix01FollowAuthorCache = window.__mix01FollowAuthorCache || {};
 
-    // 适配器工具函数
     function getImmersiveAdapter() {
         if (window.Mix01ImmersiveEngine && window.Mix01ImmersiveEngine.getAdapter) {
             return window.Mix01ImmersiveEngine.getAdapter(window.location.hostname);
@@ -72,7 +70,9 @@
             };
             this.keys = {
                 mode: 'v', rotate: 'r', mirror: 'm', zoomIn: '=', zoomOut: '-',
-                immersive: 'ctrl+f12', like: 'l', follow: 'f', playVideo: 'q', downloadVideo: 'd'
+                immersive: 'ctrl+f12', like: 'l', follow: 'f', 
+                playVideo: 'space', downloadVideo: 'd', 
+                double: 's', triple: 'q'
             };
             this.siteModes = {};
             this.isContextValid = () => !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
@@ -345,18 +345,16 @@
             let cDW = 0, cDH = 0;
             const mode = this.cfg.state.mode;
 
-            // 【修复 1】：动态切换类名，如果处于沉浸模式，主动阻断 mode-partial 等类的挂载，隔离 CSS 污染
+            // 【CSS 彻底隔离】：沉浸模式主动阻断其他 mode 类名的挂载
             this.elements.viewer.className = this.cfg.state.isImmersive ? 'mode-immersive' : `mode-${mode}`;
 
             if (this.cfg.state.isImmersive) {
                 this.setStyle(this.elements.viewer, 'display', 'block');
                 this.setStyle(this.elements.viewer, 'position', 'fixed');
-                
-                // 【修复 2】：全面使用 setStyle 强制注入带 !important 的样式，彻底防范外部框架干扰
                 this.setStyle(this.elements.viewer, 'width', '100vw');
                 this.setStyle(this.elements.viewer, 'height', '100vh');
-                this.setStyle(this.elements.viewer, 'left', '0');
-                this.setStyle(this.elements.viewer, 'top', '0');
+                this.setStyle(this.elements.viewer, 'left', '0px');
+                this.setStyle(this.elements.viewer, 'top', '0px');
                 this.setStyle(this.elements.viewer, 'background-color', 'rgba(0, 0, 0, 0.95)');
                 this.setStyle(this.elements.viewer, 'background-image', 'none');
                 this.setStyle(this.elements.viewer, 'border', 'none');
@@ -376,8 +374,7 @@
                 cDW = tW; cDH = tH;
                 
                 this.setStyle(activeMedia, 'position', 'absolute');
-                this.setStyle(activeMedia, 'width', `${tW}px`); 
-                this.setStyle(activeMedia, 'height', `${tH}px`);
+                this.setStyle(activeMedia, 'width', `${tW}px`); this.setStyle(activeMedia, 'height', `${tH}px`);
                 this.setStyle(activeMedia, 'margin', '0px');
 
                 let offsetX = (sW - tW) / 2;
@@ -389,31 +386,24 @@
                 }
                 
                 this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px, ${offsetY}px, 0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`);
-                this.setStyle(activeMedia, 'left', '0'); 
-                this.setStyle(activeMedia, 'top', '0');
+                this.setStyle(activeMedia, 'left', '0px'); this.setStyle(activeMedia, 'top', '0px');
             } 
             else if (mode === 'partial') {
-                this.setStyle(this.elements.viewer, 'display', 'block'); 
-                this.setStyle(this.elements.viewer, 'position', 'fixed'); 
-                this.setStyle(this.elements.viewer, 'overflow', 'hidden'); 
+                this.setStyle(this.elements.viewer, 'display', 'block'); this.setStyle(this.elements.viewer, 'position', 'fixed'); this.setStyle(this.elements.viewer, 'overflow', 'hidden'); 
                 
                 if (this.cfg.state.hasAgreed) {
-                    cDW = rect.width * activeZoom; 
-                    cDH = rect.height * activeZoom;
-                    this.setStyle(activeMedia, 'width', cDW + 'px'); 
-                    this.setStyle(activeMedia, 'height', cDH + 'px');
+                    cDW = rect.width * activeZoom; cDH = rect.height * activeZoom;
+                    this.setStyle(activeMedia, 'width', cDW + 'px'); this.setStyle(activeMedia, 'height', cDH + 'px');
                     this.setStyle(activeMedia, 'position', 'absolute'); 
 
                     let lensW, lensH;
                     if (isSmallOptimized && customLensWidth && customLensHeight) {
                         lensW = customLensWidth; lensH = customLensHeight;
                     } else {
-                        lensW = Math.min(350, Math.max(100, cDW + 20)); 
-                        lensH = Math.min(350, Math.max(100, cDH + 20));
+                        lensW = Math.min(350, Math.max(100, cDW + 20)); lensH = Math.min(350, Math.max(100, cDH + 20));
                     }
 
-                    this.setStyle(this.elements.viewer, 'width', lensW + 'px'); 
-                    this.setStyle(this.elements.viewer, 'height', lensH + 'px');
+                    this.setStyle(this.elements.viewer, 'width', lensW + 'px'); this.setStyle(this.elements.viewer, 'height', lensH + 'px');
                     
                     const clientX = window.lastMouseX || rect.left + rect.width/2;
                     const clientY = window.lastMouseY || rect.top + rect.height/2;
@@ -422,38 +412,28 @@
                     if (vX + lensW > sW) vX = clientX - lensW - 20;
                     if (vY + lensH > sH) vY = clientY - lensH - 20;
                     this.setStyle(this.elements.viewer, 'transform', `translate3d(${vX}px, ${vY}px, 0)`);
-                    this.setStyle(this.elements.viewer, 'left', '0'); 
-                    this.setStyle(this.elements.viewer, 'top', '0');
+                    this.setStyle(this.elements.viewer, 'left', '0px'); this.setStyle(this.elements.viewer, 'top', '0px');
 
                     if (cDW < 350 && cDH < 350 && !customLensWidth) {
                         this.setStyle(this.elements.viewer, 'border', '1px solid rgba(255, 255, 255, 0.2)'); 
                         this.setStyle(this.elements.viewer, 'background-image', 'radial-gradient(circle, rgba(20,20,20,1) 0%, rgba(0,0,0,1) 100%)'); 
                         this.setStyle(this.elements.viewer, 'background-color', '#000'); 
                     } else {
-                        this.setStyle(this.elements.viewer, 'background-image', 'none'); 
-                        this.setStyle(this.elements.viewer, 'background-color', 'transparent'); 
+                        this.setStyle(this.elements.viewer, 'background-image', 'none'); this.setStyle(this.elements.viewer, 'background-color', 'transparent'); 
                         this.setStyle(this.elements.viewer, 'border', '1px solid rgba(255, 255, 255, 0.4)'); 
                     }
 
-                    this.setStyle(activeMedia, 'right', 'auto'); 
-                    this.setStyle(activeMedia, 'bottom', 'auto'); 
-                    this.setStyle(activeMedia, 'margin', '0px');
+                    this.setStyle(activeMedia, 'right', 'auto'); this.setStyle(activeMedia, 'bottom', 'auto'); this.setStyle(activeMedia, 'margin', '0px');
                     let offsetX = 0, offsetY = 0;
                     if (cDW > lensW) offsetX = -(cDW * xP - lensW / 2); else offsetX = (lensW - cDW) / 2;
                     if (cDH > lensH) offsetY = -(cDH * yP - lensH / 2); else offsetY = (lensH - cDH) / 2;
                     this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px, ${offsetY}px, 0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`);
-                    this.setStyle(activeMedia, 'left', '0'); 
-                    this.setStyle(activeMedia, 'top', '0');
+                    this.setStyle(activeMedia, 'left', '0px'); this.setStyle(activeMedia, 'top', '0px');
                 }
             } else {
-                this.setStyle(this.elements.viewer, 'display', 'block'); 
-                this.setStyle(this.elements.viewer, 'position', 'fixed');
-                this.setStyle(this.elements.viewer, 'background-color', 'rgba(20, 20, 20, 0.9)'); 
-                this.setStyle(this.elements.viewer, 'background-image', 'none');
-                this.setStyle(activeMedia, 'position', 'absolute'); 
-                this.setStyle(activeMedia, 'right', 'auto'); 
-                this.setStyle(activeMedia, 'bottom', 'auto'); 
-                this.setStyle(activeMedia, 'margin', '0px');
+                this.setStyle(this.elements.viewer, 'display', 'block'); this.setStyle(this.elements.viewer, 'position', 'fixed');
+                this.setStyle(this.elements.viewer, 'background-color', 'rgba(20, 20, 20, 0.9)'); this.setStyle(this.elements.viewer, 'background-image', 'none');
+                this.setStyle(activeMedia, 'position', 'absolute'); this.setStyle(activeMedia, 'right', 'auto'); this.setStyle(activeMedia, 'bottom', 'auto'); this.setStyle(activeMedia, 'margin', '0px');
 
                 let tW = rect.width * activeZoom, tH = rect.height * activeZoom;
                 const maxVW = sW * (mode === 'full-follow' ? 0.7 : 0.95);
@@ -468,27 +448,21 @@
                     if (tW > safeMaxVW) { tW = safeMaxVW; tH = tW / ratio; }
                     if (tH > safeMaxVH) { tH = safeMaxVH; tW = tH * ratio; }
                     cDW = tW; cDH = tH;
-                    this.setStyle(this.elements.viewer, 'width', `${tW}px`); 
-                    this.setStyle(this.elements.viewer, 'height', `${tH}px`);
+                    this.setStyle(this.elements.viewer, 'width', `${tW}px`); this.setStyle(this.elements.viewer, 'height', `${tH}px`);
                     if (this.cfg.state.hasAgreed) {
-                        this.setStyle(activeMedia, 'width', '100%'); 
-                        this.setStyle(activeMedia, 'height', '100%');
+                        this.setStyle(activeMedia, 'width', '100%'); this.setStyle(activeMedia, 'height', '100%');
                         this.setStyle(activeMedia, 'transform', `translate3d(0, 0, 0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`);
-                        this.setStyle(activeMedia, 'left', '0'); 
-                        this.setStyle(activeMedia, 'top', '0');
+                        this.setStyle(activeMedia, 'left', '0px'); this.setStyle(activeMedia, 'top', '0px');
                     }
                 } else {
                     const vW = Math.min(tW, maxVW), vH = Math.min(tH, maxVH);
                     cDW = vW; cDH = vH;
-                    this.setStyle(this.elements.viewer, 'width', `${vW}px`); 
-                    this.setStyle(this.elements.viewer, 'height', `${vH}px`);
-                    this.setStyle(activeMedia, 'width', `${tW}px`); 
-                    this.setStyle(activeMedia, 'height', `${tH}px`);
+                    this.setStyle(this.elements.viewer, 'width', `${vW}px`); this.setStyle(this.elements.viewer, 'height', `${vH}px`);
+                    this.setStyle(activeMedia, 'width', `${tW}px`); this.setStyle(activeMedia, 'height', `${tH}px`);
                     let mX = (tW > vW) ? -(tW - vW) * xP : 0;
                     let mY = (tH > vH) ? -(tH - vH) * yP : 0;
                     this.setStyle(activeMedia, 'transform', `translate3d(${mX}px, ${mY}px, 0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`);
-                    this.setStyle(activeMedia, 'left', '0'); 
-                    this.setStyle(activeMedia, 'top', '0');
+                    this.setStyle(activeMedia, 'left', '0px'); this.setStyle(activeMedia, 'top', '0px');
                 }
 
                 if (mode === 'full-follow') {
@@ -496,8 +470,7 @@
                     if (vX + cDW > sW) vX = clientX - cDW - 20;
                     if (vY + cDH > sH) vY = clientY - cDH - 20;
                     this.setStyle(this.elements.viewer, 'transform', `translate3d(${vX}px, ${vY}px, 0)`);
-                    this.setStyle(this.elements.viewer, 'left', '0'); 
-                    this.setStyle(this.elements.viewer, 'top', '0');
+                    this.setStyle(this.elements.viewer, 'left', '0px'); this.setStyle(this.elements.viewer, 'top', '0px');
                 } else {
                     const margin = 30; let vX, vY;
                     if (clientX < sW / 2) vX = sW - cDW - margin; else vX = margin; 
@@ -505,13 +478,12 @@
                     if (vY < margin) vY = margin;
                     if (vY + cDH > sH - margin) vY = sH - cDH - margin;
                     this.setStyle(this.elements.viewer, 'transform', `translate3d(${vX}px, ${vY}px, 0)`);
-                    this.setStyle(this.elements.viewer, 'left', '0'); 
-                    this.setStyle(this.elements.viewer, 'top', '0');
+                    this.setStyle(this.elements.viewer, 'left', '0px'); this.setStyle(this.elements.viewer, 'top', '0px');
                 }
             }
 
             this.updateStatus(activeMedia.src !== currentHoveredSrc ? 'hd' : 'original', cDW, cDH, isVideo);
-            return activeZoom; 
+            return activeZoom;
         }
 
         handleImmersiveActivity(currentMedia, currentSrc, keys) {
@@ -530,10 +502,10 @@
                 if (states.authorName && window.__mix01FollowAuthorCache[states.authorName] !== undefined) states.isFollowed = window.__mix01FollowAuthorCache[states.authorName];
                 
                 if (states.isLiked !== null) {
-                    likeText = states.isLiked ? "已喜欢" : "未喜欢"; likeIcon = states.isLiked ? "❤️" : "🤍"; likeColor = states.isLiked ? "#f91880" : "#aaaaaa";
+                    likeText = states.isLiked ? "已" : "未"; likeIcon = states.isLiked ? "❤️" : "🤍"; likeColor = states.isLiked ? "#f91880" : "#aaaaaa";
                 }
                 if (states.isFollowed !== null) {
-                    followText = states.isFollowed ? "已关注" : "未关注"; followIcon = states.isFollowed ? "🫂" : "👤"; followColor = states.isFollowed ? "#00ba7c" : "#ff4b4b"; 
+                    followText = states.isFollowed ? "已注" : "未注"; followIcon = states.isFollowed ? "🫂" : "👤"; followColor = states.isFollowed ? "#00ba7c" : "#ff4b4b"; 
                 }
                 if (states.authorName) authorDisplay = `<span class="author-tag">${states.authorName}</span>`;
             }
@@ -542,18 +514,13 @@
             const hintKbdFollow = (keys.follow || 'f').toUpperCase();
             const hasActions = !!adapter;
             const actionsHtml = hasActions 
-                ? `&nbsp;|&nbsp; <span class="hud-status-item" style="color: ${likeColor}">${likeIcon} ${likeText}</span>(<kbd class="kbd-btn">${hintKbdLike}</kbd>) &nbsp;&nbsp; <span class="hud-status-item" style="color: ${followColor}">${followIcon} ${authorDisplay}${followText}</span>(<kbd class="kbd-btn">${hintKbdFollow}</kbd>) ` 
+                ? `&nbsp;|&nbsp; <span class="hud-status-item" style="color: ${likeColor}">${likeIcon}${likeText}</span>(<kbd class="kbd-btn">${hintKbdLike}</kbd>) &nbsp; <span class="hud-status-item" style="color: ${followColor}">${followIcon}${authorDisplay}${followText}</span>(<kbd class="kbd-btn">${hintKbdFollow}</kbd>) &nbsp;|&nbsp; 🌟双连(<kbd class="kbd-btn">${(keys.double || 's').toUpperCase()}</kbd>) &nbsp; 🚀三连(<kbd class="kbd-btn">${(keys.triple || 'q').toUpperCase()}</kbd>) ` 
                 : '';
 
-            let playHtml = "";
-            if (currentMedia && currentMedia.tagName === 'VIDEO') {
-                const playLabel = window.__mix01UserPaused ? "▶️ 播放" : "⏸️ 暂停";
-                playHtml = `&nbsp;|&nbsp; ${playLabel}(<kbd class="kbd-btn">${(keys.playVideo || 'q').toUpperCase()}</kbd>) &nbsp; 💾 下载(<kbd class="kbd-btn">${(keys.downloadVideo || 'd').toUpperCase()}</kbd>)`;
-            } else {
-                playHtml = `&nbsp;|&nbsp; 💾 下载(<kbd class="kbd-btn">S</kbd>) &nbsp; 提取原图直链(<kbd class="kbd-btn">${(keys.downloadVideo || 'd').toUpperCase()}</kbd>)`;
-            }
+            const playLabel = window.__mix01UserPaused ? "▶️播放" : "⏸️暂停";
+            const playHtml = `&nbsp;|&nbsp; ${playLabel}(<kbd class="kbd-btn">Space</kbd>) &nbsp; 💾提取(<kbd class="kbd-btn">${(keys.downloadVideo || 'd').toUpperCase()}</kbd>)`;
 
-            this.elements.hint.innerHTML = `⌨️ 左右切换 ${actionsHtml} ${playHtml} &nbsp;|&nbsp; ❌ 双击退出`;
+            this.elements.hint.innerHTML = `⌨️左右切换 ${actionsHtml} ${playHtml} &nbsp;|&nbsp; ❌双击退出`;
             
             this.setStyle(this.elements.viewer, 'cursor', 'default');
             this.setStyle(this.elements.img, 'cursor', 'default');
@@ -903,31 +870,77 @@
             if (!this.state.currentMedia) return;
             const adapter = getImmersiveAdapter();
             
-            if (!adapter || (actionType === 'like' && !adapter.like) || (actionType === 'follow' && !adapter.follow)) {
+            if (!adapter || (!adapter.like && !adapter.follow)) {
                 this.render.showToast("⚠️ 该网站暂不支持快捷交互"); return;
             }
 
             const container = adapter.getContainer ? adapter.getContainer(this.state.currentMedia) : document.body;
 
-            if (actionType === 'like') {
-                const newState = await adapter.like(container, this.state.currentMedia);
-                if (newState !== null) {
-                    window.__mix01LikeMediaCache[this.state.currentSrc] = newState;
-                    this.render.showToast(newState ? "❤️ 已喜欢" : "🤍 已取消喜欢 (如果失败请在文章页重试)");
-                } else {
-                    this.render.showToast("❌ 交互失败，未找到API上下文或按钮");
+            // 【核心修复】：预先获取当前状态并结合缓存，防止 S/Q 连招取消已经存在的喜欢或关注
+            let currentState = { isLiked: false, isFollowed: false, authorName: null };
+            if (adapter.getStates) {
+                currentState = adapter.getStates(container);
+                if (window.__mix01LikeMediaCache[this.state.currentSrc] !== undefined) {
+                    currentState.isLiked = window.__mix01LikeMediaCache[this.state.currentSrc];
                 }
-            } else {
-                const newState = await adapter.follow(container, this.state.currentMedia);
-                if (newState !== null) {
-                    const tempStates = adapter.getStates ? adapter.getStates(container) : null;
-                    if (tempStates && tempStates.authorName) window.__mix01FollowAuthorCache[tempStates.authorName] = newState;
-                    this.render.showToast(newState ? "🫂 已成功关注" : "👋 已取消关注 (如果失败请在文章页重试)");
-                } else {
-                    this.render.showToast("❌ 交互失败，未找到API上下文或按钮");
+                if (currentState.authorName && window.__mix01FollowAuthorCache[currentState.authorName] !== undefined) {
+                    currentState.isFollowed = window.__mix01FollowAuthorCache[currentState.authorName];
                 }
             }
+
+            const isCombo = (actionType === 'double' || actionType === 'triple');
+            const doLike = (actionType === 'like' || isCombo);
+            const doFollow = (actionType === 'follow' || isCombo);
+            const doDownload = (actionType === 'triple');
+
+            // 执行喜欢逻辑（如果是连招且已经喜欢了，则跳过执行，避免误触取消）
+            if (doLike && adapter.like) {
+                if (!(isCombo && currentState.isLiked)) {
+                    const newState = await adapter.like(container, this.state.currentMedia);
+                    if (newState !== null) window.__mix01LikeMediaCache[this.state.currentSrc] = newState;
+                }
+            }
+            
+            // 执行关注逻辑（如果是连招且已经关注了，则跳过执行，避免误触取关）
+            if (doFollow && adapter.follow) {
+                if (!(isCombo && currentState.isFollowed)) {
+                    const newState = await adapter.follow(container, this.state.currentMedia);
+                    if (newState !== null) {
+                        const tempStates = adapter.getStates ? adapter.getStates(container) : null;
+                        if (tempStates && tempStates.authorName) window.__mix01FollowAuthorCache[tempStates.authorName] = newState;
+                    }
+                }
+            }
+
+            // HUD 状态反馈
+            if (actionType === 'double') this.render.showToast("💖 一键双连生效！(喜欢+关注)");
+            else if (actionType === 'triple') this.render.showToast("🚀 一键三连生效！(喜欢+关注+提取)");
+            else if (actionType === 'like') this.render.showToast(window.__mix01LikeMediaCache[this.state.currentSrc] ? "❤️ 已喜欢" : "🤍 已取消喜欢");
+            else if (actionType === 'follow') this.render.showToast("👤 关注状态已更新");
+
             this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
+
+            if (doDownload) this.triggerGlobalDownload();
+        }
+
+        triggerGlobalDownload() {
+            const adapter = getImmersiveAdapter();
+            if (this.state.currentMedia.tagName === 'VIDEO') {
+                if (adapter && adapter.downloadVideo) {
+                    this.render.showToast("⏳ 正在打通后台提取原版最高清文件...");
+                    adapter.downloadVideo(adapter.getContainer(this.state.currentMedia), this.state.currentMedia).then(videoUrl => {
+                        if (videoUrl === 'NATIVE_CLICKED') this.render.showToast("✅ 已调用浏览器插件原生下载机制！");
+                        else if (videoUrl) {
+                            this.render.showToast("✅ 提取成功，开始强制下载！");
+                            chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: videoUrl, dataUrl: videoUrl });
+                        } else this.render.showToast("❌ 无法解析该媒体的直链");
+                    });
+                } else {
+                    this.render.showToast("⚠️ 当前站点暂未适配一键视频提取");
+                }
+            } else {
+                if (this.render.elements.img.src) downloadImage(this.render.elements.img.src, this.render);
+            }
         }
 
         triggerPreload() {
@@ -1007,23 +1020,15 @@
 
             if (this.render.elements.viewer.style.display !== 'block') return;
 
-            if (this.matchCombo(e, this.cfg.keys.playVideo || 'q')) {
+            if (this.matchCombo(e, this.cfg.keys.playVideo || 'space') || e.code.toLowerCase() === 'space') {
                 if (this.cfg.state.isImmersive && this.state.currentMedia && this.state.currentMedia.tagName === 'VIDEO') {
                     if (window.__mix01UserPaused) {
                         window.__mix01UserPaused = false;
                         let playPromise = this.state.currentMedia.play();
-                        if (playPromise !== undefined) {
-                            playPromise.then(() => {
-                                this.render.showToast("▶️ 继续播放");
-                                this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
-                            }).catch(error => {
-                                this.render.showToast("⚠️ 视频流未就绪或被挂起");
-                            });
-                        }
+                        if (playPromise !== undefined) playPromise.then(() => { this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys); }).catch(()=>{});
                     } else {
                         window.__mix01UserPaused = true;
                         this.state.currentMedia.pause();
-                        this.render.showToast("⏸️ 已暂停");
                         this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
                     }
                     e.preventDefault(); return;
@@ -1031,30 +1036,22 @@
             }
 
             if (this.matchCombo(e, this.cfg.keys.downloadVideo || 'd')) {
-                const adapter = getImmersiveAdapter();
-                if (adapter && adapter.downloadVideo) {
-                    this.render.showToast("⏳ 正在打通后台提取原版最高清文件...");
-                    adapter.downloadVideo(adapter.getContainer(this.state.currentMedia), this.state.currentMedia).then(videoUrl => {
-                        if (videoUrl === 'NATIVE_CLICKED') {
-                            this.render.showToast("✅ 已调用浏览器插件原生下载机制！");
-                        } else if (videoUrl) {
-                            this.render.showToast("✅ 提取成功，开始强制下载！");
-                            chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: videoUrl, dataUrl: videoUrl });
-                        } else {
-                            this.render.showToast("❌ 无法解析该媒体的直链");
-                        }
-                    });
-                    e.preventDefault(); return;
-                } else if (this.state.currentMedia.tagName === 'VIDEO') {
-                    this.render.showToast("⚠️ 当前站点暂未适配一键视频提取");
+                if (this.cfg.state.isImmersive && this.state.currentMedia) {
+                    this.triggerGlobalDownload();
                     e.preventDefault(); return;
                 }
             }
 
+            if (this.matchCombo(e, this.cfg.keys.double || 's')) {
+                if (this.cfg.state.isImmersive) { this.executePhantomAction('double'); e.preventDefault(); return; }
+            }
+            if (this.matchCombo(e, this.cfg.keys.triple || 'q')) {
+                if (this.cfg.state.isImmersive) { this.executePhantomAction('triple'); e.preventDefault(); return; }
+            }
             if (this.matchCombo(e, this.cfg.keys.like)) {
                 if (this.cfg.state.isImmersive) { this.executePhantomAction('like'); e.preventDefault(); return; }
             }
-            else if (this.matchCombo(e, this.cfg.keys.follow)) {
+            if (this.matchCombo(e, this.cfg.keys.follow)) {
                 if (this.cfg.state.isImmersive) { this.executePhantomAction('follow'); e.preventDefault(); return; }
             }
 
@@ -1074,16 +1071,6 @@
             else if (k === this.cfg.keys.zoomIn || k === '+') { this.state.activeZoom += 0.5; this.state.isZoomManuallyChanged = true; this.render.showToast(`${this.state.activeZoom.toFixed(1)}x`); up = true; } 
             else if (k === this.cfg.keys.zoomOut || k === '-') { this.state.activeZoom = Math.max(0.5, this.state.activeZoom - 0.5); this.state.isZoomManuallyChanged = true; this.render.showToast(`${this.state.activeZoom.toFixed(1)}x`); up = true; }
             
-            else if (this.matchCombo(e, 's')) {
-                if (this.cfg.state.isImmersive && this.state.currentMedia) {
-                    if (this.state.currentMedia.tagName === 'VIDEO') {
-                        this.render.showToast("⚠️ 视频请使用 D 键提取直链下载");
-                    } else if (this.render.elements.img.src) {
-                        downloadImage(this.render.elements.img.src, this.render);
-                    }
-                    e.preventDefault(); return; 
-                }
-            }
             else if (this.matchCombo(e, 'escape')) {
                 if (this.cfg.state.isImmersive) {
                     this.exitImmersive();
@@ -1158,11 +1145,11 @@
         }
     }
 
-    // 初始化引擎
+    // 初始化解耦引擎
     const configManager = new ConfigManager();
     const mediaRenderer = new MediaRenderer(configManager);
     const inputController = new InputController(configManager, mediaRenderer);
 
-    // 暴露核心 API，方便调试或外部脚本接入
+    // 暴露核心 API 供通信
     window.__mix01Engine = { config: configManager, render: mediaRenderer, controller: inputController };
 })();
