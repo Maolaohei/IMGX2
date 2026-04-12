@@ -387,10 +387,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
             if (states.authorName && window.__mix01FollowAuthorCache[states.authorName] !== undefined) states.isFollowed = window.__mix01FollowAuthorCache[states.authorName];
             
             if (states.isLiked !== null) {
-                likeText = states.isLiked ? "已" : "未"; likeIcon = states.isLiked ? "❤️" : "🤍"; likeColor = states.isLiked ? "#f91880" : "#aaaaaa";
+                likeText = states.isLiked ? "已喜欢" : "未喜欢"; likeIcon = states.isLiked ? "❤️" : "🤍"; likeColor = states.isLiked ? "#f91880" : "#aaaaaa";
             }
             if (states.isFollowed !== null) {
-                followText = states.isFollowed ? "已注" : "未注"; followIcon = states.isFollowed ? "🫂" : "👤"; followColor = states.isFollowed ? "#00ba7c" : "#ff4b4b"; 
+                followText = states.isFollowed ? "已关注" : "未关注"; followIcon = states.isFollowed ? "🫂" : "👤"; followColor = states.isFollowed ? "#00ba7c" : "#ff4b4b"; 
             }
             if (states.authorName) authorDisplay = `<span class="author-tag">${states.authorName}</span>`;
         }
