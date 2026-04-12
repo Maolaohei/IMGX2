@@ -386,59 +386,66 @@ window.Mix01MediaRenderer = class MediaRenderer {
         return activeZoom;
     }
 
-    handleImmersiveActivity(currentMedia, currentSrc, keys) {
+    async handleImmersiveActivity(currentMedia, currentSrc, keys) {
         if (!this.cfg.state.isImmersive || this.elements.viewer.style.display !== 'block') return;
         
         const adapter = window.Mix01Utils.getImmersiveAdapter();
         let likeText = "喜欢"; let likeIcon = "🤍"; let likeColor = "#dddddd";
         let followText = "关注"; let followIcon = "👤"; let followColor = "#dddddd";
         let authorDisplay = "";
+        let isFallback = false;
 
-        if (currentMedia && adapter && adapter.getStates) {
-            const container = adapter.getContainer ? adapter.getContainer(currentMedia) : document.body;
-            const states = adapter.getStates(container);
+        if (currentMedia && adapter) {
+            // 检查是否为未适配的兜底页面
+            isFallback = adapter.isFallback === true;
             
-            if (window.__mix01LikeMediaCache[currentSrc] !== undefined) states.isLiked = window.__mix01LikeMediaCache[currentSrc];
-            if (states.authorName && window.__mix01FollowAuthorCache[states.authorName] !== undefined) states.isFollowed = window.__mix01FollowAuthorCache[states.authorName];
-            
-            if (states.isLiked !== null) {
-                likeText = states.isLiked ? "已喜欢" : "未喜欢"; likeIcon = states.isLiked ? "❤️" : "🤍"; likeColor = states.isLiked ? "#f91880" : "#aaaaaa";
+            // 只有适配过的页面（如Pixiv/Twitter）才去请求状态
+            if (!isFallback && adapter.getStates) {
+                const container = adapter.getContainer ? adapter.getContainer(currentMedia) : document.body;
+                // 【核心修复】：变量名必须是 currentMedia
+                const states = await adapter.getStates(container, currentMedia);
+                
+                if (states) {
+                    if (states.isLiked) { likeText = "已喜欢"; likeIcon = "❤️"; likeColor = "#FF4060"; }
+                    if (states.isFollowed) { followText = "已关注"; followIcon = "✓"; followColor = "#1da1f2"; }
+                    if (states.authorName) { authorDisplay = `<span class="author-tag">${states.authorName}</span> 的作品`; }
+                }
             }
-            if (states.isFollowed !== null) {
-                followText = states.isFollowed ? "已关注" : "未关注"; followIcon = states.isFollowed ? "🫂" : "👤"; followColor = states.isFollowed ? "#00ba7c" : "#ff4b4b"; 
-            }
-            if (states.authorName) authorDisplay = `<span class="author-tag">${states.authorName}</span>`;
         }
 
-        const hintKbdLike = (keys.like || 'l').toUpperCase();
-        const hintKbdFollow = (keys.follow || 'f').toUpperCase();
-        const hasActions = !!adapter;
-        const actionsHtml = hasActions 
-            ? `&nbsp;|&nbsp; <span class="hud-status-item" style="color: ${likeColor}">${likeIcon}${likeText}</span>(<kbd class="kbd-btn">${hintKbdLike}</kbd>) &nbsp; <span class="hud-status-item" style="color: ${followColor}">${followIcon}${authorDisplay}${followText}</span>(<kbd class="kbd-btn">${hintKbdFollow}</kbd>) &nbsp;|&nbsp; 🌟双连(<kbd class="kbd-btn">${(keys.double || 's').toUpperCase()}</kbd>) &nbsp; 🚀三连(<kbd class="kbd-btn">${(keys.triple || 'q').toUpperCase()}</kbd>) ` 
-            : '';
-
-        const playLabel = window.__mix01UserPaused ? "▶️播放" : "⏸️暂停";
-        const playHtml = `&nbsp;|&nbsp; ${playLabel}(<kbd class="kbd-btn">Space</kbd>) &nbsp; 💾提取(<kbd class="kbd-btn">${(keys.downloadVideo || 'd').toUpperCase()}</kbd>)`;
-
-        this.elements.hint.innerHTML = `⌨️左右切换 ${actionsHtml} ${playHtml} &nbsp;|&nbsp; ❌双击退出`;
+        // 动态构建 HUD 提示框 HTML
+        let hudHTML = `<div style="display:flex; align-items:center; gap: 15px;">`;
+        hudHTML += `<span class="hud-status-item">切换 <span class="kbd-btn">${(keys.keyMode || 'V').toUpperCase()}</span></span>`;
+        hudHTML += `<span class="hud-status-item">暂停 <span class="kbd-btn">SPACE</span></span>`;
+        hudHTML += `<span class="hud-status-item" style="color: #4A90E2; font-weight: bold;">原图下载 <span class="kbd-btn">${(keys.keyDownloadVideo || 'D').toUpperCase()}</span></span>`;
         
-        this.setStyle(this.elements.viewer, 'cursor', 'default');
-        this.setStyle(this.elements.img, 'cursor', 'default');
+        // 如果不是兜底页面，才显示社交功能
+        if (!isFallback) {
+            hudHTML += `<span class="hud-status-item" style="color: ${likeColor}">${likeIcon} ${likeText} <span class="kbd-btn">${(keys.keyLike || 'L').toUpperCase()}</span></span>`;
+            hudHTML += `<span class="hud-status-item" style="color: ${followColor}">${followIcon} ${followText} <span class="kbd-btn">${(keys.keyFollow || 'F').toUpperCase()}</span></span>`;
+            if (authorDisplay) hudHTML += `<span style="margin-left: 10px; border-left: 1px solid rgba(255,255,255,0.3); padding-left: 10px;">${authorDisplay}</span>`;
+        }
+        
+        hudHTML += `<span class="hud-status-item">退出 <span class="kbd-btn">双击</span></span>`;
+        hudHTML += `</div>`;
+
+        // 渲染并显示提示框
+        this.elements.hint.innerHTML = hudHTML;
         this.setStyle(this.elements.hint, 'display', 'block');
-        void this.elements.hint.offsetWidth; 
+        
+        // 触发浏览器重绘以保证过渡动画生效
+        void this.elements.hint.offsetWidth;
         this.setStyle(this.elements.hint, 'opacity', '1');
 
-        clearTimeout(this.hudState.cursorTimer);
+        // 3秒后自动隐藏提示框（防打扰机制）
         clearTimeout(this.hudState.hintTimer);
-
-        this.hudState.cursorTimer = setTimeout(() => {
-            this.setStyle(this.elements.viewer, 'cursor', 'none');
-            this.setStyle(this.elements.img, 'cursor', 'none');
-            this.setStyle(this.elements.canvas, 'cursor', 'none');
-        }, 1500);
-
         this.hudState.hintTimer = setTimeout(() => {
             this.setStyle(this.elements.hint, 'opacity', '0');
-        }, 3500); 
+            setTimeout(() => {
+                if (this.elements.hint.style.opacity === '0') {
+                    this.setStyle(this.elements.hint, 'display', 'none');
+                }
+            }, 600);
+        }, 3000); 
     }
 };
