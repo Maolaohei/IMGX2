@@ -51,11 +51,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         try {
             const urlObj = new URL(url);
             const fullPath = urlObj.pathname.split('/').pop();
-            const extMatch = fullPath.match(/\.(jpe?g|png|gif|webp|bmp|svg|mp4|webm)/i);
-            if (extMatch) { 
-                ext = extMatch[0]; 
-                filename = fullPath.replace(ext, ""); 
+            // 分离文件名和扩展名
+            const dotIndex = fullPath.lastIndexOf('.');
+            if (dotIndex !== -1) {
+                filename = fullPath.substring(0, dotIndex);
+                ext = fullPath.substring(dotIndex); // 含点，如 ".jpg"
             } else {
+                // 路径里没扩展名，尝试从 query 参数里找
                 const paramExtMatch = urlObj.search.match(/(?:format|ext|type)=(jpe?g|png|gif|webp|bmp|svg|mp4|webm)/i);
                 if (paramExtMatch) ext = "." + paramExtMatch[1];
                 filename = fullPath || "media";
@@ -63,7 +65,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         } catch (e) { filename = "media"; }
         
         filename = filename.replace(/[\\/:*?"<>|]/g, "_");
-        const finalDownloadName = `IMG_Download/${filename}_Mix01${ext}`;
+        const finalDownloadName = `IMG_Download/${filename}${ext}`;
 
         fetch(url)
             .then(res => {
@@ -71,18 +73,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 return res.blob();
             })
             .then(blob => {
-                // 【核心内存优化】：使用 ObjectURL 替代 DataURL
                 const blobUrl = URL.createObjectURL(blob);
-                
                 chrome.downloads.download({
                     url: blobUrl,
                     filename: finalDownloadName,
                     saveAs: false,
                     conflictAction: "uniquify"
                 }, (downloadId) => {
-                    // 下载建立后立即释放指针
                     URL.revokeObjectURL(blobUrl);
-
                     if (chrome.runtime.lastError) {
                         saveToHistory(finalDownloadName, "❌ 失败: " + chrome.runtime.lastError.message);
                     } else {
@@ -98,7 +96,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     saveAs: false,
                     conflictAction: "uniquify"
                 }, (downloadId) => {
-                     if (chrome.runtime.lastError) {
+                    if (chrome.runtime.lastError) {
                         saveToHistory(finalDownloadName, "❌ 失败: 防盗链拦截");
                     } else {
                         saveToHistory(finalDownloadName, "✅ 成功 (原生通道)");
