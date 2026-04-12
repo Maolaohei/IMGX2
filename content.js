@@ -1,4 +1,4 @@
-// content.js - Mix01 高性能解耦渲染引擎 (幽灵连招完整版)
+// content.js - Mix01 高性能解耦渲染引擎 (并发预加载终极版)
 (function () {
     if (window.__imgZoomProInitialized) return;
     window.__imgZoomProInitialized = true;
@@ -116,7 +116,6 @@
         constructor(configManager) {
             this.cfg = configManager;
             this.styleCache = new WeakMap();
-            
             this.elements = {};
             this.videoState = { isRunning: false, callbackId: null, rAFId: null, original: null };
             this.hudState = { cursorTimer: null, hintTimer: null };
@@ -345,7 +344,6 @@
             let cDW = 0, cDH = 0;
             const mode = this.cfg.state.mode;
 
-            // 【CSS 彻底隔离】：沉浸模式主动阻断其他 mode 类名的挂载
             this.elements.viewer.className = this.cfg.state.isImmersive ? 'mode-immersive' : `mode-${mode}`;
 
             if (this.cfg.state.isImmersive) {
@@ -502,10 +500,10 @@
                 if (states.authorName && window.__mix01FollowAuthorCache[states.authorName] !== undefined) states.isFollowed = window.__mix01FollowAuthorCache[states.authorName];
                 
                 if (states.isLiked !== null) {
-                    likeText = states.isLiked ? "已" : "未"; likeIcon = states.isLiked ? "❤️" : "🤍"; likeColor = states.isLiked ? "#f91880" : "#aaaaaa";
+                    likeText = states.isLiked ? "已喜欢" : "未喜欢"; likeIcon = states.isLiked ? "❤️" : "🤍"; likeColor = states.isLiked ? "#f91880" : "#aaaaaa";
                 }
                 if (states.isFollowed !== null) {
-                    followText = states.isFollowed ? "已注" : "未注"; followIcon = states.isFollowed ? "🫂" : "👤"; followColor = states.isFollowed ? "#00ba7c" : "#ff4b4b"; 
+                    followText = states.isFollowed ? "已关注" : "未关注"; followIcon = states.isFollowed ? "🫂" : "👤"; followColor = states.isFollowed ? "#00ba7c" : "#ff4b4b"; 
                 }
                 if (states.authorName) authorDisplay = `<span class="author-tag">${states.authorName}</span>`;
             }
@@ -551,13 +549,33 @@
             this.cfg = configManager;
             this.render = renderer;
             this.state = {
-                currentMedia: null, currentSrc: null, cachedRect: null,
+                currentMedia: null, currentSrc: null, currentHdUrl: null, cachedRect: null,
                 activeZoom: 2.0, isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
                 isZoomManuallyChanged: false, keyboardSwitchTime: 0, isTicking: false,
                 bgClickCount: 0, bgClickTimer: null, lastTarget: null, lastFoundMedia: null
             };
             this.preloadedUrls = new Set();
             this.preloadedUrlsQueue = [];
+
+            this.mediaObserver = new MutationObserver((mutations) => {
+                let newSrc = null;
+                for (let m of mutations) {
+                    if (m.type === 'attributes' && m.attributeName === 'src') {
+                        if (this.state.currentMedia && this.state.currentMedia.src !== this.state.currentSrc) {
+                            newSrc = this.state.currentMedia.src;
+                        }
+                    }
+                }
+                if (newSrc) {
+                    this.state.currentSrc = newSrc;
+                    if (this.render.elements.img.src !== this.state.currentHdUrl) {
+                        this.render.elements.img.src = newSrc;
+                        this.updateRender();
+                    }
+                    this.upgradeToHDQuietly(this.state.currentMedia, newSrc);
+                }
+            });
+
             this.bindEvents();
         }
 
@@ -665,6 +683,56 @@
             if (Date.now() - this.state.keyboardSwitchTime > 500) this.hideViewer();
         }
 
+        async upgradeToHDQuietly(target, src) {
+            if (this.cfg.state.loadHD !== 'true') return;
+            const myTask = src;
+            try {
+                if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
+                    const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, src);
+                    if (hdUrl && hdUrl !== src && !this.render.hdState.badUrls.has(hdUrl)) {
+                        
+                        if (this.state.currentHdUrl === hdUrl) return; 
+                        this.state.currentHdUrl = hdUrl;
+
+                        if (!this.render.elements.img.src || this.render.elements.img.src === '') {
+                            this.render.setStyle(this.render.elements.spinner, 'display', 'block');
+                        } else {
+                            this.render.hdState.isLoading = true;
+                            this.updateRender(); 
+                        }
+
+                        const tempImg = new Image();
+                        tempImg.onload = () => { 
+                            if (this.state.currentHdUrl === hdUrl && this.state.currentMedia === target) {
+                                this.render.setStyle(this.render.elements.spinner, 'display', 'none');
+                                this.render.hdState.isLoading = false; 
+
+                                if (!this.cfg.state.isImmersive && this.cfg.state.mode === 'partial' && this.state.isSmallOptimized && !this.state.isZoomManuallyChanged) {
+                                    const nw = tempImg.naturalWidth, nh = tempImg.naturalHeight;
+                                    if (nw > 350 || nh > 350) {
+                                        this.state.customLensWidth = Math.min(nw, window.innerWidth * 0.9);
+                                        this.state.customLensHeight = Math.min(nh, window.innerHeight * 0.9);
+                                        this.state.activeZoom = nw / (this.state.cachedRect.width || 1);
+                                    }
+                                }
+                                this.render.elements.img.src = hdUrl; 
+                                this.updateRender(); 
+                            }
+                        };
+                        tempImg.onerror = () => {
+                            if (this.state.currentHdUrl === hdUrl) {
+                                this.render.setStyle(this.render.elements.spinner, 'display', 'none');
+                                this.render.hdState.isLoading = false;
+                                this.updateRender(); 
+                            }
+                            this.render.hdState.badUrls.add(hdUrl); 
+                        };
+                        tempImg.src = hdUrl;
+                    }
+                }
+            } catch (error) { console.warn('Mix01 Engine 解析失败:', error); }
+        }
+
         async triggerZoom(target) {
             if (target === this.state.currentMedia && (target.src || 'video') === this.state.currentSrc) return;
             if (target.tagName === 'VIDEO' && this.cfg.state.disableVideoDefaultView && !this.cfg.state.isImmersive) return;
@@ -675,6 +743,11 @@
             this.state.currentMedia = target;
             this.state.currentSrc = target.src || 'video';
             this.state.cachedRect = target.getBoundingClientRect();
+            
+            this.mediaObserver.disconnect();
+            if (target.tagName === 'IMG') {
+                this.mediaObserver.observe(target, { attributes: true, attributeFilter: ['src'] });
+            }
             
             this.state.isSmallOptimized = false;
             this.state.customLensWidth = null; this.state.customLensHeight = null;
@@ -688,8 +761,8 @@
                 this.render.setStyle(this.render.elements.viewer, 'display', 'block');
                 if (this.cfg.state.isImmersive) {
                     this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
-                    this.triggerPreload();
                 }
+                this.triggerPreload();
                 return;
             }
 
@@ -702,8 +775,8 @@
                 this.render.setStyle(this.render.elements.viewer, 'display', 'block');
                 if (this.cfg.state.isImmersive) {
                     this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
-                    this.triggerPreload();
                 }
+                this.triggerPreload();
                 return;
             }
 
@@ -724,52 +797,14 @@
 
             this.updateRender();
 
-            if (this.cfg.state.loadHD === 'true') {
-                const myTask = target.src;
-                try {
-                    if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
-                        const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, target.src);
-                        if (hdUrl && hdUrl !== target.src && !this.render.hdState.badUrls.has(hdUrl)) {
-                            if (!this.render.elements.img.src || this.render.elements.img.src === '') this.render.setStyle(this.render.elements.spinner, 'display', 'block');
-                            else this.render.hdState.isLoading = true;
-
-                            const tempImg = new Image();
-                            tempImg.onload = () => { 
-                                if (this.state.currentSrc === myTask && this.state.currentMedia === target) {
-                                    this.render.setStyle(this.render.elements.spinner, 'display', 'none');
-                                    this.render.hdState.isLoading = false; 
-
-                                    if (!this.cfg.state.isImmersive && this.cfg.state.mode === 'partial' && this.state.isSmallOptimized && !this.state.isZoomManuallyChanged) {
-                                        const nw = tempImg.naturalWidth, nh = tempImg.naturalHeight;
-                                        if (nw > 350 || nh > 350) {
-                                            this.state.customLensWidth = Math.min(nw, window.innerWidth * 0.9);
-                                            this.state.customLensHeight = Math.min(nh, window.innerHeight * 0.9);
-                                            this.state.activeZoom = nw / (this.state.cachedRect.width || 1);
-                                        }
-                                    }
-                                    this.render.elements.img.src = hdUrl; 
-                                    this.updateRender(); 
-                                }
-                            };
-                            tempImg.onerror = () => {
-                                if (this.state.currentSrc === myTask) {
-                                    this.render.setStyle(this.render.elements.spinner, 'display', 'none');
-                                    this.render.hdState.isLoading = false;
-                                    this.updateRender(); 
-                                }
-                                this.render.hdState.badUrls.add(hdUrl); 
-                            };
-                            tempImg.src = hdUrl;
-                        }
-                    }
-                } catch (error) { console.warn('Mix01 Engine 解析失败:', error); }
-            }
+            this.upgradeToHDQuietly(target, target.src);
 
             this.render.setStyle(this.render.elements.viewer, 'display', 'block');
             if (this.cfg.state.isImmersive) {
                 this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
-                this.triggerPreload();
             }
+            
+            this.triggerPreload();
         }
 
         updateRender(e = null) {
@@ -792,8 +827,10 @@
 
         hideViewer() {
             this.render.hide();
+            this.mediaObserver.disconnect();
             this.state.currentMedia = null;
             this.state.currentSrc = null;
+            this.state.currentHdUrl = null; 
             this.state.cachedRect = null;
             this.state.isSmallOptimized = false;
             this.state.customLensWidth = null;
@@ -876,7 +913,6 @@
 
             const container = adapter.getContainer ? adapter.getContainer(this.state.currentMedia) : document.body;
 
-            // 【核心修复】：预先获取当前状态并结合缓存，防止 S/Q 连招取消已经存在的喜欢或关注
             let currentState = { isLiked: false, isFollowed: false, authorName: null };
             if (adapter.getStates) {
                 currentState = adapter.getStates(container);
@@ -893,15 +929,12 @@
             const doFollow = (actionType === 'follow' || isCombo);
             const doDownload = (actionType === 'triple');
 
-            // 执行喜欢逻辑（如果是连招且已经喜欢了，则跳过执行，避免误触取消）
             if (doLike && adapter.like) {
                 if (!(isCombo && currentState.isLiked)) {
                     const newState = await adapter.like(container, this.state.currentMedia);
                     if (newState !== null) window.__mix01LikeMediaCache[this.state.currentSrc] = newState;
                 }
             }
-            
-            // 执行关注逻辑（如果是连招且已经关注了，则跳过执行，避免误触取关）
             if (doFollow && adapter.follow) {
                 if (!(isCombo && currentState.isFollowed)) {
                     const newState = await adapter.follow(container, this.state.currentMedia);
@@ -912,7 +945,6 @@
                 }
             }
 
-            // HUD 状态反馈
             if (actionType === 'double') this.render.showToast("💖 一键双连生效！(喜欢+关注)");
             else if (actionType === 'triple') this.render.showToast("🚀 一键三连生效！(喜欢+关注+提取)");
             else if (actionType === 'like') this.render.showToast(window.__mix01LikeMediaCache[this.state.currentSrc] ? "❤️ 已喜欢" : "🤍 已取消喜欢");
@@ -943,27 +975,29 @@
             }
         }
 
+        // 【终极并发预加载引擎】：恢复带宽保护，仅沉浸模式下利用并发火力狂拉缓存
         triggerPreload() {
             if (!this.cfg.state.isImmersive || this.cfg.state.preloadCount <= 0 || !this.state.currentMedia) return;
 
-            setTimeout(async () => {
-                const galleryImages = this.getGalleryImages();
-                let currentIndex = galleryImages.indexOf(this.state.currentMedia);
-                
-                if (currentIndex === -1 && this.state.currentSrc) {
-                    currentIndex = galleryImages.findIndex(media => (media.src||'video') === this.state.currentSrc);
-                }
-                if (currentIndex === -1) return;
+            const galleryImages = this.getGalleryImages();
+            let currentIndex = galleryImages.indexOf(this.state.currentMedia);
+            
+            if (currentIndex === -1 && this.state.currentSrc) {
+                currentIndex = galleryImages.findIndex(media => (media.src||'video') === this.state.currentSrc);
+            }
+            if (currentIndex === -1) return;
 
-                for (let i = 1; i <= this.cfg.state.preloadCount; i++) {
-                    const targetIndex = currentIndex + i;
-                    if (targetIndex >= galleryImages.length) break;
+            for (let i = 1; i <= this.cfg.state.preloadCount; i++) {
+                const targetIndex = currentIndex + i;
+                if (targetIndex >= galleryImages.length) break;
 
-                    const media = galleryImages[targetIndex];
-                    if (media.tagName === 'IMG') {
-                        const src = media.src;
+                const media = galleryImages[targetIndex];
+                if (media.tagName === 'IMG') {
+                    const src = media.src;
+                    
+                    // 利用闭包打破 await 阻塞，瞬间同时发出数张图的规则解析与后台拉取
+                    (async () => {
                         let targetUrl = src;
-                        
                         if (this.cfg.state.loadHD === 'true' && window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
                             try { targetUrl = await window.Mix01RuleEngine.getHighResUrl(media, src); } catch (e) {}
                         }
@@ -978,11 +1012,11 @@
                             }
                             
                             const preloaderImg = new Image();
-                            preloaderImg.src = targetUrl;
+                            preloaderImg.src = targetUrl; // 强迫浏览器发起网络请求塞进 Memory Cache
                         }
-                    }
+                    })();
                 }
-            }, 300);
+            }
         }
 
         handleKeyDown(e) {
