@@ -1,8 +1,6 @@
-// background.js - Mix01 MV3 完美侦察兵下载引擎
+// background.js - Mix01 终极自愈下载引擎 (修复版)
 chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.create({ id: "saveOriginalImgMix01", title: "保存原图 (Mix01)", contexts: ["image"] });
-    chrome.contextMenus.create({ id: "copyOriginalImgMix01", title: "复制原图到剪贴板 (Mix01)", contexts: ["image"] });
-
     if (chrome.declarativeNetRequest) {
         chrome.declarativeNetRequest.updateDynamicRules({
             removeRuleIds: [1],
@@ -36,12 +34,6 @@ function isBase64Domain(url, userDomainsStr) {
     } catch (e) { return false; }
 }
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
-    if (info.menuItemId === "saveOriginalImgMix01") {
-        chrome.tabs.sendMessage(tab.id, { action: "saveHDUrl", clickedUrl: info.srcUrl });
-    }
-});
-
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "downloadImmersiveImg") {
         (async () => {
@@ -55,7 +47,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 let res = await fetch(initialUrl);
                 let finalUrl = initialUrl;
 
-                // 【侦察兵引擎】: 智能探测 404 与自愈修复
+                // Pixiv 404 自愈逻辑 (保留)
                 if (res.status === 404 && initialUrl.includes('pximg.net')) {
                     const altUrls = [];
                     if (initialUrl.includes('_ugoira0')) {
@@ -65,62 +57,64 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         const targetExt = initialUrl.endsWith('.png') ? '.jpg' : '.png';
                         altUrls.push(initialUrl.replace(/\.\w+$/, targetExt));
                     }
-
                     for (let alt of altUrls) {
                         try {
                             const testRes = await fetch(alt, { method: 'HEAD' });
                             if (testRes.ok) { res = testRes; finalUrl = alt; break; }
                         } catch(e) {}
                     }
-                    if (res.status === 404 || res.status === 405) {
-                        for (let alt of altUrls) {
-                            try {
-                                const testRes = await fetch(alt);
-                                if (testRes.ok) { res = testRes; finalUrl = alt; break; }
-                            } catch(e) {}
-                        }
-                    }
                 }
 
-                if (!res.ok) throw new Error(`服务端拒绝响应 (${res.status})`);
+                if (!res.ok) throw new Error(`服务端拒绝 (${res.status})`);
 
+                // --- 【核心修复：智能后缀提取】 ---
                 const urlObj = new URL(finalUrl);
                 const fullPath = urlObj.pathname.split('/').pop();
-                const filename = fullPath.substring(0, fullPath.lastIndexOf('.')).replace(/[\\/:*?"<>|]/g, "_");
-                const ext = fullPath.substring(fullPath.lastIndexOf('.'));
-                const finalDownloadName = `IMG_Download/${filename}${ext}`;
+                let filename = "media", ext = "";
 
-                const contentType = res.headers.get('content-type') || '';
-                if (!contentType.startsWith('image/') && !contentType.startsWith('video/')) {
-                    throw new Error(`拦截到非图片数据 (${contentType})`);
+                // 1. 优先检查 URL 参数 (解决 X.com 问题)
+                const paramExt = urlObj.searchParams.get('format') || urlObj.searchParams.get('ext');
+                if (paramExt) {
+                    ext = "." + paramExt;
+                    filename = fullPath || "media";
+                } else {
+                    // 2. 检查路径是否有后缀
+                    const dotIndex = fullPath.lastIndexOf('.');
+                    if (dotIndex !== -1) {
+                        filename = fullPath.substring(0, dotIndex);
+                        ext = fullPath.substring(dotIndex);
+                    } else {
+                        // 3. 兜底：从 Content-Type 提取
+                        filename = fullPath || "media";
+                        const ct = res.headers.get('content-type');
+                        if (ct && ct.includes('image/')) ext = "." + ct.split('/')[1].split(';')[0];
+                        if (!ext) ext = ".jpg"; 
+                    }
                 }
+                
+                filename = filename.replace(/[\\/:*?"<>|]/g, "_");
+                const finalDownloadName = `IMG_Download/${filename}${ext}`;
+                // --------------------------------
 
+                const contentType = res.headers.get('content-type') || 'image/jpeg';
                 if (useBase64) {
                     const buffer = await res.arrayBuffer();
                     const bytes = new Uint8Array(buffer);
                     let binary = '';
-                    for (let i = 0; i < bytes.length; i += 8192) {
-                        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
-                    }
+                    for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
                     const dataUrl = `data:${contentType};base64,${btoa(binary)}`;
                     chrome.downloads.download({ url: dataUrl, filename: finalDownloadName, saveAs: false }, () => {
-                        if (chrome.runtime.lastError) saveToHistory(finalDownloadName, "❌ 失败: " + chrome.runtime.lastError.message);
-                        else saveToHistory(finalDownloadName, "✅ 成功 (Base64)");
+                        saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功 (Base64)");
                     });
                 } else {
                     chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
-                        if (chrome.runtime.lastError) saveToHistory(finalDownloadName, "❌ 原生流失败");
-                        else saveToHistory(finalDownloadName, "✅ 成功");
+                        saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功");
                     });
                 }
-
             } catch (err) {
-                console.error("Mix01 下载彻底失败:", err);
-                const showName = initialUrl.split('/').pop() || "未知文件";
-                saveToHistory(showName, "❌ 拦截: " + err.message);
+                saveToHistory(initialUrl.split('/').pop() || "media", "❌ 拦截: " + err.message);
             }
         })();
-        sendResponse({ status: "ok" });
         return true; 
     }
 });
