@@ -59,6 +59,7 @@
                 { srcRegExp: '(.+\\.pximg\\.net)(?=/).+(/uploads/.+/)(?:.+_)?(\\d+@IMG@)', processor: '$1$2$3' },
                 { srcRegExp: '(.+\\.pixiv\\.net/images/post/\\d+)/w/\\d+(/.+@IMG@)', processor: '$1$2' },
                 {
+                    // 核心修复：更严谨的正则提取
                     selectors: 'img, [style*="background"], .kTOQSN',
                     srcRegExp: '(//.+\\.pximg\\.net/).+(/img/.+?)(_p\\d+)?(?:_.+)?(@IMG@)',
                     processor: async (trigger, src, srcRegExpObj) => {
@@ -71,6 +72,26 @@
                             );
                         }
                         return '';
+                    }
+                },
+                {
+                    // 【全新特性】：吸收了 Pixiv 动图/多图 API 的逆向能力
+                    selectors: 'canvas, video',
+                    processor: async (trigger, src) => {
+                        let illustId = window.location.pathname.match(/artworks\/(\d+)/)?.[1];
+                        if (!illustId) {
+                            const m = (src || trigger.src || '').match(/\/(\d+)_/);
+                            if (m) illustId = m[1];
+                        }
+                        if (illustId) {
+                            try {
+                                const res = await fetch(`/ajax/illust/${illustId}/pages`).then(r => r.json());
+                                if (res?.body?.[0]?.urls?.original) {
+                                    return res.body[0].urls.original;
+                                }
+                            } catch(e) {}
+                        }
+                        return src;
                     }
                 }
             ]
@@ -137,7 +158,65 @@
             srcMatching: [
                 { srcRegExp: '(\\w+\\.twimg\\.com/(?:(?:[^/]+/)?default_)?profile_images/.+)_\\w+(?=@IMG@)(@IMG@)', processor: '$1$2' },
                 { srcRegExp: '(\\w+\\.twimg\\.com/media/.+?)(?:@IMG@:\\w+)?(.+[?&]name=)[^&]+(.*)', processor: '$1$2orig$3' },
-                { srcRegExp: '(\\w+\\.twimg\\.com/.+\\?format=.*&name=).+', processor: '$1orig' }
+                { srcRegExp: '(\\w+\\.twimg\\.com/.+\\?format=.*&name=).+', processor: '$1orig' },
+                {
+                    // 【全新特性】：吸收了 Twitter 视频的 GraphQL 逆向提取能力
+                    selectors: 'video',
+                    processor: async (trigger) => {
+                        const statusLink = trigger.closest('article')?.querySelector('a[href*="/status/"]');
+                        if (!statusLink) return '';
+                        const statusId = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
+
+                        const cookies = {};
+                        document.cookie.split(';').filter(n => n.indexOf('=') > 0).forEach(n => {
+                            n.replace(/^([^=]+)=(.+)$/, (match, name, value) => { cookies[name.trim()] = value.trim(); });
+                        });
+                        if (!cookies.ct0) return trigger.src;
+
+                        const baseUrl = `https://${window.location.hostname}/i/api/graphql/2ICDjqPd81tulZcYrtpTuQ/TweetResultByRestId`;
+                        const variables = { 'tweetId': statusId, 'with_rux_injections': false, 'includePromotedContent': true, 'withCommunity': true, 'withQuickPromoteEligibilityTweetFields': true, 'withBirdwatchNotes': true, 'withVoice': true, 'withV2Timeline': true };
+                        const features = { 'articles_preview_enabled': true, 'c9s_tweet_anatomy_moderator_badge_enabled': true, 'communities_web_enable_tweet_community_results_fetch': false, 'creator_subscriptions_quote_tweet_preview_enabled': false, 'creator_subscriptions_tweet_preview_api_enabled': false, 'freedom_of_speech_not_reach_fetch_enabled': true, 'graphql_is_translatable_rweb_tweet_is_translatable_enabled': true, 'longform_notetweets_consumption_enabled': false, 'longform_notetweets_inline_media_enabled': true, 'longform_notetweets_rich_text_read_enabled': false, 'premium_content_api_read_enabled': false, 'profile_label_improvements_pcf_label_in_post_enabled': true, 'responsive_web_edit_tweet_api_enabled': false, 'responsive_web_enhance_cards_enabled': false, 'responsive_web_graphql_exclude_directive_enabled': false, 'responsive_web_graphql_skip_user_profile_image_extensions_enabled': false, 'responsive_web_graphql_timeline_navigation_enabled': false, 'responsive_web_grok_analysis_button_from_backend': false, 'responsive_web_grok_analyze_button_fetch_trends_enabled': false, 'responsive_web_grok_analyze_post_followups_enabled': false, 'responsive_web_grok_image_annotation_enabled': false, 'responsive_web_grok_share_attachment_enabled': false, 'responsive_web_grok_show_grok_translated_post': false, 'responsive_web_jetfuel_frame': false, 'responsive_web_media_download_video_enabled': false, 'responsive_web_twitter_article_tweet_consumption_enabled': true, 'rweb_tipjar_consumption_enabled': true, 'rweb_video_screen_enabled': false, 'standardized_nudges_misinfo': true, 'tweet_awards_web_tipping_enabled': false, 'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': true, 'tweetypie_unmention_optimization_enabled': false, 'verified_phone_label_enabled': false, 'view_counts_everywhere_api_enabled': true };
+
+                        const url = encodeURI(`${baseUrl}?variables=${JSON.stringify(variables)}&features=${JSON.stringify(features)}`);
+                        const headers = {
+                            'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
+                            'x-twitter-active-user': 'yes',
+                            'x-twitter-client-language': cookies.lang || 'en',
+                            'x-csrf-token': cookies.ct0
+                        };
+                        if (cookies.ct0.length === 32 && cookies.gt) headers['x-guest-token'] = cookies.gt;
+
+                        try {
+                            const response = await fetch(url, { headers: headers });
+                            const json = await response.json();
+                            const tweetResult = json.data?.tweetResult?.result;
+                            if (!tweetResult) return trigger.src;
+                            const tweet = tweetResult.tweet || tweetResult;
+                            let legacy = tweet.legacy;
+                            if (!legacy?.extended_entities?.media && tweet.quoted_status_result?.result?.legacy?.extended_entities?.media) {
+                                legacy = tweet.quoted_status_result.result.legacy;
+                            }
+                            const medias = legacy?.extended_entities?.media;
+                            if (!medias || !Array.isArray(medias)) return trigger.src;
+
+                            let maxBitrate = -1;
+                            let videoUrl = null;
+                            medias.forEach(media => {
+                                if (media.type === 'video' || media.type === 'animated_gif') {
+                                    if (media.video_info && media.video_info.variants) {
+                                        media.video_info.variants.forEach(v => {
+                                            if (v.content_type === 'video/mp4' && (v.bitrate || 0) > maxBitrate) {
+                                                maxBitrate = v.bitrate || 0;
+                                                videoUrl = v.url;
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                            return videoUrl || trigger.src;
+                        } catch (e) { return trigger.src; }
+                    }
+                }
             ]
         },
         '(?:.+\\.)?weibo\\.com': {
