@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Mix01 Immersive Engine",
-  "version": "20260409",
+  "version": "20260412",
   "description": "极客级流媒体沉浸浏览与下载引擎",
   "permissions": [
     "storage",
@@ -19,7 +19,15 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["rules-engine.js", "immersive-rules.js", "content.js"],
+      "js": [
+        "rules-engine.js",
+        "immersive-rules.js",
+        "Basic/Utils.js",
+        "Basic/ConfigManager.js",
+        "Basic/MediaRenderer.js",
+        "Basic/InputController.js",
+        "content.js"
+      ],
       "css": ["content.css"],
       "run_at": "document_end"
     }
