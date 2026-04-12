@@ -25,14 +25,25 @@ chrome.runtime.onInstalled.addListener(() => {
     }
 });
 
+let _historyCache = null; // 内存缓存，避免频繁 IO
+
 function saveToHistory(filename, statusMsg) {
-    chrome.storage.local.get(['mix01_download_history'], (res) => {
-        let history = res.mix01_download_history || [];
-        const timeStr = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-        history.unshift({ time: timeStr, filename: filename, status: statusMsg });
-        if (history.length > 50) history = history.slice(0, 50); 
-        chrome.storage.local.set({ mix01_download_history: history });
-    });
+    const timeStr = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    const newItem = { time: timeStr, filename: filename, status: statusMsg };
+
+    if (_historyCache !== null) {
+        // 缓存命中，直接操作内存，跳过 get 请求
+        _historyCache.unshift(newItem);
+        if (_historyCache.length > 50) _historyCache = _historyCache.slice(0, 50);
+        chrome.storage.local.set({ mix01_download_history: _historyCache });
+    } else {
+        chrome.storage.local.get(['mix01_download_history'], (res) => {
+            _historyCache = res.mix01_download_history || [];
+            _historyCache.unshift(newItem);
+            if (_historyCache.length > 50) _historyCache = _historyCache.slice(0, 50);
+            chrome.storage.local.set({ mix01_download_history: _historyCache });
+        });
+    }
 }
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {

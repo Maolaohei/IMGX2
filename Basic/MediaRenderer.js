@@ -77,29 +77,44 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     setupMessageListener() {
-        chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-            const getUrlAndProcess = async (actionFn) => {
-                const src = request.clickedUrl || this.elements.img.src;
-                const targetEl = request.clickedUrl ? (window.lastHoveredSrc === request.clickedUrl ? window.lastHoveredMedia : document.createElement('img')) : this.elements.img;
-                let targetUrl = src;
-                if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
-                    targetUrl = await window.Mix01RuleEngine.getHighResUrl(targetEl, src);
-                }
-                actionFn(targetUrl);
-            };
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        const getUrlAndProcess = async (actionFn) => {
+            const src = request.clickedUrl || this.elements.img.src;
 
-            if (request.action === "getHDUrl") {
-                getUrlAndProcess(url => sendResponse({ url: url }));
-                return true;
-            } else if (request.action === "copyHDUrl") {
-                getUrlAndProcess(url => { window.Mix01Utils.copyImageToClipboard(url, this); sendResponse({ status: "ok" }); });
-                return true;
-            } else if (request.action === "saveHDUrl") {
-                getUrlAndProcess(url => { window.Mix01Utils.downloadImage(url, this); sendResponse({ status: "ok" }); });
-                return true;
+            // 优先查 HD 缓存，命中则直接用，避免重复解析
+            window.__mix01HdUrlMap = window.__mix01HdUrlMap || {};
+            if (window.__mix01HdUrlMap[src]) {
+                actionFn(window.__mix01HdUrlMap[src]);
+                return;
             }
-        });
-    }
+
+            // 缓存未命中：走 RuleEngine 异步解析
+            const targetEl = request.clickedUrl
+                ? (window.lastHoveredSrc === request.clickedUrl ? window.lastHoveredMedia : document.createElement('img'))
+                : this.elements.img;
+            let targetUrl = src;
+            if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
+                targetUrl = await window.Mix01RuleEngine.getHighResUrl(targetEl, src);
+            }
+            // 解析结果写入缓存，方便下次直接命中
+            if (targetUrl && targetUrl !== src) {
+                window.__mix01HdUrlMap[src] = targetUrl;
+            }
+            actionFn(targetUrl);
+        };
+
+        if (request.action === "getHDUrl") {
+            getUrlAndProcess(url => sendResponse({ url: url }));
+            return true;
+        } else if (request.action === "copyHDUrl") {
+            getUrlAndProcess(url => { window.Mix01Utils.copyImageToClipboard(url, this); sendResponse({ status: "ok" }); });
+            return true;
+        } else if (request.action === "saveHDUrl") {
+            getUrlAndProcess(url => { window.Mix01Utils.downloadImage(url, this); sendResponse({ status: "ok" }); });
+            return true;
+        }
+    });
+}
 
     setStyle(el, prop, val) {
         if (!this.styleCache.has(el)) this.styleCache.set(el, {});

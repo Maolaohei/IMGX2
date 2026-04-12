@@ -4,7 +4,7 @@
 (function () {
     // 模拟原生环境下的 DOM 工具函数
     const tools = {
-        getLargestImgSrc: function(container) {
+        getLargestImgSrc: function (container) {
             if (!container || !container.querySelectorAll) return '';
             let maxArea = 0;
             let bestSrc = '';
@@ -23,17 +23,26 @@
             });
             return bestSrc;
         },
-        getBackgroundImgSrc: function(el) {
+        getBackgroundImgSrc: function (el) {
             if (!el) return '';
             const style = window.getComputedStyle(el);
             const match = style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
             return match ? match[1] : '';
         },
-        detectImage: async function(primarySrc, fallbackSrc) {
+        detectImage: async function (primarySrc, fallbackSrc) {
+            if (!window.__mix01DetectCache) window.__mix01DetectCache = {};
+            const cacheKey = primarySrc;
+            if (window.__mix01DetectCache[cacheKey] !== undefined) {
+                return window.__mix01DetectCache[cacheKey];
+            }
             return new Promise((resolve) => {
                 const img = new Image();
-                img.onload = () => resolve(primarySrc);
-                img.onerror = () => resolve(fallbackSrc || primarySrc);
+                img.onload = () => { window.__mix01DetectCache[cacheKey] = primarySrc; resolve(primarySrc); };
+                img.onerror = () => {
+                    const fallback = fallbackSrc || primarySrc;
+                    window.__mix01DetectCache[cacheKey] = fallback;
+                    resolve(fallback);
+                };
                 img.src = primarySrc;
             });
         }
@@ -208,7 +217,7 @@
                 {
                     selectors: 'img, [style*="background"], .thumnail',
                     srcRegExp: '(//.*\\.(?:ssl-images|media)-amazon\\.(?:com|[a-z]{2})/images/.*?([-\\w]+))\\._.+(@IMG@)',
-                    processor: '$1$3' 
+                    processor: '$1$3'
                 }
             ]
         },
@@ -260,7 +269,7 @@
                             try {
                                 const data = JSON.parse(dataM);
                                 return await tools.detectImage(data.murl, data.turl);
-                            } catch (e) {}
+                            } catch (e) { }
                         }
                         return '';
                     }
@@ -393,32 +402,36 @@
 
     window.Mix01RuleEngine = {
         configs: Mix01Configs,
-        
+
         async getHighResUrl(triggerElement, originalSrc) {
             if (!originalSrc || originalSrc.startsWith('data:')) return originalSrc;
 
             const host = window.location.hostname;
-            let matchedRules = [];
-            
-            // 管道 1：精确匹配当前域名，缓存编译后的正则对象
-            for (const pattern in this.configs) {
-                if (!regexCacheHost[pattern]) regexCacheHost[pattern] = new RegExp(`^${pattern}$`);
-                
-                if (regexCacheHost[pattern].test(host)) {
-                    matchedRules = matchedRules.concat(this.configs[pattern].srcMatching || []);
+
+            // 【修复1】按域名缓存 matchedRules，同一域名只构建一次
+            if (!this._matchedRulesCache) this._matchedRulesCache = {};
+            if (!this._matchedRulesCache[host]) {
+                let rules = [];
+                for (const pattern in this.configs) {
+                    if (pattern === '.*') continue; // 跳过，最后统一追加一次
+                    if (!regexCacheHost[pattern]) regexCacheHost[pattern] = new RegExp(`^${pattern}$`);
+                    if (regexCacheHost[pattern].test(host)) {
+                        rules = rules.concat(this.configs[pattern].srcMatching || []);
+                    }
                 }
+                // 【修复2】兜底规则只追加一次
+                if (this.configs['.*']) {
+                    rules = rules.concat(this.configs['.*'].srcMatching || []);
+                }
+                this._matchedRulesCache[host] = rules;
             }
-            
-            // 管道 2：插入全局兜底规则
-            if (this.configs['.*']) {
-                matchedRules = matchedRules.concat(this.configs['.*'].srcMatching || []);
-            }
+            const matchedRules = this._matchedRulesCache[host];
 
             // 执行规则队列
             for (const rule of matchedRules) {
                 // DOM 选择器拦截
                 if (rule.selectors && triggerElement && triggerElement.nodeType === 1) {
-                    try { if (!triggerElement.matches(rule.selectors)) continue; } catch (e) {}
+                    try { if (!triggerElement.matches(rule.selectors)) continue; } catch (e) { }
                 }
 
                 // 正则预编译与缓存拦截，极致压榨性能
@@ -445,8 +458,8 @@
                     return RegExp['$&'];
                 }
             }
-            
-            return originalSrc; 
+
+            return originalSrc;
         }
     };
 })();

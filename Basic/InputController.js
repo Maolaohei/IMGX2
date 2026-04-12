@@ -120,10 +120,13 @@ window.Mix01InputController = class InputController {
     }
 
     handleMouseOver(e) {
-        if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
-        const media = this.getMediaUnderCursor(e.clientX, e.clientY, e.target);
-        if (media) this.triggerZoom(media);
+    if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
+    // 只处理直接命中 img/video 的情况，复杂情况交给 mousemove 的 rAF 节流处理
+    const t = e.target;
+    if ((t.tagName === 'IMG' || t.tagName === 'VIDEO') && (t.src || t.tagName === 'VIDEO')) {
+        this.triggerZoom(t);
     }
+}
 
     handleMouseOut(e) {
         if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return; 
@@ -138,55 +141,59 @@ window.Mix01InputController = class InputController {
         if (Date.now() - this.state.keyboardSwitchTime > 500) this.hideViewer();
     }
 
-    async upgradeToHDQuietly(target, src) {
-        if (this.cfg.state.loadHD !== 'true') return;
-        const myTask = src;
-        try {
-            if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
-                const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, src);
-                if (hdUrl && hdUrl !== src && !this.render.hdState.badUrls.has(hdUrl)) {
-                    
-                    if (this.state.currentHdUrl === hdUrl) return; 
-                    this.state.currentHdUrl = hdUrl;
+   async upgradeToHDQuietly(target, src) {
+    if (this.cfg.state.loadHD !== 'true') return;
+    const myTask = src;
+    try {
+        if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
+            const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, src);
+            if (hdUrl && hdUrl !== src && !this.render.hdState.badUrls.has(hdUrl)) {
+                
+                if (this.state.currentHdUrl === hdUrl) return; 
+                this.state.currentHdUrl = hdUrl;
 
-                    if (!this.render.elements.img.src || this.render.elements.img.src === '') {
-                        this.render.setStyle(this.render.elements.spinner, 'display', 'block');
-                    } else {
-                        this.render.hdState.isLoading = true;
+                // 存入全局 HD URL 缓存，供下载/复制时优先使用
+                window.__mix01HdUrlMap = window.__mix01HdUrlMap || {};
+                window.__mix01HdUrlMap[src] = hdUrl;
+
+                if (!this.render.elements.img.src || this.render.elements.img.src === '') {
+                    this.render.setStyle(this.render.elements.spinner, 'display', 'block');
+                } else {
+                    this.render.hdState.isLoading = true;
+                    this.updateRender(); 
+                }
+
+                const tempImg = new Image();
+                tempImg.onload = () => { 
+                    if (this.state.currentHdUrl === hdUrl && this.state.currentMedia === target) {
+                        this.render.setStyle(this.render.elements.spinner, 'display', 'none');
+                        this.render.hdState.isLoading = false; 
+
+                        if (!this.cfg.state.isImmersive && this.cfg.state.mode === 'partial' && this.state.isSmallOptimized && !this.state.isZoomManuallyChanged) {
+                            const nw = tempImg.naturalWidth, nh = tempImg.naturalHeight;
+                            if (nw > 350 || nh > 350) {
+                                this.state.customLensWidth = Math.min(nw, window.innerWidth * 0.9);
+                                this.state.customLensHeight = Math.min(nh, window.innerHeight * 0.9);
+                                this.state.activeZoom = nw / (this.state.cachedRect.width || 1);
+                            }
+                        }
+                        this.render.elements.img.src = hdUrl; 
                         this.updateRender(); 
                     }
-
-                    const tempImg = new Image();
-                    tempImg.onload = () => { 
-                        if (this.state.currentHdUrl === hdUrl && this.state.currentMedia === target) {
-                            this.render.setStyle(this.render.elements.spinner, 'display', 'none');
-                            this.render.hdState.isLoading = false; 
-
-                            if (!this.cfg.state.isImmersive && this.cfg.state.mode === 'partial' && this.state.isSmallOptimized && !this.state.isZoomManuallyChanged) {
-                                const nw = tempImg.naturalWidth, nh = tempImg.naturalHeight;
-                                if (nw > 350 || nh > 350) {
-                                    this.state.customLensWidth = Math.min(nw, window.innerWidth * 0.9);
-                                    this.state.customLensHeight = Math.min(nh, window.innerHeight * 0.9);
-                                    this.state.activeZoom = nw / (this.state.cachedRect.width || 1);
-                                }
-                            }
-                            this.render.elements.img.src = hdUrl; 
-                            this.updateRender(); 
-                        }
-                    };
-                    tempImg.onerror = () => {
-                        if (this.state.currentHdUrl === hdUrl) {
-                            this.render.setStyle(this.render.elements.spinner, 'display', 'none');
-                            this.render.hdState.isLoading = false;
-                            this.updateRender(); 
-                        }
-                        this.render.hdState.badUrls.add(hdUrl); 
-                    };
-                    tempImg.src = hdUrl;
-                }
+                };
+                tempImg.onerror = () => {
+                    if (this.state.currentHdUrl === hdUrl) {
+                        this.render.setStyle(this.render.elements.spinner, 'display', 'none');
+                        this.render.hdState.isLoading = false;
+                        this.updateRender(); 
+                    }
+                    this.render.hdState.badUrls.add(hdUrl); 
+                };
+                tempImg.src = hdUrl;
             }
-        } catch (error) { console.warn('Mix01 Engine 解析失败:', error); }
-    }
+        }
+    } catch (error) { console.warn('Mix01 Engine 解析失败:', error); }
+}
 
     async triggerZoom(target) {
         if (target === this.state.currentMedia && (target.src || 'video') === this.state.currentSrc) return;
@@ -411,24 +418,28 @@ window.Mix01InputController = class InputController {
     }
 
     triggerGlobalDownload() {
-        const adapter = window.Mix01Utils.getImmersiveAdapter();
-        if (this.state.currentMedia.tagName === 'VIDEO') {
-            if (adapter && adapter.downloadVideo) {
-                this.render.showToast("⏳ 正在打通后台提取原版最高清文件...");
-                adapter.downloadVideo(adapter.getContainer(this.state.currentMedia), this.state.currentMedia).then(videoUrl => {
-                    if (videoUrl === 'NATIVE_CLICKED') this.render.showToast("✅ 已调用浏览器插件原生下载机制！");
-                    else if (videoUrl) {
-                        this.render.showToast("✅ 提取成功，开始强制下载！");
-                        chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: videoUrl, dataUrl: videoUrl });
-                    } else this.render.showToast("❌ 无法解析该媒体的直链");
-                });
-            } else {
-                this.render.showToast("⚠️ 当前站点暂未适配一键视频提取");
-            }
+    const adapter = window.Mix01Utils.getImmersiveAdapter();
+    if (this.state.currentMedia.tagName === 'VIDEO') {
+        if (adapter && adapter.downloadVideo) {
+            this.render.showToast("⏳ 正在打通后台提取原版最高清文件...");
+            adapter.downloadVideo(adapter.getContainer(this.state.currentMedia), this.state.currentMedia).then(videoUrl => {
+                if (videoUrl === 'NATIVE_CLICKED') this.render.showToast("✅ 已调用浏览器插件原生下载机制！");
+                else if (videoUrl) {
+                    this.render.showToast("✅ 提取成功，开始强制下载！");
+                    chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: videoUrl });
+                } else this.render.showToast("❌ 无法解析该媒体的直链");
+            });
         } else {
-            if (this.render.elements.img.src) window.Mix01Utils.downloadImage(this.render.elements.img.src, this.render);
+            this.render.showToast("⚠️ 当前站点暂未适配一键视频提取");
+        }
+    } else {
+        // 优先级：① 已解析的 HD URL（即使图片还在加载中）② 当前显示的 img.src
+        const downloadUrl = this.state.currentHdUrl || this.render.elements.img.src;
+        if (downloadUrl) {
+            window.Mix01Utils.downloadImage(downloadUrl, this.render);
         }
     }
+}
 
     triggerPreload() {
         if (!this.cfg.state.isImmersive || this.cfg.state.preloadCount <= 0 || !this.state.currentMedia) return;

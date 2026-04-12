@@ -1,7 +1,7 @@
 // immersive-rules.js
 (function () {
     const tools = {
-        forceClick: function(el) {
+        forceClick: function (el) {
             if (!el) return;
             const opts = { bubbles: true, cancelable: true, view: window };
             el.dispatchEvent(new MouseEvent('mouseover', opts));
@@ -15,14 +15,23 @@
         '(?:(?:.+\\.)?twitter|x)\\.com': {
             getContainer: (media) => media.closest('article') || document.body,
             getGalleryImages: () => {
+                // 用 WeakSet 缓存已检查过的 article，避免重复扫描 span
+                if (!window.__mix01AdCache) window.__mix01AdCache = new WeakSet();
+                if (!window.__mix01NonAdCache) window.__mix01NonAdCache = new WeakSet();
+
                 return Array.from(document.querySelectorAll('img, video')).filter(media => {
                     if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') return false;
                     const rect = media.getBoundingClientRect();
                     if (rect.width <= 50 || rect.height <= 50 || window.getComputedStyle(media).display === 'none') return false;
                     const article = media.closest('article');
                     if (article) {
-                        const isAd = Array.from(article.querySelectorAll('span')).some(span => /^(广告|赞助|Ad|Promoted)$/i.test(span.textContent.trim()));
-                        if (isAd) return false;
+                        if (window.__mix01AdCache.has(article)) return false;
+                        if (window.__mix01NonAdCache.has(article)) return true;
+                        const isAd = Array.from(article.querySelectorAll('span')).some(span =>
+                            /^(广告|赞助|Ad|Promoted)$/i.test(span.textContent.trim())
+                        );
+                        if (isAd) { window.__mix01AdCache.add(article); return false; }
+                        else { window.__mix01NonAdCache.add(article); return true; }
                     }
                     return true;
                 });
@@ -76,24 +85,24 @@
                 }
                 const caret = container.querySelector('[data-testid="caret"]');
                 if (!caret) return null;
-                tools.forceClick(caret); 
-                await new Promise(r => setTimeout(r, 150)); 
+                tools.forceClick(caret);
+                await new Promise(r => setTimeout(r, 150));
                 const menus = Array.from(document.querySelectorAll('[role="menu"]'));
-                const menu = menus[menus.length - 1]; 
+                const menu = menus[menus.length - 1];
                 if (!menu) return null;
                 const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
                 let targetBtn = null, willFollow = true;
                 for (let item of items) {
                     const text = item.textContent || '';
-                    if (/Unfollow|取消关注/i.test(text)) { targetBtn = item; willFollow = false; break; } 
+                    if (/Unfollow|取消关注/i.test(text)) { targetBtn = item; willFollow = false; break; }
                     else if (/Follow|关注/i.test(text)) { targetBtn = item; willFollow = true; break; }
                 }
                 if (!targetBtn) { tools.forceClick(document.body); return null; }
-                tools.forceClick(targetBtn); 
+                tools.forceClick(targetBtn);
                 if (!willFollow) {
                     await new Promise(r => setTimeout(r, 200));
                     const confirmBtn = document.querySelector('[data-testid="confirmationSheetConfirm"]');
-                    if (confirmBtn) { tools.forceClick(confirmBtn); } 
+                    if (confirmBtn) { tools.forceClick(confirmBtn); }
                     else {
                         const dialog = document.querySelector('[role="dialog"], [data-testid="mask"]');
                         if (dialog) {
@@ -133,7 +142,7 @@
                     n.replace(/^([^=]+)=(.+)$/, (match, name, value) => { cookies[name.trim()] = value.trim(); });
                 });
 
-                if (!cookies.ct0) return null; 
+                if (!cookies.ct0) return null;
 
                 const baseUrl = `https://${window.location.hostname}/i/api/graphql/2ICDjqPd81tulZcYrtpTuQ/TweetResultByRestId`;
                 const variables = { 'tweetId': statusId, 'with_rux_injections': false, 'includePromotedContent': true, 'withCommunity': true, 'withQuickPromoteEligibilityTweetFields': true, 'withBirdwatchNotes': true, 'withVoice': true, 'withV2Timeline': true };
@@ -182,14 +191,14 @@
 
         '(?:.+\\.)?pixiv\\.net': {
             getContainer: (media) => document.body,
-            
+
             _getPixivContext: async (media) => {
                 let illustId = window.location.pathname.match(/artworks\/(\d+)/)?.[1];
                 if (!illustId && media && media.src) {
                     const m = media.src.match(/\/(\d+)_p/);
                     if (m) illustId = m[1];
                 }
-                
+
                 let userId = null;
                 const container = media ? (media.closest('li') || media.closest('[role="presentation"]') || document.body) : document.body;
                 const authorLink = container.querySelector('a[data-click-label="creator"], a[href*="/users/"]');
@@ -201,14 +210,14 @@
                 let token = document.querySelector('meta[name="csrf-token"]')?.content || window.pixiv?.context?.token || '';
                 if (!token) {
                     const meta = document.querySelector('#meta-global-data');
-                    if (meta) { try { token = JSON.parse(meta.content).token; } catch(e){} }
+                    if (meta) { try { token = JSON.parse(meta.content).token; } catch (e) { } }
                 }
 
                 if (illustId && !userId) {
                     try {
                         const res = await fetch(`/ajax/illust/${illustId}`).then(r => r.json());
                         userId = res?.body?.userId;
-                    } catch(e) {}
+                    } catch (e) { }
                 }
 
                 return { illustId, userId, token };
@@ -218,11 +227,11 @@
                 const likeBtn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], [data-click-label="like"] button, button svg path[d*="M12"]')?.closest('button');
                 let isLiked = false;
                 if (likeBtn) isLiked = likeBtn.innerHTML.includes('rgb(255, 64, 96)') || likeBtn.innerHTML.includes('#FF4060') || likeBtn.getAttribute('aria-pressed') === 'true';
-                
+
                 const followBtn = container.querySelector('.gtm-main-follow, [data-click-action="follow"], [data-click-label="follow"]');
                 let isFollowed = false;
                 if (followBtn) isFollowed = /已关注|Following/i.test(followBtn.textContent) || followBtn.dataset.clickAction === 'unfollow' || followBtn.getAttribute('aria-pressed') === 'true';
-                
+
                 let authorName = container.querySelector('.user-name, [data-click-label="creator"]')?.textContent || '';
                 return { isLiked, isFollowed, authorName };
             },
@@ -230,12 +239,12 @@
             like: async (container, media) => {
                 const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
                 const btn = container.querySelector('.gtm-main-bookmark, [data-click-action="like"], button svg path[d*="M12"]')?.closest('button');
-                
+
                 let isCurrentlyLiked = false;
                 if (btn) {
                     isCurrentlyLiked = btn.innerHTML.includes('rgb(255, 64, 96)') || btn.innerHTML.includes('#FF4060') || btn.getAttribute('aria-pressed') === 'true';
                 }
-                
+
                 const src = media ? (media.src || 'video') : '';
                 if (window.__mix01LikeMediaCache && window.__mix01LikeMediaCache[src] !== undefined) {
                     isCurrentlyLiked = window.__mix01LikeMediaCache[src];
@@ -250,8 +259,8 @@
                                 body: JSON.stringify({ illust_id: ctx.illustId, restrict: 0, comment: '', tags: [] })
                             });
                             if (btn) tools.forceClick(btn);
-                            return true; 
-                        } catch(e) { console.warn("Pixiv API 点赞失败", e); }
+                            return true;
+                        } catch (e) { console.warn("Pixiv API 点赞失败", e); }
                     }
                     if (btn) { tools.forceClick(btn); return true; }
                 } else {
@@ -263,12 +272,12 @@
             follow: async (container, media) => {
                 const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
                 const btn = container.querySelector('.gtm-main-follow, [data-click-action="follow"]');
-                
+
                 let isCurrentlyFollowed = false;
                 if (btn) {
                     isCurrentlyFollowed = /已关注|Following/i.test(btn.textContent) || btn.dataset.clickAction === 'unfollow' || btn.getAttribute('aria-pressed') === 'true';
                 }
-                
+
                 const authorName = container.querySelector('.user-name, [data-click-label="creator"]')?.textContent || '';
                 if (authorName && window.__mix01FollowAuthorCache && window.__mix01FollowAuthorCache[authorName] !== undefined) {
                     isCurrentlyFollowed = window.__mix01FollowAuthorCache[authorName];
@@ -292,7 +301,7 @@
                             });
                             if (btn) tools.forceClick(btn);
                             return true;
-                        } catch(e) { console.warn("Pixiv API 关注失败", e); }
+                        } catch (e) { console.warn("Pixiv API 关注失败", e); }
                     }
                     if (btn) { tools.forceClick(btn); return true; }
                 } else {
@@ -300,7 +309,7 @@
                         tools.forceClick(btn);
                         return false;
                     } else if (ctx.userId && ctx.token) {
-                         try {
+                        try {
                             const formData = new URLSearchParams();
                             formData.append('mode', 'delete');
                             formData.append('type', 'user');
@@ -311,22 +320,22 @@
                                 body: formData.toString()
                             });
                             return false;
-                         } catch(e) { console.warn("Pixiv API 取关失败", e); }
+                        } catch (e) { console.warn("Pixiv API 取关失败", e); }
                     }
                 }
                 return null;
             },
 
             downloadVideo: async (container, media) => {
-                 const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
-                 if (!ctx.illustId) return null;
-                 try {
-                     const res = await fetch(`/ajax/illust/${ctx.illustId}/pages`).then(r => r.json());
-                     if (res && !res.error && res.body && res.body.length > 0) {
-                         return res.body[0].urls.original;
-                     }
-                 } catch(e) { console.warn("Pixiv 原图 API 提取失败", e); }
-                 return null;
+                const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
+                if (!ctx.illustId) return null;
+                try {
+                    const res = await fetch(`/ajax/illust/${ctx.illustId}/pages`).then(r => r.json());
+                    if (res && !res.error && res.body && res.body.length > 0) {
+                        return res.body[0].urls.original;
+                    }
+                } catch (e) { console.warn("Pixiv 原图 API 提取失败", e); }
+                return null;
             }
         }
     };
