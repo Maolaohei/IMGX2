@@ -1,10 +1,9 @@
-// background.js
-
+// background.js - Mix01 零负担后台下载引擎
 chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.create({ id: "saveOriginalImgMix01", title: "保存原图 (Mix01)", contexts: ["image"] });
     chrome.contextMenus.create({ id: "copyOriginalImgMix01", title: "复制原图到剪贴板 (Mix01)", contexts: ["image"] });
 
-    // 【核心黑科技】：使用 DNR 拦截器，强制为所有发往 Pixiv 图片服务器的请求注入 Referer
+    // DNR 规则注入：强制注入 Referer
     if (chrome.declarativeNetRequest) {
         chrome.declarativeNetRequest.updateDynamicRules({
             removeRuleIds: [1],
@@ -66,29 +65,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         filename = filename.replace(/[\\/:*?"<>|]/g, "_");
         const finalDownloadName = `IMG_Download/${filename}_Mix01${ext}`;
 
-        // DNR 规则自动注入 Referer，直接无视跨域与防盗链
         fetch(url)
             .then(res => {
                 if (!res.ok) throw new Error("Fetch 被拦截，状态码: " + res.status);
                 return res.blob();
             })
             .then(blob => {
-                const reader = new FileReader();
-                reader.onloadend = () => {
-                    chrome.downloads.download({
-                        url: reader.result,
-                        filename: finalDownloadName,
-                        saveAs: false,
-                        conflictAction: "uniquify"
-                    }, (downloadId) => {
-                        if (chrome.runtime.lastError) {
-                            saveToHistory(finalDownloadName, "❌ 失败: " + chrome.runtime.lastError.message);
-                        } else {
-                            saveToHistory(finalDownloadName, "✅ 成功");
-                        }
-                    });
-                };
-                reader.readAsDataURL(blob);
+                // 【核心内存优化】：使用 ObjectURL 替代 DataURL
+                const blobUrl = URL.createObjectURL(blob);
+                
+                chrome.downloads.download({
+                    url: blobUrl,
+                    filename: finalDownloadName,
+                    saveAs: false,
+                    conflictAction: "uniquify"
+                }, (downloadId) => {
+                    // 下载建立后立即释放指针
+                    URL.revokeObjectURL(blobUrl);
+
+                    if (chrome.runtime.lastError) {
+                        saveToHistory(finalDownloadName, "❌ 失败: " + chrome.runtime.lastError.message);
+                    } else {
+                        saveToHistory(finalDownloadName, "✅ 成功");
+                    }
+                });
             })
             .catch(err => {
                 console.error("Mix01 后台安全下载失败:", err);
