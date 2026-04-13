@@ -225,7 +225,9 @@ window.Mix01InputController = class InputController {
         this.state.currentMedia = target;
         this.state.currentSrc = target.src || 'video';
         this.state.cachedRect = target.getBoundingClientRect();
-        
+        // 【核心修复】：每次重新进入放大视图，强制使画廊缓存过期
+        // 防止 Pixiv 等单页应用在不滚动页面的情况下切换 Tab 导致读取到旧的图片队列
+        this.state._galleryCacheDirty = true;
         this.mediaObserver.disconnect();
         if (target.tagName === 'IMG') {
             this.mediaObserver.observe(target, { attributes: true, attributeFilter: ['src'] });
@@ -310,8 +312,21 @@ window.Mix01InputController = class InputController {
                 const rect = this.state.cachedRect;
                 const x = e ? e.clientX : window.lastMouseX;
                 const y = e ? e.clientY : window.lastMouseY;
-                const xP = (x - rect.left) / (rect.width || 1);
-                const yP = (y - rect.top) / (rect.height || 1);
+                
+                let xP, yP;
+
+                // 【核心修复】：沉浸模式下，鼠标比例必须基于整个屏幕计算，而不是原先的缩略图！
+                if (this.cfg.state.isImmersive) {
+                    xP = x / window.innerWidth;
+                    yP = y / window.innerHeight;
+                } else {
+                    xP = (x - rect.left) / (rect.width || 1);
+                    yP = (y - rect.top) / (rect.height || 1);
+                }
+
+                // 增加绝对边界锁（Clamp），防止意外溢出导致图片飞走
+                xP = Math.max(0, Math.min(1, xP));
+                yP = Math.max(0, Math.min(1, yP));
                 
                 const isVideo = this.state.currentMedia.tagName === 'VIDEO';
                 const activeMedia = isVideo ? this.render.elements.canvas : this.render.elements.img;
