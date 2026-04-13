@@ -59,7 +59,7 @@ window.Mix01InputController = class InputController {
         document.addEventListener('keydown', (e) => this.handleKeyDown(e), true);
         
         document.addEventListener('wheel', (e) => {
-            if (this.render.elements.viewer.style.display === 'block') {
+            if (this.cfg.state.wheelZoomEnabled && this.render.elements.viewer.style.display === 'block') {
                 e.preventDefault();
                 const delta = e.deltaY > 0 ? -0.15 : 0.15;
                 this.state.activeZoom = Math.max(0.2, this.state.activeZoom + delta);

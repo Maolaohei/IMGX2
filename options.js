@@ -11,6 +11,7 @@ const defaultConfigs = {
     mode: 'partial', 
     preloadCount: 5, 
     keyMode: 'v', 
+    wheelZoomEnabled: false,    // <--- 新增这一行（默认关闭）
     keyRotate: 'r', 
     keyMirror: 'm', 
     keyZoomIn: '=', 

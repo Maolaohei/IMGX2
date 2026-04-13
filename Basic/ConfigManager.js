@@ -5,7 +5,7 @@ window.Mix01ConfigManager = class ConfigManager {
             hasAgreed: false, loadHD: 'true', breakoutView: false,
             showStatus: true, smallImageOptimization: true,
             disableVideoDefaultView: true, zoom: 2.0, rotate: 0,
-            mirror: 1, mode: 'partial', isImmersive: false, preloadCount: 5
+            mirror: 1, mode: 'partial', isImmersive: false, preloadCount: 5,wheelZoomEnabled: false
         };
         this.keys = {
             mode: 'v', rotate: 'r', mirror: 'm', zoomIn: '=', zoomOut: '-',
