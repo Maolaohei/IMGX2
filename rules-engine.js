@@ -1,21 +1,34 @@
 // rules-engine.js
-// Mix01 高性能原生规则引擎 (终极完整版 + 正则缓存极限优化架构)
+// Mix01 高性能原生规则引擎 (终极优化版：附带LRU并发控制、API内存级缓存、智能防风控)
 
 (function () {
+    // 【极致优化】：轻量级 LRU 缓存，防止 Pixiv/Twitter 瀑布流狂刷导致的内存溢出 (OOM)
+    const LRUCache = {
+        set: (mapName, key, value, maxSize = 30) => {
+            window[mapName] = window[mapName] || new Map();
+            const cache = window[mapName];
+            if (cache.has(key)) cache.delete(key); 
+            else if (cache.size >= maxSize) cache.delete(cache.keys().next().value); 
+            cache.set(key, value);
+        },
+        get: (mapName, key) => {
+            const cache = window[mapName];
+            return cache ? cache.get(key) : undefined;
+        }
+    };
+
     // 模拟原生环境下的 DOM 工具函数
     const tools = {
         getLargestImgSrc: function (container) {
             if (!container || !container.querySelectorAll) return '';
             const imgs = Array.from(container.querySelectorAll('img, [style*="background"]'));
             
-            // 优化：1. 批量读取 DOM 属性，防止与后续的计算逻辑混杂导致 Layout Thrashing (布局抖动)
             const measurements = imgs.map(el => ({
                 el: el,
                 area: el.clientWidth * el.clientHeight,
                 bgStyle: el.style.backgroundImage
             }));
 
-            // 优化：2. 纯内存逻辑计算
             let maxArea = 0;
             let bestSrc = '';
             measurements.forEach(item => {
@@ -57,9 +70,6 @@
     };
 
     const Mix01Configs = {
-        // ==========================================
-        // 1. 二次元 & 插画社区 (Pixiv, Bilibili, ArtStation, DeviantArt, Yande等)
-        // ==========================================
         '(?:.+\\.)?pixiv\\.net': {
             srcMatching: [
                 { srcRegExp: '(.+\\.pximg\\.net/user-profile/.+)_\\d+(@IMG@)', processor: '$1$2' },
@@ -67,7 +77,6 @@
                 { srcRegExp: '(.+\\.pximg\\.net)(?=/).+(/uploads/.+/)(?:.+_)?(\\d+@IMG@)', processor: '$1$2$3' },
                 { srcRegExp: '(.+\\.pixiv\\.net/images/post/\\d+)/w/\\d+(/.+@IMG@)', processor: '$1$2' },
                 {
-                    // 核心修复：更严谨的正则提取
                     selectors: 'img, [style*="background"], .kTOQSN',
                     srcRegExp: '(//.+\\.pximg\\.net/).+(/img/.+?)(_p\\d+)?(?:_.+)?(@IMG@)',
                     processor: async (trigger, src, srcRegExpObj) => {
@@ -83,19 +92,40 @@
                     }
                 },
                 {
-                    // 【全新特性】：吸收了 Pixiv 动图/多图 API 的逆向能力
+                    // 【优化特性】：吸收了 Pixiv 动图/多图 API 的逆向能力 + LRU API 缓存
                     selectors: 'canvas, video',
                     processor: async (trigger, src) => {
-                        let illustId = window.location.pathname.match(/artworks\/(\d+)/)?.[1];
-                        if (!illustId) {
-                            const m = (src || trigger.src || '').match(/\/(\d+)_/);
-                            if (m) illustId = m[1];
+                        let illustId = null;
+                        let pageIndex = 0;
+                        const activeSrc = src || trigger.src || '';
+                        
+                        // 1. 优先从 src 提取，防止相关推荐串号
+                        const m1 = activeSrc.match(/\/(\d+)_/);
+                        if (m1) illustId = m1[1];
+                        const pm = activeSrc.match(/_p(\d+)/);
+                        if (pm) pageIndex = parseInt(pm[1], 10);
+
+                        // 2. DOM 与 URL 兜底提取
+                        if (!illustId && trigger) {
+                            const parentA = trigger.closest('a');
+                            if (parentA && parentA.href) illustId = parentA.href.match(/artworks\/(\d+)/)?.[1];
                         }
+                        if (!illustId) illustId = window.location.pathname.match(/artworks\/(\d+)/)?.[1];
+
                         if (illustId) {
                             try {
-                                const res = await fetch(`/ajax/illust/${illustId}/pages`).then(r => r.json());
-                                if (res?.body?.[0]?.urls?.original) {
-                                    return res.body[0].urls.original;
+                                let pagesData = LRUCache.get('__mix01PixivApiCache', illustId);
+                                
+                                if (!pagesData) {
+                                    const res = await fetch(`/ajax/illust/${illustId}/pages`).then(r => r.json());
+                                    pagesData = res?.body;
+                                    // 最大缓存30个作品数据，防止刷太久导致内存爆炸
+                                    if (pagesData) LRUCache.set('__mix01PixivApiCache', illustId, pagesData, 30); 
+                                }
+
+                                if (pagesData) {
+                                    if (pagesData[pageIndex]?.urls?.original) return pagesData[pageIndex].urls.original;
+                                    if (pagesData[0]?.urls?.original) return pagesData[0].urls.original;
                                 }
                             } catch(e) {}
                         }
@@ -158,23 +188,33 @@
                 { srcRegExp: '(//static\\d*\\.e621\\.net/data/)(?:crop|preview|sample)/(.+)(@IMG@)', processor: '$1$2$3' }
             ]
         },
-
-        // ==========================================
-        // 2. 社交媒体 (Twitter, Weibo, Instagram, Facebook, Reddit, Tumblr)
-        // ==========================================
         '(?:(?:.+\\.)?twitter|x)\\.com': {
             srcMatching: [
                 { srcRegExp: '(\\w+\\.twimg\\.com/(?:(?:[^/]+/)?default_)?profile_images/.+)_\\w+(?=@IMG@)(@IMG@)', processor: '$1$2' },
                 { srcRegExp: '(\\w+\\.twimg\\.com/media/.+?)(?:@IMG@:\\w+)?(.+[?&]name=)[^&]+(.*)', processor: '$1$2orig$3' },
                 { srcRegExp: '(\\w+\\.twimg\\.com/.+\\?format=.*&name=).+', processor: '$1orig' },
                 {
-                    // 【全新特性】：吸收了 Twitter 视频的 GraphQL 逆向提取能力
+                    // 【全新特性】：带 LRU 缓存与 Fast-path 拦截的 GraphQL 逆向引擎
                     selectors: 'video',
                     processor: async (trigger) => {
-                        const statusLink = trigger.closest('article')?.querySelector('a[href*="/status/"]');
-                        if (!statusLink) return '';
-                        const statusId = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
+                        let statusId = null;
+                        
+                        // 【优化1】：Fast-path，优先检查顶层 URL（详情页直出）
+                        const urlMatch = window.location.pathname.match(/\/status\/(\d+)/);
+                        if (urlMatch) {
+                            statusId = urlMatch[1];
+                        } else {
+                            const statusLink = trigger.closest('article')?.querySelector('a[href*="/status/"]');
+                            if (statusLink) statusId = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
+                        }
+                        
+                        if (!statusId) return trigger.src;
 
+                        // 【优化2】：O(1) 缓存拦截，防止频繁请求触发风控
+                        const cachedUrl = LRUCache.get('__mix01TwVideoCache', statusId);
+                        if (cachedUrl) return cachedUrl;
+
+                        // 【优化3】：将耗时的 Cookie 序列化推迟到缓存未命中之后执行
                         const cookies = {};
                         document.cookie.split(';').filter(n => n.indexOf('=') > 0).forEach(n => {
                             n.replace(/^([^=]+)=(.+)$/, (match, name, value) => { cookies[name.trim()] = value.trim(); });
@@ -200,10 +240,12 @@
                             const tweetResult = json.data?.tweetResult?.result;
                             if (!tweetResult) return trigger.src;
                             const tweet = tweetResult.tweet || tweetResult;
+                            
                             let legacy = tweet.legacy;
                             if (!legacy?.extended_entities?.media && tweet.quoted_status_result?.result?.legacy?.extended_entities?.media) {
                                 legacy = tweet.quoted_status_result.result.legacy;
                             }
+                            
                             const medias = legacy?.extended_entities?.media;
                             if (!medias || !Array.isArray(medias)) return trigger.src;
 
@@ -221,7 +263,12 @@
                                     }
                                 }
                             });
-                            return videoUrl || trigger.src;
+                            
+                            const finalUrl = videoUrl || trigger.src;
+                            // 写入缓存，最大保留30个视频直链
+                            LRUCache.set('__mix01TwVideoCache', statusId, finalUrl, 30);
+                            return finalUrl;
+                            
                         } catch (e) { return trigger.src; }
                     }
                 }
@@ -282,10 +329,6 @@
                 }
             ]
         },
-
-        // ==========================================
-        // 3. 电商平台 (Taobao, Tmall, JD, Amazon, AliExpress, Etsy, eBay等)
-        // ==========================================
         '(?:.+\\.)?(tmall|taobao|etao|fliggy|alitrip|1688|alibaba|aliexpress|liangxinyao|alipay|alicdn|alimama|vvic|wsy)\\.(?:com|[a-z]{2})': {
             srcMatching: [
                 { srcRegExp: '(gqrcode\\.alicdn\\.com/img\\?.*?)&w=\\d+(.*?)&h=\\d+(.*)', processor: '$1&w=300$2&h=300$3' },
@@ -322,10 +365,6 @@
                 { srcRegExp: '(.+\\.etsystatic\\.com/.+?_)\\d+x(?:\\d+|N)(.*@IMG@.*)', processor: '$1fullxfull$2' }
             ]
         },
-
-        // ==========================================
-        // 4. 图库 & 搜索引擎 (Google, Bing, Baidu, Pinterest, Flickr, Wallhaven)
-        // ==========================================
         'www\\.google(?:\\.(?:com|[a-z]{2}))+|(?:play|store)\\.google\\.com': {
             srcMatching: [
                 {
@@ -424,10 +463,6 @@
                 }
             ]
         },
-
-        // ==========================================
-        // 5. 视频 & 其他综合社区 (YouTube, Zhihu, Github, Douban)
-        // ==========================================
         '(?:.+\\.)?youtube\\.com': {
             srcMatching: [
                 {
@@ -470,10 +505,6 @@
                 { srcRegExp: '(img\\d+\\.doubanio\\.com/pview/\\w+_poster/)(?:small|median|large)(/public/.+@IMG@)', processor: '$1raw$2' }
             ]
         },
-
-        // ==========================================
-        // 6. 全局通用兜底规则 (CDN 过滤)
-        // ==========================================
         '.*': {
             srcMatching: [
                 { srcRegExp: '([?&@!])(?:x-oss-process=image|imageMogr2|imageView2).*', processor: '' },
@@ -484,7 +515,6 @@
         }
     };
 
-    // 【核心性能优化】：正则引擎预编译缓存池
     const regexCacheHost = {};
     const regexCacheSrcMatch = {};
 
@@ -496,18 +526,16 @@
 
             const host = window.location.hostname;
 
-            // 【修复1】按域名缓存 matchedRules，同一域名只构建一次
             if (!this._matchedRulesCache) this._matchedRulesCache = {};
             if (!this._matchedRulesCache[host]) {
                 let rules = [];
                 for (const pattern in this.configs) {
-                    if (pattern === '.*') continue; // 跳过，最后统一追加一次
+                    if (pattern === '.*') continue; 
                     if (!regexCacheHost[pattern]) regexCacheHost[pattern] = new RegExp(`^${pattern}$`);
                     if (regexCacheHost[pattern].test(host)) {
                         rules = rules.concat(this.configs[pattern].srcMatching || []);
                     }
                 }
-                // 【修复2】兜底规则只追加一次
                 if (this.configs['.*']) {
                     rules = rules.concat(this.configs['.*'].srcMatching || []);
                 }
@@ -515,14 +543,11 @@
             }
             const matchedRules = this._matchedRulesCache[host];
 
-            // 执行规则队列
             for (const rule of matchedRules) {
-                // DOM 选择器拦截
                 if (rule.selectors && triggerElement && triggerElement.nodeType === 1) {
                     try { if (!triggerElement.matches(rule.selectors)) continue; } catch (e) { }
                 }
 
-                // 正则预编译与缓存拦截，极致压榨性能
                 let srcRegExpObj = null;
                 if (rule.srcRegExp) {
                     if (!regexCacheSrcMatch[rule.srcRegExp]) {
@@ -534,7 +559,6 @@
 
                 if (srcRegExpObj && !srcRegExpObj.test(originalSrc)) continue;
 
-                // 处理器执行
                 if (rule.processor !== undefined) {
                     if (typeof rule.processor === 'function') {
                         const result = await rule.processor(triggerElement, originalSrc, srcRegExpObj);

@@ -1,4 +1,5 @@
 // Basic/InputController.js
+// 终极性能优化版：包含 SPA 缓存失效、DOM读写分离、预加载网络防抖、逃逸边界修复
 window.Mix01InputController = class InputController {
     constructor(configManager, renderer) {
         this.cfg = configManager;
@@ -14,9 +15,8 @@ window.Mix01InputController = class InputController {
         };
         this.preloadedUrls = new Set();
         this.preloadedUrlsQueue = [];
-
-        // 【终极修复】：快捷键缓存池（按需动态编译，拒绝硬编码映射错误）
         this.compiledKeys = {}; 
+        this._preloadTimer = null; // 用于网络防抖
 
         this.mediaObserver = new MutationObserver((mutations) => {
             let newSrc = null;
@@ -225,9 +225,10 @@ window.Mix01InputController = class InputController {
         this.state.currentMedia = target;
         this.state.currentSrc = target.src || 'video';
         this.state.cachedRect = target.getBoundingClientRect();
-        // 【核心修复】：每次重新进入放大视图，强制使画廊缓存过期
-        // 防止 Pixiv 等单页应用在不滚动页面的情况下切换 Tab 导致读取到旧的图片队列
+        
+        // 【核心修复】：防止 Pixiv 等单页应用在不滚动页面的情况下切换 Tab，强制清除失效图库缓存
         this.state._galleryCacheDirty = true;
+        
         this.mediaObserver.disconnect();
         if (target.tagName === 'IMG') {
             this.mediaObserver.observe(target, { attributes: true, attributeFilter: ['src'] });
@@ -302,39 +303,43 @@ window.Mix01InputController = class InputController {
         if (this.state.isRenderingLock) return;
         this.state.isRenderingLock = true;
 
+        // 【阶段一：纯读取 Phase (Read)】
+        // 将引起重绘的所有读取操作分离在 rAF 之外，消除 Layout Thrashing
+        const sW = window.innerWidth;
+        const sH = window.innerHeight;
+        const rect = this.state.cachedRect;
+        const x = e ? e.clientX : window.lastMouseX;
+        const y = e ? e.clientY : window.lastMouseY;
+        
+        let xP, yP;
+        // 【核心修复】：沉浸模式下使用窗口坐标系；非沉浸模式使用元素坐标系
+        if (this.cfg.state.isImmersive) {
+            xP = x / sW;
+            yP = y / sH;
+        } else {
+            xP = (x - rect.left) / (rect.width || 1);
+            yP = (y - rect.top) / (rect.height || 1);
+        }
+
+        // 绝对边界锁（Clamp），防止意外溢出导致图片飞走
+        xP = Math.max(0, Math.min(1, xP));
+        yP = Math.max(0, Math.min(1, yP));
+
+        // 【阶段二：纯写入 Phase (Write)】
         requestAnimationFrame(() => {
             if (!this.state.currentMedia || !this.state.cachedRect) {
                 this.state.isRenderingLock = false;
                 return;
             }
-
             try {
-                const rect = this.state.cachedRect;
-                const x = e ? e.clientX : window.lastMouseX;
-                const y = e ? e.clientY : window.lastMouseY;
-                
-                let xP, yP;
-
-                // 【核心修复】：沉浸模式下，鼠标比例必须基于整个屏幕计算，而不是原先的缩略图！
-                if (this.cfg.state.isImmersive) {
-                    xP = x / window.innerWidth;
-                    yP = y / window.innerHeight;
-                } else {
-                    xP = (x - rect.left) / (rect.width || 1);
-                    yP = (y - rect.top) / (rect.height || 1);
-                }
-
-                // 增加绝对边界锁（Clamp），防止意外溢出导致图片飞走
-                xP = Math.max(0, Math.min(1, xP));
-                yP = Math.max(0, Math.min(1, yP));
-                
                 const isVideo = this.state.currentMedia.tagName === 'VIDEO';
                 const activeMedia = isVideo ? this.render.elements.canvas : this.render.elements.img;
                 
+                // 将计算好的全量数据直接压入渲染管线
                 this.state.activeZoom = this.render.updateLayout(
                     activeMedia, rect, this.state.activeZoom, xP, yP, 
                     this.state.isSmallOptimized, this.state.customLensWidth, this.state.customLensHeight, 
-                    this.state.isZoomManuallyChanged, this.state.currentSrc
+                    this.state.isZoomManuallyChanged, this.state.currentSrc, sW, sH
                 );
             } catch (err) {
                 console.warn("Mix01 Render Engine:", err);
@@ -385,7 +390,6 @@ window.Mix01InputController = class InputController {
 
     matchCombo(e, comboStr) {
         if (!comboStr) return false;
-        // 【终极修复】：直接使用传入的真实快捷键字符串（如 'ctrl+f12'）作为字典的 Key，实现懒加载编译
         let config = this.compiledKeys[comboStr];
         if (!config) {
             const parts = comboStr.toLowerCase().split('+').map(s => s.trim());
@@ -395,7 +399,7 @@ window.Mix01InputController = class InputController {
                 shift: parts.includes('shift'), 
                 alt: parts.includes('alt') 
             };
-            this.compiledKeys[comboStr] = config; // 解析过一次后直接存入内存
+            this.compiledKeys[comboStr] = config; 
         }
         
         if (e.ctrlKey !== config.ctrl) return false;
@@ -521,43 +525,49 @@ window.Mix01InputController = class InputController {
     triggerPreload() {
         if (!this.cfg.state.isImmersive || this.cfg.state.preloadCount <= 0 || !this.state.currentMedia) return;
 
-        const galleryImages = this.getGalleryImages();
-        let currentIndex = galleryImages.indexOf(this.state.currentMedia);
-        
-        if (currentIndex === -1 && this.state.currentSrc) {
-            currentIndex = galleryImages.findIndex(media => (media.src||'video') === this.state.currentSrc);
-        }
-        if (currentIndex === -1) return;
+        // 【核心优化】：如果正在预加载倒计时，取消它（斩断快速切换时的请求风暴）
+        if (this._preloadTimer) clearTimeout(this._preloadTimer);
 
-        for (let i = 1; i <= this.cfg.state.preloadCount; i++) {
-            const targetIndex = currentIndex + i;
-            if (targetIndex >= galleryImages.length) break;
-
-            const media = galleryImages[targetIndex];
-            if (media.tagName === 'IMG') {
-                const src = media.src;
-                
-                (async () => {
-                    let targetUrl = src;
-                    if (this.cfg.state.loadHD === 'true' && window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
-                        try { targetUrl = await window.Mix01RuleEngine.getHighResUrl(media, src); } catch (e) {}
-                    }
-
-                    if (targetUrl && !this.preloadedUrls.has(targetUrl) && !this.render.hdState.badUrls.has(targetUrl)) {
-                        this.preloadedUrls.add(targetUrl);
-                        this.preloadedUrlsQueue.push(targetUrl);
-
-                        if (this.preloadedUrlsQueue.length > 200) {
-                            const oldest = this.preloadedUrlsQueue.shift();
-                            this.preloadedUrls.delete(oldest);
-                        }
-                        
-                        const preloaderImg = new Image();
-                        preloaderImg.src = targetUrl;
-                    }
-                })();
+        // 延迟 300ms，确认用户真实驻留再启动预加载
+        this._preloadTimer = setTimeout(() => {
+            const galleryImages = this.getGalleryImages();
+            let currentIndex = galleryImages.indexOf(this.state.currentMedia);
+            
+            if (currentIndex === -1 && this.state.currentSrc) {
+                currentIndex = galleryImages.findIndex(media => (media.src||'video') === this.state.currentSrc);
             }
-        }
+            if (currentIndex === -1) return;
+
+            for (let i = 1; i <= this.cfg.state.preloadCount; i++) {
+                const targetIndex = currentIndex + i;
+                if (targetIndex >= galleryImages.length) break;
+
+                const media = galleryImages[targetIndex];
+                if (media.tagName === 'IMG') {
+                    const src = media.src;
+                    
+                    (async () => {
+                        let targetUrl = src;
+                        if (this.cfg.state.loadHD === 'true' && window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
+                            try { targetUrl = await window.Mix01RuleEngine.getHighResUrl(media, src); } catch (e) {}
+                        }
+
+                        if (targetUrl && !this.preloadedUrls.has(targetUrl) && !this.render.hdState.badUrls.has(targetUrl)) {
+                            this.preloadedUrls.add(targetUrl);
+                            this.preloadedUrlsQueue.push(targetUrl);
+
+                            if (this.preloadedUrlsQueue.length > 200) {
+                                const oldest = this.preloadedUrlsQueue.shift();
+                                this.preloadedUrls.delete(oldest);
+                            }
+                            
+                            const preloaderImg = new Image();
+                            preloaderImg.src = targetUrl;
+                        }
+                    })();
+                }
+            }
+        }, 300);
     }
 
     handleKeyDown(e) {
@@ -566,7 +576,6 @@ window.Mix01InputController = class InputController {
         const modeList = ['partial', 'full-follow', 'full-center'];
         const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
         
-        // 【终极修复】：恢复使用 this.cfg.keys.xxxx，它会动态读取用户设置的值（如 'ctrl+f12'）
         if (this.matchCombo(e, this.cfg.keys.immersive)) {
             e.preventDefault();
             if (this.cfg.state.isImmersive) {

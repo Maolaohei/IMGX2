@@ -73,26 +73,64 @@
                 if (btnLike) { tools.forceClick(btnLike); return true; }
                 return null;
             },
-            follow: async (container) => {
-                let author = ""; const userNameEl = container.querySelector('[data-testid="User-Name"]');
-                if (userNameEl) { const match = userNameEl.textContent.match(/@[\w_]+/); if (match) author = match[0]; }
+            follow: async (container, media) => {
+                let author = ""; 
+                const userNameEl = container.querySelector('[data-testid="User-Name"]');
+                if (userNameEl) { 
+                    const match = userNameEl.textContent.match(/@[\w_]+/); 
+                    if (match) author = match[0]; 
+                }
+
+                // 1. 个人主页场景
                 const profileScope = document.querySelector('[data-testid="primaryColumn"]');
                 if (profileScope) {
-                    const btnUnfollow = profileScope.querySelector('[data-testid$="-unfollow"]'), btnFollow = profileScope.querySelector('[data-testid$="-follow"]');
+                    const btnUnfollow = profileScope.querySelector('[data-testid$="-unfollow"]');
+                    const btnFollow = profileScope.querySelector('[data-testid$="-follow"]');
                     if (btnUnfollow) {
-                        tools.forceClick(btnUnfollow); await new Promise(r => setTimeout(r, 150));
+                        tools.forceClick(btnUnfollow); 
+                        await new Promise(r => setTimeout(r, 150));
                         const confirm = document.querySelector('[data-testid="confirmationSheetConfirm"]');
                         if (confirm) tools.forceClick(confirm);
-                        if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = false; return false;
+                        if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = false; 
+                        return false;
                     } else if (btnFollow) {
                         tools.forceClick(btnFollow);
-                        if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = true; return true;
+                        if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = true; 
+                        return true;
                     }
                 }
-                const caret = container.querySelector('[data-testid="caret"]'); if (!caret) return null;
-                tools.forceClick(caret); await new Promise(r => setTimeout(r, 150));
-                const menus = Array.from(document.querySelectorAll('[role="menu"]'));
-                const menu = menus[menus.length - 1]; if (!menu) return null;
+
+                // 2. 信息流场景：优先寻找推文上直接暴露的“关注”按钮
+                const directFollowBtn = container.querySelector('button[data-testid$="-follow"]');
+                if (directFollowBtn) {
+                    tools.forceClick(directFollowBtn);
+                    if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = true;
+                    return true;
+                }
+
+                // 3. 信息流场景：通过右上角“三个点”菜单关注 (修复两连击 Bug)
+                const caret = container.querySelector('[data-testid="caret"]'); 
+                if (!caret) return null;
+                
+                tools.forceClick(caret); 
+                
+                // 【核心修复】：动态轮询等待菜单出现，最多等待 600ms (12 * 50ms)
+                let menu = null;
+                for (let i = 0; i < 12; i++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    const menus = Array.from(document.querySelectorAll('[role="menu"]'));
+                    if (menus.length > 0) {
+                        menu = menus[menus.length - 1];
+                        // 确保菜单里的 item 已经渲染完毕
+                        if (menu.querySelector('[role="menuitem"]')) break;
+                    }
+                }
+
+                if (!menu) {
+                    tools.forceClick(document.body); // 清除可能卡住的空菜单
+                    return null;
+                }
+
                 const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
                 let targetBtn = null, willFollow = true;
                 for (let item of items) {
@@ -100,17 +138,30 @@
                     if (/Unfollow|取消关注/i.test(text)) { targetBtn = item; willFollow = false; break; }
                     else if (/Follow|关注/i.test(text)) { targetBtn = item; willFollow = true; break; }
                 }
-                if (!targetBtn) { tools.forceClick(document.body); return null; }
+
+                if (!targetBtn) { 
+                    tools.forceClick(document.body); // 没找到关注按钮，关掉菜单
+                    return null; 
+                }
+                
                 tools.forceClick(targetBtn);
+                
+                // 处理取消关注的二次确认弹窗
                 if (!willFollow) {
                     await new Promise(r => setTimeout(r, 200));
                     const confirmBtn = document.querySelector('[data-testid="confirmationSheetConfirm"]');
-                    if (confirmBtn) tools.forceClick(confirmBtn);
-                    else {
+                    if (confirmBtn) {
+                        tools.forceClick(confirmBtn);
+                    } else {
                         const dialog = document.querySelector('[role="dialog"], [data-testid="mask"]');
-                        if (dialog) { const btns = Array.from(dialog.querySelectorAll('[role="button"]')); const confirmTarget = btns.find(b => /Unfollow|取消关注|确认/i.test(b.textContent)); if (confirmTarget) tools.forceClick(confirmTarget); }
+                        if (dialog) { 
+                            const btns = Array.from(dialog.querySelectorAll('[role="button"]')); 
+                            const confirmTarget = btns.find(b => /Unfollow|取消关注|确认/i.test(b.textContent)); 
+                            if (confirmTarget) tools.forceClick(confirmTarget); 
+                        }
                     }
                 }
+                
                 if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = willFollow;
                 return willFollow;
             },
