@@ -17,20 +17,50 @@
             getGalleryImages: () => {
                 if (!window.__mix01AdCache) window.__mix01AdCache = new WeakSet();
                 if (!window.__mix01NonAdCache) window.__mix01NonAdCache = new WeakSet();
-                return Array.from(document.querySelectorAll('img, video')).filter(media => {
-                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') return false;
+                
+                const allMedia = Array.from(document.querySelectorAll('img, video'));
+                const validMedia = [];
+
+                // 【核心算法优化：视口深度截断】
+                // 提前获取视口高度，避免在循环中反复读取引发重排
+                const viewportHeight = window.innerHeight;
+                // 设定上下 1.5 屏的缓冲区域（在此区域外的媒体直接忽略，不参与耗时的属性计算）
+                const topBound = -viewportHeight * 1.5;
+                const bottomBound = viewportHeight * 2.5;
+
+                for (let i = 0; i < allMedia.length; i++) {
+                    const media = allMedia[i];
+                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') continue;
+
+                    // 获取当前元素的位置
                     const rect = media.getBoundingClientRect();
-                    if (rect.width <= 50 || rect.height <= 50 || window.getComputedStyle(media).display === 'none') return false;
+
+                    // 【性能拦截器】：如果图片距离当前视口太远，直接跳过！极大降低计算量
+                    if (rect.top < topBound || rect.bottom > bottomBound) continue;
+
+                    // 只有在视野附近的元素，才去进行昂贵的尺寸判断和 DOM 树回溯
+                    if (rect.width <= 50 || rect.height <= 50 || window.getComputedStyle(media).display === 'none') continue;
+                    
                     const article = media.closest('article');
                     if (article) {
-                        if (window.__mix01AdCache.has(article)) return false;
-                        if (window.__mix01NonAdCache.has(article)) return true;
+                        if (window.__mix01AdCache.has(article)) continue;
+                        if (window.__mix01NonAdCache.has(article)) {
+                            validMedia.push(media);
+                            continue;
+                        }
                         const isAd = Array.from(article.querySelectorAll('span')).some(span => /^(广告|赞助|Ad|Promoted)$/i.test(span.textContent.trim()));
-                        if (isAd) { window.__mix01AdCache.add(article); return false; }
-                        else { window.__mix01NonAdCache.add(article); return true; }
+                        if (isAd) { 
+                            window.__mix01AdCache.add(article); 
+                            continue; 
+                        } else { 
+                            window.__mix01NonAdCache.add(article); 
+                            validMedia.push(media);
+                            continue;
+                        }
                     }
-                    return true;
-                });
+                    validMedia.push(media);
+                }
+                return validMedia;
             },
             getStates: (container) => {
                 const likeBtn = container.querySelector('[data-testid="unlike"]');
@@ -210,92 +240,107 @@
             },
 
             like: async (container, media) => {
-                const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
-                const btns = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getExactButtons(ctx.illustId);
-                const btn = btns.likeBtn;
+                // 【并发防封号锁】防止键盘连按导致请求风暴
+                if (window.__mix01PixivLikeLock) return null;
+                window.__mix01PixivLikeLock = true;
 
-                let isCurrentlyLiked = false;
-                if (btn) {
-                    isCurrentlyLiked = btn.innerHTML.includes('rgb(255, 64, 96)') || btn.innerHTML.includes('#FF4060') || btn.getAttribute('aria-pressed') === 'true';
-                }
+                try {
+                    const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
+                    const btns = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getExactButtons(ctx.illustId);
+                    const btn = btns.likeBtn;
 
-                const src = media ? (media.src || 'video') : '';
-                if (window.__mix01LikeMediaCache && window.__mix01LikeMediaCache[src] !== undefined) {
-                    isCurrentlyLiked = window.__mix01LikeMediaCache[src];
-                }
-
-                if (!isCurrentlyLiked) {
-                    if (ctx.illustId && ctx.token) {
-                        try {
-                            await fetch('/ajax/illusts/bookmarks/add', {
-                                method: 'POST',
-                                headers: { 'x-csrf-token': ctx.token, 'content-type': 'application/json', 'accept': 'application/json' },
-                                body: JSON.stringify({ illust_id: ctx.illustId, restrict: 0, comment: '', tags: [] })
-                            });
-                            // 【核心修复】：纯视觉涂红！坚决不调用 forceClick(btn)，防止触发误伤！
-                            if (btn) {
-                                btn.innerHTML = btn.innerHTML.replace(/currentColor|#\w{3,6}/g, '#FF4060');
-                                btn.setAttribute('aria-pressed', 'true');
-                            }
-                            return true;
-                        } catch (e) {}
-                    }
-                    if (btn) { tools.forceClick(btn); return true; }
-                } else {
+                    let isCurrentlyLiked = false;
                     if (btn) {
-                        // 如果是取消点赞，因为没做 API 接口，走原生的模拟点击即可
-                        tools.forceClick(btn);
-                        return false;
+                        isCurrentlyLiked = btn.innerHTML.includes('rgb(255, 64, 96)') || btn.innerHTML.includes('#FF4060') || btn.getAttribute('aria-pressed') === 'true';
                     }
+
+                    const src = media ? (media.src || 'video') : '';
+                    if (window.__mix01LikeMediaCache && window.__mix01LikeMediaCache[src] !== undefined) {
+                        isCurrentlyLiked = window.__mix01LikeMediaCache[src];
+                    }
+
+                    if (!isCurrentlyLiked) {
+                        if (ctx.illustId && ctx.token) {
+                            try {
+                                await fetch('/ajax/illusts/bookmarks/add', {
+                                    method: 'POST',
+                                    headers: { 'x-csrf-token': ctx.token, 'content-type': 'application/json', 'accept': 'application/json' },
+                                    body: JSON.stringify({ illust_id: ctx.illustId, restrict: 0, comment: '', tags: [] })
+                                });
+                                // 纯视觉涂红
+                                if (btn) {
+                                    btn.innerHTML = btn.innerHTML.replace(/currentColor|#\w{3,6}/g, '#FF4060');
+                                    btn.setAttribute('aria-pressed', 'true');
+                                }
+                                return true;
+                            } catch (e) {}
+                        }
+                        if (btn) { tools.forceClick(btn); return true; }
+                    } else {
+                        if (btn) {
+                            tools.forceClick(btn);
+                            return false;
+                        }
+                    }
+                    return null;
+                } finally {
+                    // 请求结束后，延迟 400ms 解锁，保护后端 API
+                    setTimeout(() => { window.__mix01PixivLikeLock = false; }, 400);
                 }
-                return null;
             },
 
             follow: async (container, media) => {
-                const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
-                const btns = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getExactButtons(ctx.illustId);
-                const btn = btns.followBtn;
+                // 【并发防封号锁】
+                if (window.__mix01PixivFollowLock) return null;
+                window.__mix01PixivFollowLock = true;
 
-                let isCurrentlyFollowed = false;
-                if (btn) {
-                    isCurrentlyFollowed = /已关注|Following/i.test(btn.textContent) || btn.dataset.clickAction === 'unfollow' || btn.getAttribute('aria-pressed') === 'true' || btn.dataset.variant === 'Secondary';
-                }
+                try {
+                    const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
+                    const btns = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getExactButtons(ctx.illustId);
+                    const btn = btns.followBtn;
 
-                if (btns.authorName && window.__mix01FollowAuthorCache && window.__mix01FollowAuthorCache[btns.authorName] !== undefined) {
-                    isCurrentlyFollowed = window.__mix01FollowAuthorCache[btns.authorName];
-                }
-
-                if (!isCurrentlyFollowed) {
-                    if (ctx.userId && ctx.token) {
-                        try {
-                            const formData = new URLSearchParams(); formData.append('mode', 'add'); formData.append('type', 'user'); formData.append('user_id', ctx.userId); formData.append('tag', ''); formData.append('restrict', '0'); formData.append('format', 'json');
-                            await fetch('/bookmark_add.php', { method: 'POST', headers: { 'x-csrf-token': ctx.token, 'Content-Type': 'application/x-www-form-urlencoded' }, body: formData.toString() });
-                            // 同样纯视觉更新
-                            if (btn) {
-                                btn.textContent = '已关注';
-                                btn.dataset.variant = 'Secondary';
-                                btn.setAttribute('aria-pressed', 'true');
-                            }
-                            return true;
-                        } catch (e) {}
+                    let isCurrentlyFollowed = false;
+                    if (btn) {
+                        isCurrentlyFollowed = /已关注|Following/i.test(btn.textContent) || btn.dataset.clickAction === 'unfollow' || btn.getAttribute('aria-pressed') === 'true' || btn.dataset.variant === 'Secondary';
                     }
-                    if (btn) { tools.forceClick(btn); return true; }
-                } else {
-                    if (ctx.userId && ctx.token) {
-                        try {
-                            const formData = new URLSearchParams(); formData.append('mode', 'delete'); formData.append('type', 'user'); formData.append('user_id', ctx.userId);
-                            await fetch('/bookmark_add.php', { method: 'POST', headers: { 'x-csrf-token': ctx.token, 'Content-Type': 'application/x-www-form-urlencoded' }, body: formData.toString() });
-                            if (btn) {
-                                btn.textContent = '关注';
-                                btn.dataset.variant = 'Primary';
-                                btn.setAttribute('aria-pressed', 'false');
-                            }
-                            return false;
-                        } catch (e) {}
+
+                    if (btns.authorName && window.__mix01FollowAuthorCache && window.__mix01FollowAuthorCache[btns.authorName] !== undefined) {
+                        isCurrentlyFollowed = window.__mix01FollowAuthorCache[btns.authorName];
                     }
-                    if (btn) { tools.forceClick(btn); return false; }
+
+                    if (!isCurrentlyFollowed) {
+                        if (ctx.userId && ctx.token) {
+                            try {
+                                const formData = new URLSearchParams(); formData.append('mode', 'add'); formData.append('type', 'user'); formData.append('user_id', ctx.userId); formData.append('tag', ''); formData.append('restrict', '0'); formData.append('format', 'json');
+                                await fetch('/bookmark_add.php', { method: 'POST', headers: { 'x-csrf-token': ctx.token, 'Content-Type': 'application/x-www-form-urlencoded' }, body: formData.toString() });
+                                if (btn) {
+                                    btn.textContent = '已关注';
+                                    btn.dataset.variant = 'Secondary';
+                                    btn.setAttribute('aria-pressed', 'true');
+                                }
+                                return true;
+                            } catch (e) {}
+                        }
+                        if (btn) { tools.forceClick(btn); return true; }
+                    } else {
+                        if (ctx.userId && ctx.token) {
+                            try {
+                                const formData = new URLSearchParams(); formData.append('mode', 'delete'); formData.append('type', 'user'); formData.append('user_id', ctx.userId);
+                                await fetch('/bookmark_add.php', { method: 'POST', headers: { 'x-csrf-token': ctx.token, 'Content-Type': 'application/x-www-form-urlencoded' }, body: formData.toString() });
+                                if (btn) {
+                                    btn.textContent = '关注';
+                                    btn.dataset.variant = 'Primary';
+                                    btn.setAttribute('aria-pressed', 'false');
+                                }
+                                return false;
+                            } catch (e) {}
+                        }
+                        if (btn) { tools.forceClick(btn); return false; }
+                    }
+                    return null;
+                } finally {
+                    setTimeout(() => { window.__mix01PixivFollowLock = false; }, 400);
                 }
-                return null;
             },
 
             downloadVideo: async (container, media) => {
@@ -317,11 +362,27 @@
             isFallback: true, 
             getContainer: (media) => media.parentElement || document.body,
             getGalleryImages: () => {
-                return Array.from(document.querySelectorAll('img, video')).filter(media => {
-                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') return false;
+                const allMedia = Array.from(document.querySelectorAll('img, video'));
+                const validMedia = [];
+                
+                const viewportHeight = window.innerHeight;
+                const topBound = -viewportHeight * 1.5;
+                const bottomBound = viewportHeight * 2.5;
+
+                for (let i = 0; i < allMedia.length; i++) {
+                    const media = allMedia[i];
+                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') continue;
+                    
                     const rect = media.getBoundingClientRect();
-                    return rect.width > 80 && rect.height > 80 && window.getComputedStyle(media).display !== 'none';
-                });
+                    
+                    // 全局兜底同样应用视口截断
+                    if (rect.top < topBound || rect.bottom > bottomBound) continue;
+                    
+                    if (rect.width > 80 && rect.height > 80 && window.getComputedStyle(media).display !== 'none') {
+                        validMedia.push(media);
+                    }
+                }
+                return validMedia;
             },
             getStates: () => ({ isLiked: null, isFollowed: null, authorName: '' }), 
             like: async () => null,

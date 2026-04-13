@@ -6,18 +6,26 @@
     const tools = {
         getLargestImgSrc: function (container) {
             if (!container || !container.querySelectorAll) return '';
+            const imgs = Array.from(container.querySelectorAll('img, [style*="background"]'));
+            
+            // 优化：1. 批量读取 DOM 属性，防止与后续的计算逻辑混杂导致 Layout Thrashing (布局抖动)
+            const measurements = imgs.map(el => ({
+                el: el,
+                area: el.clientWidth * el.clientHeight,
+                bgStyle: el.style.backgroundImage
+            }));
+
+            // 优化：2. 纯内存逻辑计算
             let maxArea = 0;
             let bestSrc = '';
-            const imgs = container.querySelectorAll('img, [style*="background"]');
-            imgs.forEach(el => {
-                const area = el.clientWidth * el.clientHeight;
-                let src = el.src;
-                if (!src && el.style.backgroundImage) {
-                    const match = el.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
+            measurements.forEach(item => {
+                let src = item.el.src;
+                if (!src && item.bgStyle) {
+                    const match = item.bgStyle.match(/url\(['"]?(.*?)['"]?\)/);
                     if (match) src = match[1];
                 }
-                if (area >= maxArea && src) {
-                    maxArea = area;
+                if (item.area >= maxArea && src) {
+                    maxArea = item.area;
                     bestSrc = src;
                 }
             });
