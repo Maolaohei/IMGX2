@@ -8,10 +8,15 @@ window.Mix01InputController = class InputController {
             activeZoom: 2.0, isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
             isZoomManuallyChanged: false, keyboardSwitchTime: 0, isTicking: false,
             bgClickCount: 0, bgClickTimer: null, lastTarget: null, lastFoundMedia: null,
-            isRenderingLock: false // 【神级优化 2】: rAF 帧对齐渲染锁
+            isRenderingLock: false,
+            _galleryCache: null,
+            _galleryCacheDirty: true
         };
         this.preloadedUrls = new Set();
         this.preloadedUrlsQueue = [];
+
+        // 【终极修复】：快捷键缓存池（按需动态编译，拒绝硬编码映射错误）
+        this.compiledKeys = {}; 
 
         this.mediaObserver = new MutationObserver((mutations) => {
             let newSrc = null;
@@ -26,7 +31,6 @@ window.Mix01InputController = class InputController {
                 this.state.currentSrc = newSrc;
                 if (this.render.elements.img.src !== this.state.currentHdUrl) {
                     this.render.elements.img.src = newSrc;
-                    // 触发后台解码防止冻结
                     this.render.elements.img.decode().catch(()=>{});
                     this.updateRender();
                 }
@@ -54,16 +58,19 @@ window.Mix01InputController = class InputController {
         document.addEventListener('mouseleave', () => this.handleMouseLeave(), { capture: true, passive: true });
         document.addEventListener('keydown', (e) => this.handleKeyDown(e), true);
         
-        // 【新增】：全局鼠标滚轮支持（接入了 rAF 锁，丝滑缩放）
         document.addEventListener('wheel', (e) => {
             if (this.render.elements.viewer.style.display === 'block') {
                 e.preventDefault();
                 const delta = e.deltaY > 0 ? -0.15 : 0.15;
                 this.state.activeZoom = Math.max(0.2, this.state.activeZoom + delta);
                 this.state.isZoomManuallyChanged = true;
-                this.updateRender(e); // 自动接入硬件调度器
+                this.updateRender(e); 
             }
         }, { passive: false });
+
+        document.addEventListener('scroll', () => {
+            this.state._galleryCacheDirty = true;
+        }, { passive: true, capture: true });
         
         this.render.elements.viewer.addEventListener('click', (e) => this.handleBackgroundClick(e));
         this.render.elements.viewer.addEventListener('dblclick', (e) => {
@@ -173,7 +180,6 @@ window.Mix01InputController = class InputController {
                         this.updateRender(); 
                     }
 
-                    // 【神仙级优化 1】：抛弃 onload，强制调用底层 C++ 线程进行后台像素解码，拒绝主线程冻结！
                     const tempImg = new Image();
                     tempImg.src = hdUrl;
                     
@@ -193,7 +199,6 @@ window.Mix01InputController = class InputController {
                                 }
                             }
                             
-                            // 因为后台已经解码完，赋值后将达到 0 卡顿渲染
                             this.render.elements.img.src = hdUrl; 
                             this.updateRender(); 
                         }
@@ -263,7 +268,6 @@ window.Mix01InputController = class InputController {
         this.render.setStyle(this.render.elements.img, 'max-width', 'none'); 
         this.render.setStyle(this.render.elements.img, 'max-height', 'none');
 
-        // 【神仙级优化 1】：切图防冻结渐变入场
         this.render.setStyle(this.render.elements.img, 'opacity', '0');
         this.render.elements.img.src = target.src;
         this.render.elements.img.decode().then(() => {
@@ -293,14 +297,10 @@ window.Mix01InputController = class InputController {
 
     updateRender(e = null) {
         if (!this.state.currentMedia || !this.state.cachedRect) return;
-
-        // 如果已经被锁定，直接丢弃该次多余的渲染请求
         if (this.state.isRenderingLock) return;
         this.state.isRenderingLock = true;
 
         requestAnimationFrame(() => {
-            // 【终极修复 1】：异步回调执行时，必须进行二次校验！
-            // 防止在等待的 16ms 内用户移出图片，导致 cachedRect 变成 null 引发崩溃
             if (!this.state.currentMedia || !this.state.cachedRect) {
                 this.state.isRenderingLock = false;
                 return;
@@ -322,10 +322,8 @@ window.Mix01InputController = class InputController {
                     this.state.isZoomManuallyChanged, this.state.currentSrc
                 );
             } catch (err) {
-                // 拦截一切未知渲染异常，防止阻断运行
                 console.warn("Mix01 Render Engine:", err);
             } finally {
-                // 【终极修复 2】：利用 finally 护盾，无论计算过程发生什么意外，绝对保证强制释放锁！
                 this.state.isRenderingLock = false;
             }
         });
@@ -343,7 +341,6 @@ window.Mix01InputController = class InputController {
         this.state.customLensHeight = null;
         this.state.isZoomManuallyChanged = false;
         window.isFetchingMore = false;
-        // 【终极修复 3】：关闭查看器时，主动清空渲染锁状态，防止残余锁死
         this.state.isRenderingLock = false;
     }
 
@@ -373,25 +370,45 @@ window.Mix01InputController = class InputController {
 
     matchCombo(e, comboStr) {
         if (!comboStr) return false;
-        const parts = comboStr.toLowerCase().split('+').map(s => s.trim());
-        const key = parts.pop();
-        const ctrl = parts.includes('ctrl');
-        const shift = parts.includes('shift');
-        const alt = parts.includes('alt');
-        if (e.ctrlKey !== ctrl) return false;
-        if (e.shiftKey !== shift) return false;
-        if (e.altKey !== alt) return false;
-        return e.key.toLowerCase() === key || e.code.toLowerCase() === key;
+        // 【终极修复】：直接使用传入的真实快捷键字符串（如 'ctrl+f12'）作为字典的 Key，实现懒加载编译
+        let config = this.compiledKeys[comboStr];
+        if (!config) {
+            const parts = comboStr.toLowerCase().split('+').map(s => s.trim());
+            config = { 
+                key: parts.pop(), 
+                ctrl: parts.includes('ctrl'), 
+                shift: parts.includes('shift'), 
+                alt: parts.includes('alt') 
+            };
+            this.compiledKeys[comboStr] = config; // 解析过一次后直接存入内存
+        }
+        
+        if (e.ctrlKey !== config.ctrl) return false;
+        if (e.shiftKey !== config.shift) return false;
+        if (e.altKey !== config.alt) return false;
+        return e.key.toLowerCase() === config.key || e.code.toLowerCase() === config.key;
     }
 
     getGalleryImages() {
+        if (!this.state._galleryCacheDirty && this.state._galleryCache) {
+            return this.state._galleryCache;
+        }
+
         const adapter = window.Mix01Utils.getImmersiveAdapter();
-        if (adapter && adapter.getGalleryImages) return adapter.getGalleryImages();
-        return Array.from(document.querySelectorAll('img, video')).filter(media => {
-            if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz') return false;
-            const rect = media.getBoundingClientRect();
-            return rect.width > 50 && rect.height > 50 && window.getComputedStyle(media).display !== 'none';
-        });
+        let result = [];
+        if (adapter && adapter.getGalleryImages) {
+            result = adapter.getGalleryImages();
+        } else {
+            result = Array.from(document.querySelectorAll('img, video')).filter(media => {
+                if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz') return false;
+                const rect = media.getBoundingClientRect();
+                return rect.width > 50 && rect.height > 50; 
+            });
+        }
+        
+        this.state._galleryCache = result;
+        this.state._galleryCacheDirty = false;
+        return result;
     }
 
     performSwitch(nextImg, msgText) {
@@ -534,6 +551,7 @@ window.Mix01InputController = class InputController {
         const modeList = ['partial', 'full-follow', 'full-center'];
         const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
         
+        // 【终极修复】：恢复使用 this.cfg.keys.xxxx，它会动态读取用户设置的值（如 'ctrl+f12'）
         if (this.matchCombo(e, this.cfg.keys.immersive)) {
             e.preventDefault();
             if (this.cfg.state.isImmersive) {
@@ -602,7 +620,7 @@ window.Mix01InputController = class InputController {
         else if (k === this.cfg.keys.mirror) { this.cfg.state.mirror *= -1; up = true; } 
         else if (k === this.cfg.keys.mode) { 
             if (this.cfg.state.isImmersive) {
-                this.render.showToast(`⚠️ 请双击背景或按 ${this.cfg.keys.immersive.toUpperCase()} 退出沉浸模式`);
+                this.render.showToast(`⚠️ 请双击背景或按 ${(this.cfg.keys.immersive || 'Esc').toUpperCase()} 退出沉浸模式`);
             } else {
                 this.cfg.state.mode = modeList[(modeList.indexOf(this.cfg.state.mode) + 1) % modeList.length]; 
                 this.cfg.siteModes[window.location.hostname] = this.cfg.state.mode;
@@ -614,7 +632,7 @@ window.Mix01InputController = class InputController {
         else if (k === this.cfg.keys.zoomIn || k === '+') { this.state.activeZoom += 0.5; this.state.isZoomManuallyChanged = true; this.render.showToast(`${this.state.activeZoom.toFixed(1)}x`); up = true; } 
         else if (k === this.cfg.keys.zoomOut || k === '-') { this.state.activeZoom = Math.max(0.5, this.state.activeZoom - 0.5); this.state.isZoomManuallyChanged = true; this.render.showToast(`${this.state.activeZoom.toFixed(1)}x`); up = true; }
         
-        else if (this.matchCombo(e, 'escape')) {
+        else if (e.key === 'Escape') {
             if (this.cfg.state.isImmersive) {
                 this.exitImmersive();
                 e.preventDefault(); return;
@@ -643,6 +661,7 @@ window.Mix01InputController = class InputController {
                     window.scrollBy({ top: window.innerHeight * 0.8, behavior: 'smooth' });
                     
                     setTimeout(() => {
+                        this.state._galleryCacheDirty = true;
                         const newGallery = this.getGalleryImages();
                         let newIdx = newGallery.indexOf(this.state.currentMedia);
                         if (newIdx === -1) newIdx = newGallery.findIndex(media => (media.src||'video') === this.state.currentSrc);
@@ -664,6 +683,7 @@ window.Mix01InputController = class InputController {
                     window.scrollBy({ top: -window.innerHeight * 0.8, behavior: 'smooth' });
                     
                     setTimeout(() => {
+                        this.state._galleryCacheDirty = true;
                         const newGallery = this.getGalleryImages();
                         let newIdx = newGallery.indexOf(this.state.currentMedia);
                         if (newIdx === -1) newIdx = newGallery.findIndex(media => (media.src||'video') === this.state.currentSrc);

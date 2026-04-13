@@ -20,11 +20,7 @@
                 
                 const allMedia = Array.from(document.querySelectorAll('img, video'));
                 const validMedia = [];
-
-                // 【核心算法优化：视口深度截断】
-                // 提前获取视口高度，避免在循环中反复读取引发重排
                 const viewportHeight = window.innerHeight;
-                // 设定上下 1.5 屏的缓冲区域（在此区域外的媒体直接忽略，不参与耗时的属性计算）
                 const topBound = -viewportHeight * 1.5;
                 const bottomBound = viewportHeight * 2.5;
 
@@ -32,14 +28,11 @@
                     const media = allMedia[i];
                     if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') continue;
 
-                    // 获取当前元素的位置
                     const rect = media.getBoundingClientRect();
-
-                    // 【性能拦截器】：如果图片距离当前视口太远，直接跳过！极大降低计算量
                     if (rect.top < topBound || rect.bottom > bottomBound) continue;
 
-                    // 只有在视野附近的元素，才去进行昂贵的尺寸判断和 DOM 树回溯
-                    if (rect.width <= 50 || rect.height <= 50 || window.getComputedStyle(media).display === 'none') continue;
+                    // 【优化 1】：完全剔除 getComputedStyle，仅靠尺寸进行 O(1) 过滤隐藏元素
+                    if (rect.width <= 50 || rect.height <= 50) continue;
                     
                     const article = media.closest('article');
                     if (article) {
@@ -139,13 +132,10 @@
 
             _getPixivContext: async (media) => {
                 let illustId = null;
-
-                // 1. 【最精确】从沉浸模式的媒体 src 中提取 ID
                 if (media && media.src) {
                     const m = media.src.match(/\/(\d+)_/);
                     if (m) illustId = m[1];
                 }
-                // 2. 从父级 a 标签提取
                 if (!illustId && media) {
                     const parentA = media.closest('a');
                     if (parentA && parentA.href) {
@@ -153,13 +143,11 @@
                         if (m) illustId = m[1];
                     }
                 }
-                // 3. 兜底：当前网页主图 ID
                 if (!illustId) {
                     illustId = window.location.pathname.match(/artworks\/(\d+)/)?.[1];
                 }
 
                 let userId = null;
-                // 顺藤摸瓜：通过 illustId 找到它对应的画师链接
                 let authorLink = null;
                 if (illustId) {
                     const specificLink = document.querySelector(`a[href*="/artworks/${illustId}"]`);
@@ -190,7 +178,6 @@
                 return { illustId, userId, token };
             },
 
-            // 【核心新增】精确制导搜寻当前 ID 对应的按钮
             _getExactButtons: (illustId) => {
                 let likeBtn = null, followBtn = null, authorName = '';
                 const isMain = illustId === window.location.pathname.match(/artworks\/(\d+)/)?.[1];
@@ -200,7 +187,6 @@
                     followBtn = document.querySelector('[data-click-label="follow"], .gtm-main-follow');
                     authorName = document.querySelector('.user-name, [data-click-label="creator"]')?.textContent || '';
                 } else if (illustId) {
-                    // 它是瀑布流里的小图，去寻找它真正的主人
                     const link = document.querySelector(`a[href*="/artworks/${illustId}"]`);
                     if (link) {
                         const container = link.closest('li') || link.parentElement.parentElement || link.parentElement;
@@ -211,13 +197,11 @@
                         }
                     }
                 }
-                // 关注按钮的兜底
                 if (!followBtn) followBtn = document.querySelector('[data-click-label="follow"], .gtm-main-follow');
                 return { likeBtn, followBtn, authorName };
             },
 
             getStates: async (container, media) => {
-                // 读取状态时，强制等待上下文解析完毕（此方法被我重构为了异步）
                 const ctx = await Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getPixivContext(media);
                 const btns = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net']._getExactButtons(ctx.illustId);
 
@@ -240,7 +224,6 @@
             },
 
             like: async (container, media) => {
-                // 【并发防封号锁】防止键盘连按导致请求风暴
                 if (window.__mix01PixivLikeLock) return null;
                 window.__mix01PixivLikeLock = true;
 
@@ -267,7 +250,6 @@
                                     headers: { 'x-csrf-token': ctx.token, 'content-type': 'application/json', 'accept': 'application/json' },
                                     body: JSON.stringify({ illust_id: ctx.illustId, restrict: 0, comment: '', tags: [] })
                                 });
-                                // 纯视觉涂红
                                 if (btn) {
                                     btn.innerHTML = btn.innerHTML.replace(/currentColor|#\w{3,6}/g, '#FF4060');
                                     btn.setAttribute('aria-pressed', 'true');
@@ -284,13 +266,11 @@
                     }
                     return null;
                 } finally {
-                    // 请求结束后，延迟 400ms 解锁，保护后端 API
                     setTimeout(() => { window.__mix01PixivLikeLock = false; }, 400);
                 }
             },
 
             follow: async (container, media) => {
-                // 【并发防封号锁】
                 if (window.__mix01PixivFollowLock) return null;
                 window.__mix01PixivFollowLock = true;
 
@@ -364,7 +344,6 @@
             getGalleryImages: () => {
                 const allMedia = Array.from(document.querySelectorAll('img, video'));
                 const validMedia = [];
-                
                 const viewportHeight = window.innerHeight;
                 const topBound = -viewportHeight * 1.5;
                 const bottomBound = viewportHeight * 2.5;
@@ -374,11 +353,10 @@
                     if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') continue;
                     
                     const rect = media.getBoundingClientRect();
-                    
-                    // 全局兜底同样应用视口截断
                     if (rect.top < topBound || rect.bottom > bottomBound) continue;
                     
-                    if (rect.width > 80 && rect.height > 80 && window.getComputedStyle(media).display !== 'none') {
+                    // 【优化 1】：完全剔除 getComputedStyle
+                    if (rect.width > 80 && rect.height > 80) {
                         validMedia.push(media);
                     }
                 }
