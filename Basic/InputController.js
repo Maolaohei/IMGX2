@@ -7,7 +7,8 @@ window.Mix01InputController = class InputController {
             currentMedia: null, currentSrc: null, currentHdUrl: null, cachedRect: null,
             activeZoom: 2.0, isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
             isZoomManuallyChanged: false, keyboardSwitchTime: 0, isTicking: false,
-            bgClickCount: 0, bgClickTimer: null, lastTarget: null, lastFoundMedia: null
+            bgClickCount: 0, bgClickTimer: null, lastTarget: null, lastFoundMedia: null,
+            isRenderingLock: false // 【神级优化 2】: rAF 帧对齐渲染锁
         };
         this.preloadedUrls = new Set();
         this.preloadedUrlsQueue = [];
@@ -25,6 +26,8 @@ window.Mix01InputController = class InputController {
                 this.state.currentSrc = newSrc;
                 if (this.render.elements.img.src !== this.state.currentHdUrl) {
                     this.render.elements.img.src = newSrc;
+                    // 触发后台解码防止冻结
+                    this.render.elements.img.decode().catch(()=>{});
                     this.updateRender();
                 }
                 this.upgradeToHDQuietly(this.state.currentMedia, newSrc);
@@ -50,6 +53,17 @@ window.Mix01InputController = class InputController {
         document.addEventListener('mouseout', (e) => this.handleMouseOut(e), { capture: true, passive: true });
         document.addEventListener('mouseleave', () => this.handleMouseLeave(), { capture: true, passive: true });
         document.addEventListener('keydown', (e) => this.handleKeyDown(e), true);
+        
+        // 【新增】：全局鼠标滚轮支持（接入了 rAF 锁，丝滑缩放）
+        document.addEventListener('wheel', (e) => {
+            if (this.render.elements.viewer.style.display === 'block') {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? -0.15 : 0.15;
+                this.state.activeZoom = Math.max(0.2, this.state.activeZoom + delta);
+                this.state.isZoomManuallyChanged = true;
+                this.updateRender(e); // 自动接入硬件调度器
+            }
+        }, { passive: false });
         
         this.render.elements.viewer.addEventListener('click', (e) => this.handleBackgroundClick(e));
         this.render.elements.viewer.addEventListener('dblclick', (e) => {
@@ -120,13 +134,12 @@ window.Mix01InputController = class InputController {
     }
 
     handleMouseOver(e) {
-    if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
-    // 只处理直接命中 img/video 的情况，复杂情况交给 mousemove 的 rAF 节流处理
-    const t = e.target;
-    if ((t.tagName === 'IMG' || t.tagName === 'VIDEO') && (t.src || t.tagName === 'VIDEO')) {
-        this.triggerZoom(t);
+        if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
+        const t = e.target;
+        if ((t.tagName === 'IMG' || t.tagName === 'VIDEO') && (t.src || t.tagName === 'VIDEO')) {
+            this.triggerZoom(t);
+        }
     }
-}
 
     handleMouseOut(e) {
         if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return; 
@@ -141,59 +154,61 @@ window.Mix01InputController = class InputController {
         if (Date.now() - this.state.keyboardSwitchTime > 500) this.hideViewer();
     }
 
-   async upgradeToHDQuietly(target, src) {
-    if (this.cfg.state.loadHD !== 'true') return;
-    const myTask = src;
-    try {
-        if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
-            const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, src);
-            if (hdUrl && hdUrl !== src && !this.render.hdState.badUrls.has(hdUrl)) {
-                
-                if (this.state.currentHdUrl === hdUrl) return; 
-                this.state.currentHdUrl = hdUrl;
+    async upgradeToHDQuietly(target, src) {
+        if (this.cfg.state.loadHD !== 'true') return;
+        try {
+            if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
+                const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, src);
+                if (hdUrl && hdUrl !== src && !this.render.hdState.badUrls.has(hdUrl)) {
+                    
+                    if (this.state.currentHdUrl === hdUrl) return; 
+                    this.state.currentHdUrl = hdUrl;
+                    window.__mix01HdUrlMap = window.__mix01HdUrlMap || {};
+                    window.__mix01HdUrlMap[src] = hdUrl;
 
-                // 存入全局 HD URL 缓存，供下载/复制时优先使用
-                window.__mix01HdUrlMap = window.__mix01HdUrlMap || {};
-                window.__mix01HdUrlMap[src] = hdUrl;
+                    if (!this.render.elements.img.src || this.render.elements.img.src === '') {
+                        this.render.setStyle(this.render.elements.spinner, 'display', 'block');
+                    } else {
+                        this.render.hdState.isLoading = true;
+                        this.updateRender(); 
+                    }
 
-                if (!this.render.elements.img.src || this.render.elements.img.src === '') {
-                    this.render.setStyle(this.render.elements.spinner, 'display', 'block');
-                } else {
-                    this.render.hdState.isLoading = true;
-                    this.updateRender(); 
-                }
+                    // 【神仙级优化 1】：抛弃 onload，强制调用底层 C++ 线程进行后台像素解码，拒绝主线程冻结！
+                    const tempImg = new Image();
+                    tempImg.src = hdUrl;
+                    
+                    try {
+                        await tempImg.decode(); 
+                        
+                        if (this.state.currentHdUrl === hdUrl && this.state.currentMedia === target) {
+                            this.render.setStyle(this.render.elements.spinner, 'display', 'none');
+                            this.render.hdState.isLoading = false; 
 
-                const tempImg = new Image();
-                tempImg.onload = () => { 
-                    if (this.state.currentHdUrl === hdUrl && this.state.currentMedia === target) {
-                        this.render.setStyle(this.render.elements.spinner, 'display', 'none');
-                        this.render.hdState.isLoading = false; 
-
-                        if (!this.cfg.state.isImmersive && this.cfg.state.mode === 'partial' && this.state.isSmallOptimized && !this.state.isZoomManuallyChanged) {
-                            const nw = tempImg.naturalWidth, nh = tempImg.naturalHeight;
-                            if (nw > 350 || nh > 350) {
-                                this.state.customLensWidth = Math.min(nw, window.innerWidth * 0.9);
-                                this.state.customLensHeight = Math.min(nh, window.innerHeight * 0.9);
-                                this.state.activeZoom = nw / (this.state.cachedRect.width || 1);
+                            if (!this.cfg.state.isImmersive && this.cfg.state.mode === 'partial' && this.state.isSmallOptimized && !this.state.isZoomManuallyChanged) {
+                                const nw = tempImg.naturalWidth, nh = tempImg.naturalHeight;
+                                if (nw > 350 || nh > 350) {
+                                    this.state.customLensWidth = Math.min(nw, window.innerWidth * 0.9);
+                                    this.state.customLensHeight = Math.min(nh, window.innerHeight * 0.9);
+                                    this.state.activeZoom = nw / (this.state.cachedRect.width || 1);
+                                }
                             }
+                            
+                            // 因为后台已经解码完，赋值后将达到 0 卡顿渲染
+                            this.render.elements.img.src = hdUrl; 
+                            this.updateRender(); 
                         }
-                        this.render.elements.img.src = hdUrl; 
-                        this.updateRender(); 
+                    } catch (err) {
+                        if (this.state.currentHdUrl === hdUrl) {
+                            this.render.setStyle(this.render.elements.spinner, 'display', 'none');
+                            this.render.hdState.isLoading = false;
+                            this.updateRender(); 
+                        }
+                        this.render.hdState.badUrls.add(hdUrl); 
                     }
-                };
-                tempImg.onerror = () => {
-                    if (this.state.currentHdUrl === hdUrl) {
-                        this.render.setStyle(this.render.elements.spinner, 'display', 'none');
-                        this.render.hdState.isLoading = false;
-                        this.updateRender(); 
-                    }
-                    this.render.hdState.badUrls.add(hdUrl); 
-                };
-                tempImg.src = hdUrl;
+                }
             }
-        }
-    } catch (error) { console.warn('Mix01 Engine 解析失败:', error); }
-}
+        } catch (error) { console.warn('Mix01 Engine 解析失败:', error); }
+    }
 
     async triggerZoom(target) {
         if (target === this.state.currentMedia && (target.src || 'video') === this.state.currentSrc) return;
@@ -245,9 +260,17 @@ window.Mix01InputController = class InputController {
         this.render.setStyle(this.render.elements.canvas, 'display', 'none');
         this.render.setStyle(this.render.elements.progressContainer, 'display', 'none');
         this.render.setStyle(this.render.elements.img, 'display', 'block');
-        this.render.elements.img.src = target.src;
         this.render.setStyle(this.render.elements.img, 'max-width', 'none'); 
         this.render.setStyle(this.render.elements.img, 'max-height', 'none');
+
+        // 【神仙级优化 1】：切图防冻结渐变入场
+        this.render.setStyle(this.render.elements.img, 'opacity', '0');
+        this.render.elements.img.src = target.src;
+        this.render.elements.img.decode().then(() => {
+            this.render.setStyle(this.render.elements.img, 'opacity', '1');
+        }).catch(() => {
+            this.render.setStyle(this.render.elements.img, 'opacity', '1');
+        });
 
         if (this.cfg.state.smallImageOptimization) {
             if (this.state.cachedRect.width <= 50 && this.state.cachedRect.height <= 50) { this.state.activeZoom = 9.0; this.state.isSmallOptimized = true; }
@@ -258,7 +281,6 @@ window.Mix01InputController = class InputController {
         }
 
         this.updateRender();
-
         this.upgradeToHDQuietly(target, target.src);
 
         this.render.setStyle(this.render.elements.viewer, 'display', 'block');
@@ -271,20 +293,42 @@ window.Mix01InputController = class InputController {
 
     updateRender(e = null) {
         if (!this.state.currentMedia || !this.state.cachedRect) return;
-        const rect = this.state.cachedRect;
-        const x = e ? e.clientX : window.lastMouseX;
-        const y = e ? e.clientY : window.lastMouseY;
-        const xP = (x - rect.left) / (rect.width || 1);
-        const yP = (y - rect.top) / (rect.height || 1);
-        
-        const isVideo = this.state.currentMedia.tagName === 'VIDEO';
-        const activeMedia = isVideo ? this.render.elements.canvas : this.render.elements.img;
-        
-        this.state.activeZoom = this.render.updateLayout(
-            activeMedia, rect, this.state.activeZoom, xP, yP, 
-            this.state.isSmallOptimized, this.state.customLensWidth, this.state.customLensHeight, 
-            this.state.isZoomManuallyChanged, this.state.currentSrc
-        );
+
+        // 如果已经被锁定，直接丢弃该次多余的渲染请求
+        if (this.state.isRenderingLock) return;
+        this.state.isRenderingLock = true;
+
+        requestAnimationFrame(() => {
+            // 【终极修复 1】：异步回调执行时，必须进行二次校验！
+            // 防止在等待的 16ms 内用户移出图片，导致 cachedRect 变成 null 引发崩溃
+            if (!this.state.currentMedia || !this.state.cachedRect) {
+                this.state.isRenderingLock = false;
+                return;
+            }
+
+            try {
+                const rect = this.state.cachedRect;
+                const x = e ? e.clientX : window.lastMouseX;
+                const y = e ? e.clientY : window.lastMouseY;
+                const xP = (x - rect.left) / (rect.width || 1);
+                const yP = (y - rect.top) / (rect.height || 1);
+                
+                const isVideo = this.state.currentMedia.tagName === 'VIDEO';
+                const activeMedia = isVideo ? this.render.elements.canvas : this.render.elements.img;
+                
+                this.state.activeZoom = this.render.updateLayout(
+                    activeMedia, rect, this.state.activeZoom, xP, yP, 
+                    this.state.isSmallOptimized, this.state.customLensWidth, this.state.customLensHeight, 
+                    this.state.isZoomManuallyChanged, this.state.currentSrc
+                );
+            } catch (err) {
+                // 拦截一切未知渲染异常，防止阻断运行
+                console.warn("Mix01 Render Engine:", err);
+            } finally {
+                // 【终极修复 2】：利用 finally 护盾，无论计算过程发生什么意外，绝对保证强制释放锁！
+                this.state.isRenderingLock = false;
+            }
+        });
     }
 
     hideViewer() {
@@ -299,6 +343,8 @@ window.Mix01InputController = class InputController {
         this.state.customLensHeight = null;
         this.state.isZoomManuallyChanged = false;
         window.isFetchingMore = false;
+        // 【终极修复 3】：关闭查看器时，主动清空渲染锁状态，防止残余锁死
+        this.state.isRenderingLock = false;
     }
 
     exitImmersive() {
@@ -418,28 +464,27 @@ window.Mix01InputController = class InputController {
     }
 
     triggerGlobalDownload() {
-    const adapter = window.Mix01Utils.getImmersiveAdapter();
-    if (this.state.currentMedia.tagName === 'VIDEO') {
-        if (adapter && adapter.downloadVideo) {
-            this.render.showToast("⏳ 正在打通后台提取原版最高清文件...");
-            adapter.downloadVideo(adapter.getContainer(this.state.currentMedia), this.state.currentMedia).then(videoUrl => {
-                if (videoUrl === 'NATIVE_CLICKED') this.render.showToast("✅ 已调用浏览器插件原生下载机制！");
-                else if (videoUrl) {
-                    this.render.showToast("✅ 提取成功，开始强制下载！");
-                    chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: videoUrl });
-                } else this.render.showToast("❌ 无法解析该媒体的直链");
-            });
+        const adapter = window.Mix01Utils.getImmersiveAdapter();
+        if (this.state.currentMedia.tagName === 'VIDEO') {
+            if (adapter && adapter.downloadVideo) {
+                this.render.showToast("⏳ 正在打通后台提取原版最高清文件...");
+                adapter.downloadVideo(adapter.getContainer(this.state.currentMedia), this.state.currentMedia).then(videoUrl => {
+                    if (videoUrl === 'NATIVE_CLICKED') this.render.showToast("✅ 已调用浏览器插件原生下载机制！");
+                    else if (videoUrl) {
+                        this.render.showToast("✅ 提取成功，开始强制下载！");
+                        chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: videoUrl });
+                    } else this.render.showToast("❌ 无法解析该媒体的直链");
+                });
+            } else {
+                this.render.showToast("⚠️ 当前站点暂未适配一键视频提取");
+            }
         } else {
-            this.render.showToast("⚠️ 当前站点暂未适配一键视频提取");
-        }
-    } else {
-        // 优先级：① 已解析的 HD URL（即使图片还在加载中）② 当前显示的 img.src
-        const downloadUrl = this.state.currentHdUrl || this.render.elements.img.src;
-        if (downloadUrl) {
-            window.Mix01Utils.downloadImage(downloadUrl, this.render);
+            const downloadUrl = this.state.currentHdUrl || this.render.elements.img.src;
+            if (downloadUrl) {
+                window.Mix01Utils.downloadImage(downloadUrl, this.render);
+            }
         }
     }
-}
 
     triggerPreload() {
         if (!this.cfg.state.isImmersive || this.cfg.state.preloadCount <= 0 || !this.state.currentMedia) return;

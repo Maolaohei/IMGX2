@@ -43,6 +43,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
         `;
         document.head.appendChild(styleBlock);
 
+        // 强绑过渡动画，配合 inputController 里的 decode().then 使得渐现平滑如丝
+        this.elements.img.style.setProperty('transition', 'opacity 0.2s ease, transform 0.1s cubic-bezier(0.2, 0, 0.2, 1)', 'important');
+
         try { this.canvasCtx = this.elements.canvas.getContext('2d', { alpha: false }); } catch(e) {}
 
         Object.assign(this.elements.hint.style, {
@@ -77,44 +80,41 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     setupMessageListener() {
-    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        const getUrlAndProcess = async (actionFn) => {
-            const src = request.clickedUrl || this.elements.img.src;
+        chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+            const getUrlAndProcess = async (actionFn) => {
+                const src = request.clickedUrl || this.elements.img.src;
 
-            // 优先查 HD 缓存，命中则直接用，避免重复解析
-            window.__mix01HdUrlMap = window.__mix01HdUrlMap || {};
-            if (window.__mix01HdUrlMap[src]) {
-                actionFn(window.__mix01HdUrlMap[src]);
-                return;
-            }
+                window.__mix01HdUrlMap = window.__mix01HdUrlMap || {};
+                if (window.__mix01HdUrlMap[src]) {
+                    actionFn(window.__mix01HdUrlMap[src]);
+                    return;
+                }
 
-            // 缓存未命中：走 RuleEngine 异步解析
-            const targetEl = request.clickedUrl
-                ? (window.lastHoveredSrc === request.clickedUrl ? window.lastHoveredMedia : document.createElement('img'))
-                : this.elements.img;
-            let targetUrl = src;
-            if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
-                targetUrl = await window.Mix01RuleEngine.getHighResUrl(targetEl, src);
-            }
-            // 解析结果写入缓存，方便下次直接命中
-            if (targetUrl && targetUrl !== src) {
-                window.__mix01HdUrlMap[src] = targetUrl;
-            }
-            actionFn(targetUrl);
-        };
+                const targetEl = request.clickedUrl
+                    ? (window.lastHoveredSrc === request.clickedUrl ? window.lastHoveredMedia : document.createElement('img'))
+                    : this.elements.img;
+                let targetUrl = src;
+                if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
+                    targetUrl = await window.Mix01RuleEngine.getHighResUrl(targetEl, src);
+                }
+                if (targetUrl && targetUrl !== src) {
+                    window.__mix01HdUrlMap[src] = targetUrl;
+                }
+                actionFn(targetUrl);
+            };
 
-        if (request.action === "getHDUrl") {
-            getUrlAndProcess(url => sendResponse({ url: url }));
-            return true;
-        } else if (request.action === "copyHDUrl") {
-            getUrlAndProcess(url => { window.Mix01Utils.copyImageToClipboard(url, this); sendResponse({ status: "ok" }); });
-            return true;
-        } else if (request.action === "saveHDUrl") {
-            getUrlAndProcess(url => { window.Mix01Utils.downloadImage(url, this); sendResponse({ status: "ok" }); });
-            return true;
-        }
-    });
-}
+            if (request.action === "getHDUrl") {
+                getUrlAndProcess(url => sendResponse({ url: url }));
+                return true;
+            } else if (request.action === "copyHDUrl") {
+                getUrlAndProcess(url => { window.Mix01Utils.copyImageToClipboard(url, this); sendResponse({ status: "ok" }); });
+                return true;
+            } else if (request.action === "saveHDUrl") {
+                getUrlAndProcess(url => { window.Mix01Utils.downloadImage(url, this); sendResponse({ status: "ok" }); });
+                return true;
+            }
+        });
+    }
 
     setStyle(el, prop, val) {
         if (!this.styleCache.has(el)) this.styleCache.set(el, {});
@@ -285,6 +285,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 offsetY = (tH > sH) ? -(tH - sH) * yP : offsetY;
             }
             
+            // 此处的 transform 矩阵将被 rAF 完美接管，形成纯粹的高性能渲染管道
             this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px, ${offsetY}px, 0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`);
             this.setStyle(activeMedia, 'left', '0px'); this.setStyle(activeMedia, 'top', '0px');
         } 
@@ -396,13 +397,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
         let isFallback = false;
 
         if (currentMedia && adapter) {
-            // 检查是否为未适配的兜底页面
             isFallback = adapter.isFallback === true;
             
-            // 只有适配过的页面（如Pixiv/Twitter）才去请求状态
             if (!isFallback && adapter.getStates) {
                 const container = adapter.getContainer ? adapter.getContainer(currentMedia) : document.body;
-                // 【核心修复】：变量名必须是 currentMedia
                 const states = await adapter.getStates(container, currentMedia);
                 
                 if (states) {
@@ -413,13 +411,11 @@ window.Mix01MediaRenderer = class MediaRenderer {
             }
         }
 
-        // 动态构建 HUD 提示框 HTML
         let hudHTML = `<div style="display:flex; align-items:center; gap: 15px;">`;
         hudHTML += `<span class="hud-status-item">切换 <span class="kbd-btn">${(keys.keyMode || 'V').toUpperCase()}</span></span>`;
         hudHTML += `<span class="hud-status-item">暂停 <span class="kbd-btn">SPACE</span></span>`;
         hudHTML += `<span class="hud-status-item" style="color: #4A90E2; font-weight: bold;">原图下载 <span class="kbd-btn">${(keys.keyDownloadVideo || 'D').toUpperCase()}</span></span>`;
         
-        // 如果不是兜底页面，才显示社交功能
         if (!isFallback) {
             hudHTML += `<span class="hud-status-item" style="color: ${likeColor}">${likeIcon} ${likeText} <span class="kbd-btn">${(keys.keyLike || 'L').toUpperCase()}</span></span>`;
             hudHTML += `<span class="hud-status-item" style="color: ${followColor}">${followIcon} ${followText} <span class="kbd-btn">${(keys.keyFollow || 'F').toUpperCase()}</span></span>`;
@@ -429,15 +425,12 @@ window.Mix01MediaRenderer = class MediaRenderer {
         hudHTML += `<span class="hud-status-item">退出 <span class="kbd-btn">双击</span></span>`;
         hudHTML += `</div>`;
 
-        // 渲染并显示提示框
         this.elements.hint.innerHTML = hudHTML;
         this.setStyle(this.elements.hint, 'display', 'block');
         
-        // 触发浏览器重绘以保证过渡动画生效
         void this.elements.hint.offsetWidth;
         this.setStyle(this.elements.hint, 'opacity', '1');
 
-        // 3秒后自动隐藏提示框（防打扰机制）
         clearTimeout(this.hudState.hintTimer);
         this.hudState.hintTimer = setTimeout(() => {
             this.setStyle(this.elements.hint, 'opacity', '0');
