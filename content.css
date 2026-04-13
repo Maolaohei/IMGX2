@@ -7,7 +7,7 @@
     overflow: hidden !important;
 }
 
-/* 强力重置图片，防 Vue/React 样式污染 */
+/* 强力重置图片，防 Vue/React 样式污染 + 开启强制 GPU 硬件加速 */
 #img-zoom-pro-viewer-xyz img#zoom-img-xyz,
 #img-zoom-pro-viewer-xyz canvas#zoom-canvas-xyz {
     all: unset !important;
@@ -24,8 +24,13 @@
     z-index: 2147483646 !important;
     filter: none !important;
     box-shadow: 0 10px 40px rgba(0,0,0,0.8) !important;
+    
+    /* 【性能核心】: 强制分配独立 GPU 复合层，解决 4K 原图缩放与拖拽时的掉帧卡顿 */
+    will-change: transform !important;
+    backface-visibility: hidden !important;
+    transform-style: preserve-3d !important;
+    contain: paint layout !important;
 }
-
 /* 高级加载环动画 */
 #zoom-loading-xyz {
     position: absolute !important;

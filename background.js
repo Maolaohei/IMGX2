@@ -14,23 +14,37 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 let _historyCache = null; 
+
 function saveToHistory(filename, statusMsg) {
     const timeStr = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     const newItem = { time: timeStr, filename: filename, status: statusMsg };
     chrome.storage.local.get(['mix01_download_history'], (res) => {
         _historyCache = res.mix01_download_history || [];
+        // 优化：使用 pop() 剔除尾部元素，代替耗时的 slice() 数组截取重建
         _historyCache.unshift(newItem);
-        if (_historyCache.length > 50) _historyCache = _historyCache.slice(0, 50);
+        if (_historyCache.length > 50) _historyCache.pop(); 
         chrome.storage.local.set({ mix01_download_history: _historyCache });
     });
 }
 
+// 缓存全局变量，避免每次下载都重新执行 O(N) 的正则拆分和编译
+let _compiledBase64Domains = null;
+let _lastBase64DomainsStr = null;
+
 function isBase64Domain(url, userDomainsStr) {
     try {
-        const host = new URL(url.startsWith('//') ? 'https:' + url : url).hostname;
         if (!userDomainsStr) return false;
-        const domains = userDomainsStr.split(',').filter(d => d.trim()).map(d => new RegExp(`^${d.trim().replace(/\*/g, '.*')}$`, 'i'));
-        return domains.some(re => re.test(host));
+        
+        // 只有当用户在设置面板修改了配置时，才重新计算
+        if (userDomainsStr !== _lastBase64DomainsStr) {
+            _lastBase64DomainsStr = userDomainsStr;
+            _compiledBase64Domains = userDomainsStr.split(',')
+                .filter(d => d.trim())
+                .map(d => new RegExp(`^${d.trim().replace(/\*/g, '.*')}$`, 'i'));
+        }
+
+        const host = new URL(url.startsWith('//') ? 'https:' + url : url).hostname;
+        return _compiledBase64Domains.some(re => re.test(host));
     } catch (e) { return false; }
 }
 
@@ -47,7 +61,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 let res = await fetch(initialUrl);
                 let finalUrl = initialUrl;
 
-                // Pixiv 404 自愈逻辑 (保留)
+                // 优化：Pixiv 404 自愈逻辑 (并发竞速 Promise.any)
                 if (res.status === 404 && initialUrl.includes('pximg.net')) {
                     const altUrls = [];
                     if (initialUrl.includes('_ugoira0')) {
@@ -57,11 +71,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         const targetExt = initialUrl.endsWith('.png') ? '.jpg' : '.png';
                         altUrls.push(initialUrl.replace(/\.\w+$/, targetExt));
                     }
-                    for (let alt of altUrls) {
+                    
+                    if (altUrls.length > 0) {
                         try {
-                            const testRes = await fetch(alt, { method: 'HEAD' });
-                            if (testRes.ok) { res = testRes; finalUrl = alt; break; }
-                        } catch(e) {}
+                            // 并发发起 HEAD 请求，谁先返回 200 OK 谁就赢
+                            const fetchPromises = altUrls.map(alt => 
+                                fetch(alt, { method: 'HEAD' }).then(testRes => {
+                                    if (testRes.ok) return { res: testRes, url: alt };
+                                    throw new Error('Not ok');
+                                })
+                            );
+                            const firstSuccess = await Promise.any(fetchPromises);
+                            finalUrl = firstSuccess.url;
+                            
+                            // 修正原版 Bug：如果使用了 Base64，HEAD 请求是没有 Body 的，必须重新发起 GET
+                            if (useBase64) {
+                                res = await fetch(finalUrl);
+                            } else {
+                                res = firstSuccess.res; 
+                            }
+                        } catch(e) {
+                            // 所有备用链接都 404，跳出继续走报错逻辑
+                        }
                     }
                 }
 
@@ -97,15 +128,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 // --------------------------------
 
                 const contentType = res.headers.get('content-type') || 'image/jpeg';
+                
                 if (useBase64) {
-                    const buffer = await res.arrayBuffer();
-                    const bytes = new Uint8Array(buffer);
-                    let binary = '';
-                    for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
-                    const dataUrl = `data:${contentType};base64,${btoa(binary)}`;
-                    chrome.downloads.download({ url: dataUrl, filename: finalDownloadName, saveAs: false }, () => {
-                        saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功 (Base64)");
-                    });
+                    // 【神级优化】：抛弃 JS 循环拼接，调用浏览器原生 C++ 引擎进行高并发、零阻塞的 Base64 编码
+                    const blob = await res.blob();
+                    const reader = new FileReader();
+                    
+                    reader.onloadend = () => {
+                        const dataUrl = reader.result; // 这里直接就是原生生成好的 base64 字符串
+                        chrome.downloads.download({ url: dataUrl, filename: finalDownloadName, saveAs: false }, () => {
+                            saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功 (Base64)");
+                        });
+                    };
+                    
+                    reader.onerror = () => {
+                        saveToHistory(finalDownloadName, "❌ 失败 (Base64 编码异常)");
+                    };
+                    
+                    // 发起底层异步读取
+                    reader.readAsDataURL(blob);
                 } else {
                     chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
                         saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功");
