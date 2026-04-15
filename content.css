@@ -18,7 +18,8 @@
     box-sizing: border-box !important;
     overflow: hidden !important;
     transition: background-color 0.4s var(--mix01-ease-spring), backdrop-filter 0.4s var(--mix01-ease-spring) !important;
-    /* 👇 新增：彻底屏蔽整个容器的文本/元素选中高亮 */
+    
+    /* 核心修复：彻底屏蔽整个容器的文本/元素选中高亮 */
     user-select: none !important;
     -webkit-user-select: none !important;
 }
@@ -40,7 +41,7 @@
     filter: none !important;
     box-shadow: var(--mix01-shadow-ambient) !important;
     
-    /* 👇 新增：斩断原生拖拽幽灵图与选中机制 */
+    /* 核心修复：斩断原生拖拽幽灵图与选中机制 */
     -webkit-user-drag: none !important;
     user-select: none !important;
     -webkit-user-select: none !important;
@@ -95,7 +96,6 @@
     display: none !important; 
     z-index: 2147483649 !important;
     pointer-events: none !important;
-    /* 双重边框实现无缝流光效果 */
     border: 3px solid rgba(255, 255, 255, 0.1) !important;
     border-top-color: var(--mix01-accent) !important;
     animation: mix01-spin 0.8s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
@@ -159,7 +159,6 @@
 .status-original { background-color: rgba(30, 30, 30, 0.7) !important; }
 .status-hd { background-color: rgba(30, 136, 229, 0.8) !important; }
 
-/* 高清解析中的扫光动画 */
 @keyframes mix01-shimmer {
     0% { background-position: 200% center; }
     100% { background-position: -200% center; }
