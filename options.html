@@ -1,116 +1,201 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mix01 Immersive Engine 配置</title>
     <style>
-        body { width: 360px; padding: 15px; font-family: system-ui, sans-serif; background: #f9f9f9; color: #333; margin: 0; }
-        h3 { margin-top: 0; font-size: 16px; border-bottom: 2px solid #ddd; padding-bottom: 8px; }
-        
-        /* 标签页导航样式 */
-        .tabs { display: flex; border-bottom: 2px solid #ddd; margin-bottom: 15px; }
-        .tab-btn { flex: 1; padding: 8px 0; border: none; background: transparent; cursor: pointer; font-size: 14px; font-weight: bold; color: #777; transition: all 0.2s; border-bottom: 2px solid transparent; margin-bottom: -2px; }
-        .tab-btn:hover { color: #4A90E2; }
-        .tab-btn.active { color: #4A90E2; border-bottom: 2px solid #4A90E2; }
-        
-        /* 标签页内容容器 */
-        .tab-content { display: none; min-height: 280px; }
-        .tab-content.active { display: block; animation: mix01-fade-in 0.2s ease; }
-        @keyframes mix01-fade-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
-
-        .row { margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; transition: opacity 0.3s; }
-        input[type="number"] { width: 60px; padding: 4px; border: 1px solid #ccc; border-radius: 4px; }
-        input[type="text"] { width: 40px; padding: 4px; border: 1px solid #ccc; border-radius: 4px; text-align: center; text-transform: uppercase; font-family: monospace; font-weight: bold; }
-        select { padding: 4px; border: 1px solid #ccc; border-radius: 4px; width: 140px; }
-        
-        #disclaimerOverlay {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: #fff; z-index: 100; padding: 20px; box-sizing: border-box;
-            display: none; flex-direction: column;
+        /* 基础与系统字体栈 */
+        :root {
+            --primary: #007AFF;
+            --primary-hover: #0056b3;
+            --bg: #F2F2F7;
+            --card-bg: #FFFFFF;
+            --text-main: #1C1C1E;
+            --text-muted: #8E8E93;
+            --border: #E5E5EA;
+            --radius: 12px;
         }
-        .disclaimer-box { font-size: 13px; color: #d32f2f; background: #fff5f5; border: 1px solid #feb2b2; padding: 10px; border-radius: 6px; margin-bottom: 15px; line-height: 1.5; }
-        .agree-btn { background: #d32f2f; color: white; border: none; padding: 10px; border-radius: 6px; cursor: pointer; font-weight: bold; transition: background 0.2s; }
-        .agree-btn:hover { background: #b71c1c; }
-        #agreedStatus { font-size: 12px; color: #008a00; font-weight: bold; display: none; margin-bottom: 10px; text-align: center; }
+        body { width: 380px; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text-main); margin: 0; -webkit-font-smoothing: antialiased; }
+        h3 { margin: 0 0 12px 0; font-size: 15px; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
         
-        .btn-container { margin-top: 15px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid #ddd; padding-top: 15px; }
-        button { border: none; padding: 10px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: bold; transition: background 0.2s; }
-        #saveBtn { background: #4A90E2; color: white; }
-        #saveBtn:hover { background: #357ABD; }
-        #resetBtn { background: #e0e0e0; color: #555; }
-        #resetBtn:hover { background: #c8c8c8; }
-        .success-text { color: #008a00; font-size: 13px; display: none; text-align: center; margin-top: 12px; font-weight: bold; }
+        /* 标签页导航 */
+        .tabs { display: flex; background: rgba(118, 118, 128, 0.12); padding: 3px; border-radius: 8px; margin-bottom: 20px; }
+        .tab-btn { flex: 1; padding: 8px 0; border: none; background: transparent; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-muted); transition: all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
+        .tab-btn.active { background: #fff; color: var(--text-main); box-shadow: 0 3px 8px rgba(0,0,0,0.04), 0 3px 1px rgba(0,0,0,0.04); }
         
-        .history-box { max-height: 160px; overflow-y: auto; background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 5px; font-size: 12px; margin-bottom: 10px; word-break: break-all; box-shadow: inset 0 2px 4px rgba(0,0,0,0.05); }
-        .history-item { border-bottom: 1px solid #eee; padding: 6px 4px; }
+        .tab-content { display: none; min-height: 320px; }
+        .tab-content.active { display: block; animation: fade-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
+        @keyframes fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* 卡片式设置项 */
+        .card { background: var(--card-bg); border-radius: var(--radius); padding: 4px 16px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }
+        .row { padding: 12px 0; display: flex; justify-content: space-between; align-items: center; font-size: 14px; border-bottom: 1px solid var(--border); font-weight: 500; }
+        .row:last-child { border-bottom: none; }
+        .row.vertical { flex-direction: column; align-items: flex-start; gap: 8px; }
+        
+        /* 表单控件优化 */
+        input[type="number"] { width: 64px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; text-align: center; outline: none; transition: border 0.2s; }
+        input[type="number"]:focus { border-color: var(--primary); }
+        input[type="text"] { width: 44px; padding: 6px; border: 1px solid var(--border); border-radius: 6px; text-align: center; text-transform: uppercase; font-family: ui-monospace, monospace; font-weight: bold; font-size: 13px; outline: none; transition: border 0.2s; background: #fafafa; }
+        input[type="text"]:focus { border-color: var(--primary); background: #fff; }
+        input.wide-input { width: 100%; box-sizing: border-box; text-transform: none; text-align: left; font-weight: normal; }
+        select { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; outline: none; background: #fafafa; cursor: pointer; }
+
+        /* iOS 风格 Switch 开关 */
+        .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #E5E5EA; transition: .3s; border-radius: 24px; }
+        .slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 2px; bottom: 2px; background-color: white; transition: .3s cubic-bezier(0.2, 0.8, 0.2, 1); border-radius: 50%; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+        input:checked + .slider { background-color: #34C759; }
+        input:checked + .slider:before { transform: translateX(20px); }
+
+        /* 免责声明覆盖层 */
+        #disclaimerOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.95); backdrop-filter: blur(10px); z-index: 100; padding: 30px; box-sizing: border-box; display: none; flex-direction: column; justify-content: center; text-align: center; }
+        .disclaimer-box { font-size: 13px; color: #1C1C1E; background: #fff; border: 1px solid var(--border); padding: 16px; border-radius: 12px; margin: 20px 0; line-height: 1.6; text-align: left; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .agree-btn { background: var(--primary); color: white; border: none; padding: 14px; border-radius: 10px; cursor: pointer; font-size: 15px; font-weight: 600; transition: background 0.2s; width: 100%; }
+        .agree-btn:hover { background: var(--primary-hover); }
+        #agreedStatus { font-size: 12px; color: #34C759; font-weight: 600; display: none; margin-bottom: 16px; text-align: center; background: rgba(52, 199, 89, 0.1); padding: 6px; border-radius: 6px; }
+
+        /* 底部操作区 */
+        .btn-container { display: flex; flex-direction: column; gap: 10px; margin-top: 24px; }
+        .btn { border: none; padding: 12px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.2s; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-hover); transform: translateY(-1px); }
+        .btn-secondary { background: #E5E5EA; color: var(--text-main); }
+        .btn-secondary:hover { background: #D1D1D6; }
+        .success-text { color: #34C759; font-size: 13px; display: none; text-align: center; margin-top: 12px; font-weight: 600; animation: fade-in 0.2s ease; }
+        
+        /* 历史记录 */
+        .history-box { max-height: 200px; overflow-y: auto; font-size: 12px; margin-bottom: 12px; word-break: break-all; }
+        .history-item { padding: 10px 0; border-bottom: 1px solid var(--border); }
         .history-item:last-child { border-bottom: none; }
-        .footer { margin-top: 10px; font-size: 11px; color: #888; text-align: center; }
+        .history-item-header { display: flex; justify-content: space-between; margin-bottom: 4px; }
+        .footer { margin-top: 20px; font-size: 11px; color: var(--text-muted); text-align: center; font-weight: 500; }
+        
+        /* 滚动条美化 */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #D1D1D6; border-radius: 4px; }
     </style>
 </head>
 <body>
     <div id="disclaimerOverlay">
-        <h3 style="color:#d32f2f">⚠️ 免责声明</h3>
+        <h2 style="color:var(--text-main); margin-bottom: 0;">🛡️ 许可协议</h2>
         <div class="disclaimer-box">
-            本软件承诺完全本地运行，无联网行为。设计初衷仅为方便图片浏览。如使用本软件造成任何法律、数据问题，责任自负。同意后才能使用。
+            本引擎承诺完全本地运行，无任何遥测或数据收集行为。其设计初衷仅为优化极客用户的本地媒体浏览体验。<br><br>
+            <b>注意：</b>因使用本软件引发的任何版权、数据或网络风控问题，由使用者自行承担。继续操作即代表您同意此条款。
         </div>
-        <button id="agreeBtn" class="agree-btn">我已阅读并同意以上条款</button>
+        <button id="agreeBtn" class="agree-btn">我已阅读并同意</button>
     </div>
 
-    <div id="agreedStatus">✅ 您已同意免责声明</div>
+    <div id="agreedStatus">✓ 已授权运行</div>
 
     <div class="tabs">
-        <button class="tab-btn active" data-target="tab-basic">基础与视图</button>
-        <button class="tab-btn" data-target="tab-keys">快捷键</button>
-        <button class="tab-btn" data-target="tab-adv">高级与历史</button>
+        <button class="tab-btn active" data-target="tab-basic">基础视觉</button>
+        <button class="tab-btn" data-target="tab-keys">按键绑定</button>
+        <button class="tab-btn" data-target="tab-adv">高级与实验</button>
     </div>
 
     <div id="tab-basic" class="tab-content active">
-        <div class="row"><label>CDN 高清解析:</label><select id="loadHD"><option value="true">开启</option><option value="false">关闭</option></select></div>
-        <div class="row"><label title="针对特小图自动启用更高初始倍数">小型图片智能优化:</label><input type="checkbox" id="smallImageOptimization" style="width:18px;height:18px;"></div>
-        <div class="row"><label>显示画质提示:</label><input type="checkbox" id="showStatus" style="width:18px;height:18px;"></div>
-        <div class="row"><label>开启突破限制:</label><input type="checkbox" id="breakoutView" style="width:18px;height:18px;"></div>
-        <div class="row"><label title="开启后，鼠标悬停不会在原位放大视频（沉浸模式不受影响）">默认视图禁止视频放大:</label><input type="checkbox" id="disableVideoDefaultView" style="width:18px;height:18px;"></div>
-        <div class="row"><label title="开启后，鼠标悬停不会在原位放大视频（沉浸模式不受影响）">默认视图禁止视频放大:</label><input type="checkbox" id="disableVideoDefaultView" style="width:18px;height:18px;"></div>
-        <div class="row"><label>默认倍数:</label><input type="number" id="zoomLevel" step="0.5" min="1.5"></div>
-        
-        <div class="row"><label title="开启后，允许通过鼠标滚轮放大/缩小当前图片">启用滚轮缩放:</label><input type="checkbox" id="wheelZoomEnabled" style="width:18px;height:18px;"></div>
-        
-        <div class="row" id="viewModeRow"><label>默认视图模式:</label><select id="mode"><option value="partial">局部放大</option><option value="full-follow">整体跟随</option><option value="full-center">智能避让</option></select></div>
-        
-        <div style="border-top: 1px dashed #ccc; margin: 15px 0;"></div>
+        <h3>视图核心</h3>
+        <div class="card">
+            <div class="row">
+                <label>默认视图模式</label>
+                <select id="mode">
+                    <option value="partial">🔍 局部放大</option>
+                    <option value="full-follow">🖼️ 整体跟随</option>
+                    <option value="full-center">📐 智能避让</option>
+                </select>
+            </div>
+            <div class="row">
+                <label>默认放大倍数</label>
+                <input type="number" id="zoomLevel" step="0.5" min="1.0">
+            </div>
+            <div class="row">
+                <label>启用滚轮动态缩放</label>
+                <label class="switch"><input type="checkbox" id="wheelZoomEnabled"><span class="slider"></span></label>
+            </div>
+            <div class="row">
+                <label title="针对小图自动启用更高倍数">微型图片智能优化</label>
+                <label class="switch"><input type="checkbox" id="smallImageOptimization"><span class="slider"></span></label>
+            </div>
+        </div>
 
-        <div class="row"><label style="font-weight:bold;color:#4A90E2">🌌 开启沉浸图库模式:</label><input type="checkbox" id="isImmersive" style="width:18px;height:18px;"></div>
-        <div class="row" id="preloadRow"><label title="设置沉浸模式下自动提前解析并加载的高清图片数量">沉浸预加载张数:</label><input type="number" id="preloadCount" min="0" max="20"></div>
+        <h3>引擎特性</h3>
+        <div class="card">
+            <div class="row">
+                <label>深层 CDN 高清解析</label>
+                <select id="loadHD"><option value="true">开启</option><option value="false">关闭</option></select>
+            </div>
+            <div class="row">
+                <label>显示 HUD 画质分析</label>
+                <label class="switch"><input type="checkbox" id="showStatus"><span class="slider"></span></label>
+            </div>
+            <div class="row">
+                <label>突破视口尺寸限制</label>
+                <label class="switch"><input type="checkbox" id="breakoutView"><span class="slider"></span></label>
+            </div>
+            <div class="row">
+                <label title="默认视图下屏蔽视频元素放大">常规视图忽略视频</label>
+                <label class="switch"><input type="checkbox" id="disableVideoDefaultView"><span class="slider"></span></label>
+            </div>
+        </div>
+
+        <h3>🌌 沉浸图库模式</h3>
+        <div class="card">
+            <div class="row">
+                <label style="color: var(--primary);">强制全局沉浸加载</label>
+                <label class="switch"><input type="checkbox" id="isImmersive"><span class="slider"></span></label>
+            </div>
+            <div class="row" id="preloadRow">
+                <label>预读幻影缓存张数</label>
+                <input type="number" id="preloadCount" min="0" max="20">
+            </div>
+        </div>
     </div>
 
     <div id="tab-keys" class="tab-content">
-        <div class="row"><label>沉浸模式开关:</label><input type="text" id="keyImmersive" style="width: 75px;"></div>
-        <div class="row"><label>播放(Space)/全局提取(D):</label><div style="display:flex;gap:5px"><input type="text" id="keyPlayVideo" placeholder="Space"><input type="text" id="keyDownloadVideo" placeholder="D"></div></div>
-        <div class="row"><label>喜欢(L)/关注(F):</label><div style="display:flex;gap:5px"><input type="text" id="keyLike" placeholder="L"><input type="text" id="keyFollow" placeholder="F"></div></div>
-        <div class="row"><label style="color:#f91880; font-weight:bold;">一键双连(S)/三连(Q):</label><div style="display:flex;gap:5px"><input type="text" id="keyDouble" placeholder="S"><input type="text" id="keyTriple" placeholder="Q"></div></div>
-        <div class="row"><label>切换/旋转:</label><div style="display:flex;gap:5px"><input type="text" id="keyMode"><input type="text" id="keyRotate"></div></div>
-        <div class="row"><label>缩放 (+/-):</label><div style="display:flex;gap:5px"><input type="text" id="keyZoomIn"><input type="text" id="keyZoomOut"></div></div>
-        <div class="row"><label>镜像反转:</label><input type="text" id="keyMirror"></div>
+        <div class="card">
+            <div class="row"><label>唤醒沉浸模式</label><input type="text" id="keyImmersive" style="width: 80px;"></div>
+            <div class="row"><label>视图切换 / 旋转</label><div style="display:flex;gap:6px"><input type="text" id="keyMode"><input type="text" id="keyRotate"></div></div>
+            <div class="row"><label>缩放 (+ / -)</label><div style="display:flex;gap:6px"><input type="text" id="keyZoomIn"><input type="text" id="keyZoomOut"></div></div>
+            <div class="row"><label>镜像反转</label><input type="text" id="keyMirror"></div>
+        </div>
+        <h3>沉浸流媒体指令</h3>
+        <div class="card">
+            <div class="row"><label>播放(Space) / 提取(D)</label><div style="display:flex;gap:6px"><input type="text" id="keyPlayVideo" placeholder="SPACE"><input type="text" id="keyDownloadVideo" placeholder="D"></div></div>
+            <div class="row"><label>喜欢(L) / 关注(F)</label><div style="display:flex;gap:6px"><input type="text" id="keyLike" placeholder="L"><input type="text" id="keyFollow" placeholder="F"></div></div>
+            <div class="row"><label style="color: #FF2D55;">双连(S) / 三连(Q)</label><div style="display:flex;gap:6px"><input type="text" id="keyDouble" placeholder="S"><input type="text" id="keyTriple" placeholder="Q"></div></div>
+        </div>
     </div>
 
     <div id="tab-adv" class="tab-content">
-        <div class="row" style="flex-direction: column; align-items: flex-start;">
-            <label style="margin-bottom: 5px;" title="支持通配符，多个用逗号分隔。(Pixiv域名已内置免配)">自定义 Base64 特权域名:</label>
-            <input type="text" id="base64Domains" placeholder="*.aa.com, bb.cc.com" style="width: 100%; box-sizing: border-box; text-transform: none; font-family: monospace; font-weight: normal; text-align: left;">
-            <span style="font-size: 11px; color: #888; margin-top: 4px;">注: *.pixiv.net, *.pximg.net 默认已开启。</span>
+        <h3>实验性功能</h3>
+        <div class="card">
+            <div class="row vertical">
+                <label>自定义 Base64 直转域名池</label>
+                <input type="text" id="base64Domains" class="wide-input" placeholder="*.example.com, api.test.net">
+                <span style="font-size: 11px; color: var(--text-muted);">注: *.pixiv.net 引擎底层已硬编码放行。</span>
+            </div>
         </div>
 
-        <h3 style="margin-top: 15px; font-size: 14px;">📜 下载历史记录</h3>
-        <div id="historyList" class="history-box"></div>
-        <button id="clearHistoryBtn" style="width: 100%; background: #f44336; color: white; padding: 6px;">🗑️ 清空历史记录</button>
+        <div style="display:flex; justify-content: space-between; align-items: baseline; margin-top: 20px;">
+            <h3>操作审计日志</h3>
+            <button id="clearHistoryBtn" style="background:none; border:none; color:#FF3B30; cursor:pointer; font-size:12px; font-weight:600; padding:0;">清空</button>
+        </div>
+        <div class="card" style="padding: 10px 16px;">
+            <div id="historyList" class="history-box"></div>
+        </div>
     </div>
     
     <div class="btn-container">
-        <button id="saveBtn">💾 保存当前设置</button>
-        <button id="resetBtn">↺ 恢复出厂设置</button>
+        <button id="saveBtn" class="btn btn-primary">应用并保存配置</button>
+        <button id="resetBtn" class="btn btn-secondary">恢复引擎默认值</button>
     </div>
-    <div id="saveMsg" class="success-text">✓ 操作成功！</div>
+    <div id="saveMsg" class="success-text">配置已写入存储！</div>
     
-    <div class="footer"><b>Mix01 Immersive Engine</b> - 仅供学习使用</div>
+    <div class="footer">Mix01 Immersive Engine Core v3.0</div>
     <script src="options.js"></script>
 </body>
 </html>

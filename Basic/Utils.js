@@ -1,47 +1,45 @@
 // Basic/Utils.js
 window.Mix01Utils = {
-    getImmersiveAdapter: function() {
-        if (window.Mix01ImmersiveEngine && window.Mix01ImmersiveEngine.getAdapter) {
-            return window.Mix01ImmersiveEngine.getAdapter(window.location.hostname);
-        }
-        return null;
+    getImmersiveAdapter() {
+        return window.Mix01ImmersiveEngine?.getAdapter(window.location.hostname) || null;
     },
 
-    copyImageToClipboard: async function(url, renderer) {
+    async copyImageToClipboard(url, renderer) {
         renderer.showToast("⏳ 正在获取并处理原图...");
         try {
             const response = await fetch(url);
+            if (!response.ok) throw new Error("Network response was not ok");
             const blob = await response.blob();
             const img = new Image();
             const blobUrl = URL.createObjectURL(blob);
-            img.onload = () => {
-                const canvas = document.createElement('canvas');
-                canvas.width = img.width; canvas.height = img.height;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0);
-                canvas.toBlob(async (pngBlob) => {
-                    try {
-                        await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
-                        renderer.showToast("✅ 已成功复制原图到剪切板！");
-                    } catch (err) { 
-                        renderer.showToast("❌ 写入失败，请确保页面保持聚焦"); 
-                    }
-                    URL.revokeObjectURL(blobUrl);
-                }, 'image/png');
-            };
-            img.onerror = () => { renderer.showToast("❌ 渲染失败"); URL.revokeObjectURL(blobUrl); };
-            img.src = blobUrl;
+            
+            await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = reject;
+                img.src = blobUrl;
+            });
+
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth; 
+            canvas.height = img.naturalHeight;
+            canvas.getContext('2d', { alpha: false }).drawImage(img, 0, 0);
+            
+            const pngBlob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+            await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
+            
+            renderer.showToast("✅ 已成功复制原图到剪切板！");
+            URL.revokeObjectURL(blobUrl);
         } catch (err) { 
-            renderer.showToast("❌ 获取图片失败，存在跨域限制"); 
+            renderer.showToast("❌ 获取图片失败，受限于浏览器的跨域/安全策略"); 
+            console.error("Clipboard Copy Failed:", err);
         }
     },
 
-    downloadImage: function(url, renderer) {
+    downloadImage(url, renderer) {
         renderer.showToast("⏳ 正在打通后台进行安全下载...");
         try {
-            chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: url }, (response) => {
+            chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: url }, () => {
                 if (chrome.runtime.lastError) {
-                    console.warn(chrome.runtime.lastError);
                     renderer.showToast("❌ 后台离线！请去扩展管理页【刷新本插件】");
                 } else {
                     renderer.showToast("✅ 下载指令已送达后台！");
