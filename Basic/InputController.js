@@ -10,6 +10,7 @@ window.Mix01InputController = class InputController {
             isZoomManuallyChanged: false, keyboardSwitchTime: 0, isTicking: false,
             bgClickCount: 0, bgClickTimer: null, lastTarget: null, lastFoundMedia: null,
             isRenderingLock: false,
+            lastRenderX: null, lastRenderY: null, lastRenderZoom: null, lastRenderMediaSrc: null,
             _galleryCache: null,
             _galleryCacheDirty: true
         };
@@ -17,13 +18,15 @@ window.Mix01InputController = class InputController {
         this.preloadedUrlsQueue = [];
         this.compiledKeys = {}; 
         this._preloadTimer = null; // 用于网络防抖
+        this._resizeTimer = null; // 沉浸模式 resize 防抖
 
         this.mediaObserver = new MutationObserver((mutations) => {
             let newSrc = null;
             for (let m of mutations) {
-                if (m.type === 'attributes' && m.attributeName === 'src') {
+                if (m.type === 'attributes' && m.attributeName === 'src' && m.target === this.state.currentMedia) {
                     if (this.state.currentMedia && this.state.currentMedia.src !== this.state.currentSrc) {
                         newSrc = this.state.currentMedia.src;
+                        break; // 找到一个就够了
                     }
                 }
             }
@@ -71,6 +74,19 @@ window.Mix01InputController = class InputController {
         document.addEventListener('scroll', () => {
             this.state._galleryCacheDirty = true;
         }, { passive: true, capture: true });
+
+        const scheduleResizeUpdate = () => {
+            if (!this.state.currentMedia) return;
+            if (this._resizeTimer) clearTimeout(this._resizeTimer);
+            this._resizeTimer = setTimeout(() => {
+                if (this.state.currentMedia) {
+                    this.state.cachedRect = this.state.currentMedia.getBoundingClientRect();
+                    this.updateRender();
+                }
+            }, 66);
+        };
+        window.addEventListener('resize', scheduleResizeUpdate, { passive: true });
+        window.addEventListener('orientationchange', scheduleResizeUpdate, { passive: true });
         
         this.render.elements.viewer.addEventListener('click', (e) => this.handleBackgroundClick(e));
         this.render.elements.viewer.addEventListener('dblclick', (e) => {
@@ -308,8 +324,8 @@ window.Mix01InputController = class InputController {
         const sW = window.innerWidth;
         const sH = window.innerHeight;
         const rect = this.state.cachedRect;
-        const x = e ? e.clientX : window.lastMouseX;
-        const y = e ? e.clientY : window.lastMouseY;
+        const x = e ? e.clientX : (window.lastMouseX !== undefined ? window.lastMouseX : sW / 2);
+        const y = e ? e.clientY : (window.lastMouseY !== undefined ? window.lastMouseY : sH / 2);
         
         let xP, yP;
         // 【核心修复】：沉浸模式下使用窗口坐标系；非沉浸模式使用元素坐标系
@@ -324,6 +340,19 @@ window.Mix01InputController = class InputController {
         // 绝对边界锁（Clamp），防止意外溢出导致图片飞走
         xP = Math.max(0, Math.min(1, xP));
         yP = Math.max(0, Math.min(1, yP));
+
+        const roundedX = Math.round(xP * 1000);
+        const roundedY = Math.round(yP * 1000);
+        const roundedZoom = Math.round(this.state.activeZoom * 1000);
+        const mediaSrc = this.state.currentSrc || '';
+        if (this.state.lastRenderMediaSrc === mediaSrc && this.state.lastRenderX === roundedX && this.state.lastRenderY === roundedY && this.state.lastRenderZoom === roundedZoom) {
+            this.state.isRenderingLock = false;
+            return;
+        }
+        this.state.lastRenderMediaSrc = mediaSrc;
+        this.state.lastRenderX = roundedX;
+        this.state.lastRenderY = roundedY;
+        this.state.lastRenderZoom = roundedZoom;
 
         // 【阶段二：纯写入 Phase (Write)】
         requestAnimationFrame(() => {
@@ -352,6 +381,10 @@ window.Mix01InputController = class InputController {
     hideViewer() {
         this.render.hide();
         this.mediaObserver.disconnect();
+        if (this._resizeTimer) {
+            clearTimeout(this._resizeTimer);
+            this._resizeTimer = null;
+        }
         this.state.currentMedia = null;
         this.state.currentSrc = null;
         this.state.currentHdUrl = null; 

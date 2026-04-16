@@ -58,8 +58,20 @@
             }
             return new Promise((resolve) => {
                 const img = new Image();
-                img.onload = () => { window.__mix01DetectCache[cacheKey] = primarySrc; resolve(primarySrc); };
+                let timeoutId = setTimeout(() => {
+                    img.src = ''; // 取消加载
+                    const fallback = fallbackSrc || primarySrc;
+                    window.__mix01DetectCache[cacheKey] = fallback;
+                    resolve(fallback);
+                }, 8000); // 8秒超时
+                
+                img.onload = () => {
+                    clearTimeout(timeoutId);
+                    window.__mix01DetectCache[cacheKey] = primarySrc;
+                    resolve(primarySrc);
+                };
                 img.onerror = () => {
+                    clearTimeout(timeoutId);
                     const fallback = fallbackSrc || primarySrc;
                     window.__mix01DetectCache[cacheKey] = fallback;
                     resolve(fallback);
@@ -503,6 +515,18 @@
                 { srcRegExp: '(img\\d+\\.doubanio\\.com/view/\\w+/).*(/public/.+@IMG@)', processor: '$1l$2' },
                 { srcRegExp: '(img\\d+\\.doubanio\\.com/icon/)up?([-\\d]+@IMG@)', processor: '$1ul$2' },
                 { srcRegExp: '(img\\d+\\.doubanio\\.com/pview/\\w+_poster/)(?:small|median|large)(/public/.+@IMG@)', processor: '$1raw$2' }
+            ]
+        },
+        'vdownload\\.hembed\\.com': {
+            srcMatching: [
+                // 对于hembed，保持原URL，包括secure参数
+                { srcRegExp: '.*', processor: '$&' }
+            ]
+        },
+        'hanime1\\.me': {
+            srcMatching: [
+                // 对于hanime1.me，保持原URL，包括secure参数
+                { srcRegExp: '.*', processor: '$&' }
             ]
         },
         '.*': {

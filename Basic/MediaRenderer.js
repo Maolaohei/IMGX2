@@ -7,6 +7,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.videoState = { isRunning: false, callbackId: null, rAFId: null, original: null };
         this.hudState = { cursorTimer: null, hintTimer: null };
         this.hdState = { isLoading: false, badUrls: new Set() };
+        this.immersiveState = { lastMedia: null, lastSrc: null, lastHudSignature: null };
         
         this.initDOM();
         this.setupMessageListener();
@@ -77,6 +78,19 @@ window.Mix01MediaRenderer = class MediaRenderer {
         } else {
             document.addEventListener('DOMContentLoaded', () => this.domGuard.observe(document.body, { childList: true }));
         }
+
+        // 修复：偶尔未授权弹窗问题，监听hasAgreed变化
+        this.agreedObserver = new MutationObserver(() => {
+            if (this.cfg.state.hasAgreed && this.elements.notice.style.display !== 'none') {
+                this.elements.notice.style.display = 'none';
+            }
+        });
+        // 监听config变化，但由于cfg是对象，改为定时检查
+        this.agreedCheckInterval = setInterval(() => {
+            if (this.cfg.state.hasAgreed && this.elements.notice.style.display !== 'none') {
+                this.elements.notice.style.display = 'none';
+            }
+        }, 1000); // 每秒检查一次
     }
 
     setupMessageListener() {
@@ -85,6 +99,12 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 const src = request.clickedUrl || this.elements.img.src;
 
                 window.__mix01HdUrlMap = window.__mix01HdUrlMap || {};
+                // 优化：限制缓存大小，避免内存泄漏
+                if (Object.keys(window.__mix01HdUrlMap).length > 100) {
+                    // 清理最旧的50%条目
+                    const keys = Object.keys(window.__mix01HdUrlMap);
+                    keys.slice(0, Math.floor(keys.length / 2)).forEach(k => delete window.__mix01HdUrlMap[k]);
+                }
                 if (window.__mix01HdUrlMap[src]) {
                     actionFn(window.__mix01HdUrlMap[src]);
                     return;
@@ -125,6 +145,20 @@ window.Mix01MediaRenderer = class MediaRenderer {
         }
     }
 
+    setStyles(el, styles) {
+        for (const prop in styles) {
+            if (Object.prototype.hasOwnProperty.call(styles, prop)) {
+                this.setStyle(el, prop, styles[prop]);
+            }
+        }
+    }
+
+    setClass(el, className) {
+        if (el.className !== className) {
+            el.className = className;
+        }
+    }
+
     showToast(text) {
         clearTimeout(this.toastTimer);
         this.elements.toast.innerText = text; 
@@ -138,17 +172,17 @@ window.Mix01MediaRenderer = class MediaRenderer {
         
         if (isVideo) {
             this.elements.status.innerText = '🎥 视频流媒体';
-            this.elements.status.className = 'status-hd';
-            this.elements.status.style.backgroundColor = '#1da1f2';
+            this.setClass(this.elements.status, 'status-hd');
+            this.setStyle(this.elements.status, 'background-color', '#1da1f2');
         } else {
             if (type === 'hd') {
-                this.elements.status.className = this.hdState.isLoading ? 'status-hd is-loading' : 'status-hd';
+                this.setClass(this.elements.status, this.hdState.isLoading ? 'status-hd is-loading' : 'status-hd');
                 this.elements.status.innerText = this.hdState.isLoading ? '⏳ 高清解析中...' : '高清解析';
-                this.elements.status.style.backgroundColor = ''; 
+                this.setStyle(this.elements.status, 'background-color', ''); 
             } else {
-                this.elements.status.className = 'status-original';
+                this.setClass(this.elements.status, 'status-original');
                 this.elements.status.innerText = '原图放大';
-                this.elements.status.style.backgroundColor = '';
+                this.setStyle(this.elements.status, 'background-color', '');
             }
         }
     }
@@ -166,6 +200,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
         clearTimeout(this.hudState.cursorTimer);
         clearTimeout(this.hudState.hintTimer);
+        clearInterval(this.agreedCheckInterval); // 清理定时器
         this.hdState.isLoading = false;
         this.stopVideoRender();
     }
@@ -246,21 +281,15 @@ window.Mix01MediaRenderer = class MediaRenderer {
         let cDW = 0, cDH = 0;
         const mode = this.cfg.state.mode;
 
-        this.elements.viewer.className = this.cfg.state.isImmersive ? 'mode-immersive' : `mode-${mode}`;
+        this.setClass(this.elements.viewer, this.cfg.state.isImmersive ? 'mode-immersive' : `mode-${mode}`);
 
         if (this.cfg.state.isImmersive) {
-            this.setStyle(this.elements.viewer, 'display', 'block');
-            this.setStyle(this.elements.viewer, 'position', 'fixed');
-            this.setStyle(this.elements.viewer, 'width', '100vw');
-            this.setStyle(this.elements.viewer, 'height', '100vh');
-            this.setStyle(this.elements.viewer, 'left', '0px');
-            this.setStyle(this.elements.viewer, 'top', '0px');
-            this.setStyle(this.elements.viewer, 'background-color', 'rgba(0, 0, 0, 0.95)');
-            this.setStyle(this.elements.viewer, 'background-image', 'none');
-            this.setStyle(this.elements.viewer, 'border', 'none');
-            this.setStyle(this.elements.viewer, 'border-radius', '0');
-            this.setStyle(this.elements.viewer, 'transform', 'none');
-            this.setStyle(this.elements.viewer, 'pointer-events', 'auto');
+            this.setStyles(this.elements.viewer, {
+                display: 'block', position: 'fixed', width: '100vw', height: '100vh',
+                left: '0px', top: '0px', 'background-color': 'rgba(0, 0, 0, 0.95)',
+                'background-image': 'none', border: 'none', 'border-radius': '0',
+                transform: 'none', 'pointer-events': 'auto'
+            });
             
             if (!isZoomManuallyChanged) {
                 const maxW = sW * 0.95, maxH = sH * 0.95;
@@ -273,9 +302,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
             let tW = nw * activeZoom, tH = nh * activeZoom;
             cDW = tW; cDH = tH;
             
-            this.setStyle(activeMedia, 'position', 'absolute');
-            this.setStyle(activeMedia, 'width', `${tW}px`); this.setStyle(activeMedia, 'height', `${tH}px`);
-            this.setStyle(activeMedia, 'margin', '0px');
+            this.setStyles(activeMedia, {
+                position: 'absolute', width: `${tW}px`, height: `${tH}px`, margin: '0px'
+            });
 
             let offsetX = (sW - tW) / 2;
             let offsetY = (sH - tH) / 2;
@@ -324,17 +353,20 @@ window.Mix01MediaRenderer = class MediaRenderer {
                     this.setStyle(this.elements.viewer, 'border', '1px solid rgba(255, 255, 255, 0.4)'); 
                 }
 
-                this.setStyle(activeMedia, 'right', 'auto'); this.setStyle(activeMedia, 'bottom', 'auto'); this.setStyle(activeMedia, 'margin', '0px');
+                this.setStyles(activeMedia, { right: 'auto', bottom: 'auto', margin: '0px' });
                 let offsetX = 0, offsetY = 0;
                 if (cDW > lensW) offsetX = -(cDW * xP - lensW / 2); else offsetX = (lensW - cDW) / 2;
                 if (cDH > lensH) offsetY = -(cDH * yP - lensH / 2); else offsetY = (lensH - cDH) / 2;
-                this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px, ${offsetY}px, 0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`);
-                this.setStyle(activeMedia, 'left', '0px'); this.setStyle(activeMedia, 'top', '0px');
+                this.setStyles(activeMedia, {
+                    transform: `translate3d(${offsetX}px, ${offsetY}px, 0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`,
+                    left: '0px', top: '0px'
+                });
             }
         } else {
-            this.setStyle(this.elements.viewer, 'display', 'block'); this.setStyle(this.elements.viewer, 'position', 'fixed');
-            this.setStyle(this.elements.viewer, 'background-color', 'rgba(20, 20, 20, 0.9)'); this.setStyle(this.elements.viewer, 'background-image', 'none');
-            this.setStyle(activeMedia, 'position', 'absolute'); this.setStyle(activeMedia, 'right', 'auto'); this.setStyle(activeMedia, 'bottom', 'auto'); this.setStyle(activeMedia, 'margin', '0px');
+            this.setStyles(this.elements.viewer, {
+                display: 'block', position: 'fixed', 'background-color': 'rgba(20, 20, 20, 0.9)', 'background-image': 'none'
+            });
+            this.setStyles(activeMedia, { position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px' });
 
             let tW = rect.width * activeZoom, tH = rect.height * activeZoom;
             const maxVW = sW * (mode === 'full-follow' ? 0.7 : 0.95);
@@ -362,8 +394,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 this.setStyle(activeMedia, 'width', `${tW}px`); this.setStyle(activeMedia, 'height', `${tH}px`);
                 let mX = (tW > vW) ? -(tW - vW) * xP : 0;
                 let mY = (tH > vH) ? -(tH - vH) * yP : 0;
-                this.setStyle(activeMedia, 'transform', `translate3d(${mX}px, ${mY}px, 0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`);
-                this.setStyle(activeMedia, 'left', '0px'); this.setStyle(activeMedia, 'top', '0px');
+                this.setStyles(activeMedia, {
+                    transform: `translate3d(${mX}px, ${mY}px, 0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`,
+                    left: '0px', top: '0px'
+                });
             }
 
             if (mode === 'full-follow') {
@@ -389,7 +423,11 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
     async handleImmersiveActivity(currentMedia, currentSrc, keys) {
         if (!this.cfg.state.isImmersive || this.elements.viewer.style.display !== 'block') return;
-        
+        if (this.immersiveState.lastMedia === currentMedia && this.immersiveState.lastSrc === currentSrc) return;
+
+        this.immersiveState.lastMedia = currentMedia;
+        this.immersiveState.lastSrc = currentSrc;
+
         const adapter = window.Mix01Utils.getImmersiveAdapter();
         let likeText = "喜欢"; let likeIcon = "🤍"; let likeColor = "#dddddd";
         let followText = "关注"; let followIcon = "👤"; let followColor = "#dddddd";
@@ -410,6 +448,18 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 }
             }
         }
+
+        const keyMode = (keys.keyMode || 'V').toUpperCase();
+        const keyDownload = (keys.keyDownloadVideo || 'D').toUpperCase();
+        const keyLike = (keys.keyLike || 'L').toUpperCase();
+        const keyFollow = (keys.keyFollow || 'F').toUpperCase();
+        const hudSignature = `${currentSrc}|${keyMode}|${keyDownload}|${keyLike}|${keyFollow}|${likeText}|${followText}|${followColor}|${authorDisplay}`;
+        if (this.immersiveState.lastMedia === currentMedia && this.immersiveState.lastSrc === currentSrc && this.immersiveState.lastHudSignature === hudSignature && this.elements.hint.style.display === 'block') {
+            return;
+        }
+        this.immersiveState.lastMedia = currentMedia;
+        this.immersiveState.lastSrc = currentSrc;
+        this.immersiveState.lastHudSignature = hudSignature;
 
         let hudHTML = `<div style="display:flex; align-items:center; gap: 15px;">`;
         hudHTML += `<span class="hud-status-item">切换 <span class="kbd-btn">${(keys.keyMode || 'V').toUpperCase()}</span></span>`;
@@ -439,6 +489,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
                     this.setStyle(this.elements.hint, 'display', 'none');
                 }
             }, 600);
-        }, 3000); 
+        }, 3000);
     }
 };

@@ -26,6 +26,8 @@
                     console.warn("Mix01 强制高清拦截失败，降级使用原链接", e);
                 }
             }
+            // 添加页面URL作为Referer
+            message.pageUrl = window.location.href;
         }
         
         if (responseCallback) {
@@ -45,4 +47,18 @@
         render: mediaRenderer, 
         controller: inputController 
     };
+
+    // 优化：页面卸载时清理全局缓存，避免内存泄漏
+    window.addEventListener('beforeunload', () => {
+        window.__mix01UserPaused = false;
+        window.isFetchingMore = false;
+        window.__mix01FollowCache = {};
+        window.__mix01LikeMediaCache = {};
+        window.__mix01FollowAuthorCache = {};
+        window.__mix01HdUrlMap = {};
+        window.lastHoveredSrc = null;
+        window.lastHoveredMedia = null;
+        window.lastMouseX = null;
+        window.lastMouseY = null;
+    });
 })();

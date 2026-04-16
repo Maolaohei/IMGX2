@@ -58,11 +58,55 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const config = await chrome.storage.local.get(['base64Domains']);
                 const useBase64 = isBase64Domain(initialUrl, config.base64Domains);
 
-                let res = await fetch(initialUrl);
+                let res;
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒超时
+                try {
+                    res = await fetch(initialUrl, {
+                        method: 'GET',
+                        mode: 'cors',
+                        credentials: 'include',
+                        signal: controller.signal,
+                        headers: {
+                            'Referer': request.pageUrl || new URL(initialUrl).origin,
+                            'User-Agent': navigator.userAgent,
+                            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+                            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                            'Cache-Control': 'no-cache'
+                        }
+                    });
+                    clearTimeout(timeoutId);
+                } catch (fetchError) {
+                    clearTimeout(timeoutId);
+                    if (fetchError.name === 'AbortError') {
+                        console.warn('Fetch timeout, trying no-cors');
+                    } else {
+                        console.warn('CORS fetch failed, trying no-cors:', fetchError);
+                    }
+                    try {
+                        const noCorsController = new AbortController();
+                        const noCorsTimeoutId = setTimeout(() => noCorsController.abort(), 30000);
+                        res = await fetch(initialUrl, {
+                            method: 'GET',
+                            mode: 'no-cors',
+                            credentials: 'include',
+                            signal: noCorsController.signal
+                        });
+                        clearTimeout(noCorsTimeoutId);
+                    } catch (noCorsError) {
+                        // 如果都失败，直接使用chrome.downloads下载URL
+                        console.warn('All fetch attempts failed, falling back to direct download:', noCorsError);
+                        chrome.downloads.download({ url: initialUrl, filename: `IMG_Download/${initialUrl.split('/').pop() || 'media'}`, saveAs: false }, () => {
+                            saveToHistory(initialUrl.split('/').pop() || "media", chrome.runtime.lastError ? "❌ 失败 (直接下载)" : "✅ 成功 (直接下载)");
+                        });
+                        return true;
+                    }
+                }
                 let finalUrl = initialUrl;
+                const isOpaque = res && res.type === 'opaque';
 
                 // 优化：Pixiv 404 自愈逻辑 (并发竞速 Promise.any)
-                if (res.status === 404 && initialUrl.includes('pximg.net')) {
+                if (res && res.status === 404 && initialUrl.includes('pximg.net')) {
                     const altUrls = [];
                     if (initialUrl.includes('_ugoira0')) {
                         const base = initialUrl.replace('_ugoira0', '_p0');
@@ -70,13 +114,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     } else if (initialUrl.includes('_p0')) {
                         const targetExt = initialUrl.endsWith('.png') ? '.jpg' : '.png';
                         altUrls.push(initialUrl.replace(/\.\w+$/, targetExt));
+                        // 添加更多备用：不同分辨率
+                        altUrls.push(initialUrl.replace('_p0', '_p1'), initialUrl.replace('_p0', '_p2'));
+                    } else {
+                        // 对于其他情况，尝试添加_p0
+                        const base = initialUrl.replace(/\.\w+$/, '');
+                        altUrls.push(`${base}_p0.jpg`, `${base}_p0.png`, `${base}.jpg`, `${base}.png`);
                     }
                     
                     if (altUrls.length > 0) {
                         try {
                             // 并发发起 HEAD 请求，谁先返回 200 OK 谁就赢
                             const fetchPromises = altUrls.map(alt => 
-                                fetch(alt, { method: 'HEAD' }).then(testRes => {
+                                fetch(alt, { 
+                                    method: 'HEAD',
+                                    headers: {
+                                        'Referer': request.pageUrl || 'https://www.pixiv.net/',
+                                        'User-Agent': navigator.userAgent
+                                    }
+                                }).then(testRes => {
                                     if (testRes.ok) return { res: testRes, url: alt };
                                     throw new Error('Not ok');
                                 })
@@ -86,17 +142,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                             
                             // 修正原版 Bug：如果使用了 Base64，HEAD 请求是没有 Body 的，必须重新发起 GET
                             if (useBase64) {
-                                res = await fetch(finalUrl);
+                                res = await fetch(finalUrl, {
+                                    headers: {
+                                        'Referer': request.pageUrl || 'https://www.pixiv.net/',
+                                        'User-Agent': navigator.userAgent
+                                    }
+                                });
                             } else {
                                 res = firstSuccess.res; 
                             }
                         } catch(e) {
                             // 所有备用链接都 404，跳出继续走报错逻辑
+                            console.warn('All Pixiv alt URLs failed:', altUrls, e);
                         }
                     }
                 }
 
-                if (!res.ok) throw new Error(`服务端拒绝 (${res.status})`);
+                if (!res || isOpaque || !res.ok) {
+                    console.warn('Fetch returned unusable response, falling back to direct download', { status: res?.status, type: res?.type, url: finalUrl });
+                    chrome.downloads.download({ url: finalUrl, filename: `IMG_Download/${finalUrl.split('/').pop() || 'media'}`, saveAs: false, conflictAction: 'uniquify' }, () => {
+                        saveToHistory(finalUrl.split('/').pop() || "media", chrome.runtime.lastError ? "❌ 失败 (直接下载回退)" : "✅ 成功 (直接下载回退)");
+                    });
+                    return true;
+                }
 
                 // --- 【核心修复：智能后缀提取】 ---
                 const urlObj = new URL(finalUrl);
@@ -130,23 +198,40 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const contentType = res.headers.get('content-type') || 'image/jpeg';
                 
                 if (useBase64) {
-                    // 【神级优化】：抛弃 JS 循环拼接，调用浏览器原生 C++ 引擎进行高并发、零阻塞的 Base64 编码
-                    const blob = await res.blob();
-                    const reader = new FileReader();
-                    
-                    reader.onloadend = () => {
-                        const dataUrl = reader.result; // 这里直接就是原生生成好的 base64 字符串
-                        chrome.downloads.download({ url: dataUrl, filename: finalDownloadName, saveAs: false }, () => {
-                            saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功 (Base64)");
+                    // 优化：检查文件大小，大文件直接下载避免内存溢出
+                    const contentLength = res.headers.get('content-length');
+                    const sizeLimit = 20 * 1024 * 1024; // 20MB
+                    if (contentLength && parseInt(contentLength) > sizeLimit) {
+                        console.warn('File too large for Base64, falling back to direct download');
+                        chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
+                            saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (大文件直接下载)" : "✅ 成功 (大文件直接下载)");
                         });
-                    };
-                    
-                    reader.onerror = () => {
-                        saveToHistory(finalDownloadName, "❌ 失败 (Base64 编码异常)");
-                    };
-                    
-                    // 发起底层异步读取
-                    reader.readAsDataURL(blob);
+                    } else {
+                        // 【神级优化】：抛弃 JS 循环拼接，调用浏览器原生 C++ 引擎进行高并发、零阻塞的 Base64 编码
+                        const blob = await res.blob();
+                        if (blob.size > sizeLimit) {
+                            console.warn('Blob too large for Base64, falling back to direct download');
+                            chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
+                                saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (大文件直接下载)" : "✅ 成功 (大文件直接下载)");
+                            });
+                        } else {
+                            const reader = new FileReader();
+                            
+                            reader.onloadend = () => {
+                                const dataUrl = reader.result; // 这里直接就是原生生成好的 base64 字符串
+                                chrome.downloads.download({ url: dataUrl, filename: finalDownloadName, saveAs: false }, () => {
+                                    saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功 (Base64)");
+                                });
+                            };
+                            
+                            reader.onerror = () => {
+                                saveToHistory(finalDownloadName, "❌ 失败 (Base64 编码异常)");
+                            };
+                            
+                            // 发起底层异步读取
+                            reader.readAsDataURL(blob);
+                        }
+                    }
                 } else {
                     chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
                         saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功");
