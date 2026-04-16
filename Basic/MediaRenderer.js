@@ -188,15 +188,16 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     hide() {
-        this.setStyle(this.elements.viewer, 'display', 'none');
-        this.setStyle(this.elements.img, 'display', 'none');
-        this.setStyle(this.elements.canvas, 'display', 'none');
-        this.setStyle(this.elements.spinner, 'display', 'none');
-        this.setStyle(this.elements.progressContainer, 'display', 'none');
+        this.setStyles(this.elements.viewer, {
+            display: 'none', cursor: 'default', 'pointer-events': 'none'
+        });
+        this.setStyles(this.elements.img, {
+            display: 'none', cursor: 'default'
+        });
+        this.setStyles(this.elements.canvas, { display: 'none' });
+        this.setStyles(this.elements.spinner, { display: 'none' });
+        this.setStyles(this.elements.progressContainer, { display: 'none' });
         this.setStyle(this.elements.hint, 'opacity', '0');
-        this.setStyle(this.elements.viewer, 'cursor', 'default');
-        this.setStyle(this.elements.img, 'cursor', 'default');
-        this.setStyle(this.elements.viewer, 'pointer-events', 'none');
 
         clearTimeout(this.hudState.cursorTimer);
         clearTimeout(this.hudState.hintTimer);
@@ -210,9 +211,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.videoState.original = { paused: videoEl.paused, muted: videoEl.muted };
         this.currentVideoEl = videoEl;
         
-        this.setStyle(this.elements.img, 'display', 'none');
-        this.setStyle(this.elements.canvas, 'display', 'block');
-        this.setStyle(this.elements.progressContainer, 'display', 'block');
+        this.setStyles(this.elements.img, { display: 'none' });
+        this.setStyles(this.elements.canvas, { display: 'block' });
+        this.setStyles(this.elements.progressContainer, { display: 'block' });
         
         this.elements.canvas.width = videoEl.videoWidth || videoEl.clientWidth || 800;
         this.elements.canvas.height = videoEl.videoHeight || videoEl.clientHeight || 600;
@@ -423,10 +424,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
     async handleImmersiveActivity(currentMedia, currentSrc, keys) {
         if (!this.cfg.state.isImmersive || this.elements.viewer.style.display !== 'block') return;
-        if (this.immersiveState.lastMedia === currentMedia && this.immersiveState.lastSrc === currentSrc) return;
-
-        this.immersiveState.lastMedia = currentMedia;
-        this.immersiveState.lastSrc = currentSrc;
 
         const adapter = window.Mix01Utils.getImmersiveAdapter();
         let likeText = "喜欢"; let likeIcon = "🤍"; let likeColor = "#dddddd";
