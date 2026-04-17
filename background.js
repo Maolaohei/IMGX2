@@ -1,6 +1,8 @@
 // background.js - Mix01 终极自愈下载引擎 (修复版)
 chrome.runtime.onInstalled.addListener(() => {
-    chrome.contextMenus.create({ id: "saveOriginalImgMix01", title: "保存原图 (Mix01)", contexts: ["image"] });
+    chrome.contextMenus.removeAll(() => {
+chrome.contextMenus.create({ id: "saveOriginalImgMix01", title: "保存原图 (Mix01)", contexts: ["image"] });
+  });
     if (chrome.declarativeNetRequest) {
         chrome.declarativeNetRequest.updateDynamicRules({
             removeRuleIds: [1],
