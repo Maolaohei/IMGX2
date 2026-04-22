@@ -5,16 +5,22 @@ window.Mix01ConfigManager = class ConfigManager {
             hasAgreed: false, loadHD: 'true', breakoutView: false,
             showStatus: true, smallImageOptimization: true,
             disableVideoDefaultView: true, zoom: 2.0, rotate: 0,
-            mirror: 1, mode: 'partial', isImmersive: false, preloadCount: 5, wheelZoomEnabled: false
+            mirror: 1, mode: 'partial', isImmersive: false, preloadCount: 5, wheelZoomEnabled: false,
+            // ✨ 新增：放大镜智能过滤
+            minZoomSize: 0,         // px：元素宽高均小于此值时跳过（0 = 不过滤）
+            excludeSelectors: '',   // 逗号分隔的 CSS 选择器，匹配则跳过
+            triggerDelay: 0,        // ms：鼠标悬停后延迟显示放大镜（0 = 即时）
         };
-        this.globalMode = 'partial'; // 新增：专门存放全局默认配置
+        this.globalMode = 'partial';
         this.keys = {
             mode: 'v', rotate: 'r', mirror: 'm', zoomIn: '=', zoomOut: '-',
-            immersive: 'ctrl+f12', like: 'l', follow: 'f', 
-            playVideo: 'space', downloadVideo: 'd', 
-            double: 's', triple: 'q'
+            immersive: 'ctrl+f12', like: 'l', follow: 'f',
+            playVideo: 'space', downloadVideo: 'd',
+            double: 's', triple: 'q',
+            openInTab: 'o',   // ✨ 新增：在新标签页打开原图
         };
         this.siteModes = {};
+        this.disabledSites = {};    // ✨ 新增：{hostname: true} 表示该站点已关闭引擎
         this.isContextValid = () => !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
         this.initSync();
     }
@@ -32,20 +38,21 @@ window.Mix01ConfigManager = class ConfigManager {
 
     sync(res) {
         if (!res) return;
-        
+
         Object.keys(this.state).forEach(k => {
             if (res[k] !== undefined) {
-                this.state[k] = (k === 'zoom' || k === 'preloadCount') ? Number(res[k]) : res[k];
+                const isNum = ['zoom', 'preloadCount', 'minZoomSize', 'triggerDelay'].includes(k);
+                this.state[k] = isNum ? Number(res[k]) : res[k];
             }
         });
-        
+
         // 【核心修复】：彻底分离全局视图与站点独立视图
         if (res.mode !== undefined) this.globalMode = res.mode;
         if (res.siteModes !== undefined) this.siteModes = res.siteModes;
-        
+        if (res.disabledSites !== undefined) this.disabledSites = res.disabledSites || {};
+
         const host = window.location.hostname;
         if (host) {
-            // 优先使用当前站点的独立配置，如果没有则使用全局默认配置
             this.state.mode = this.siteModes[host] || this.globalMode || 'partial';
         } else {
             this.state.mode = this.globalMode || 'partial';
@@ -55,6 +62,16 @@ window.Mix01ConfigManager = class ConfigManager {
             let storageKey = 'key' + k.charAt(0).toUpperCase() + k.slice(1);
             if (res[storageKey]) this.keys[k] = res[storageKey];
         });
+    }
+
+    /**
+     * 判断当前（或指定）站点是否启用引擎
+     * @param {string} [hostname] 可选，默认取当前页面 hostname
+     * @returns {boolean} true = 已启用
+     */
+    isSiteEnabled(hostname) {
+        const host = hostname || window.location.hostname;
+        return !this.disabledSites[host];
     }
 
     save(data) {

@@ -17,8 +17,9 @@ window.Mix01InputController = class InputController {
         this.preloadedUrls = new Set();
         this.preloadedUrlsQueue = [];
         this.compiledKeys = {}; 
-        this._preloadTimer = null; // 用于网络防抖
-        this._resizeTimer = null; // 沉浸模式 resize 防抖
+        this._preloadTimer = null;   // 用于网络防抖
+        this._resizeTimer = null;    // 沉浸模式 resize 防抖
+        this._hoverDelayTimer = null; // ✨ 新增：悬停延迟触发定时器
 
         this.mediaObserver = new MutationObserver((mutations) => {
             let newSrc = null;
@@ -138,10 +139,18 @@ window.Mix01InputController = class InputController {
             return;
         }
 
+        // ✨ 非沉浸模式下：站点已禁用则确保 viewer 隐藏后返回
+        if (!this.cfg.isSiteEnabled()) {
+            if (this.render.elements.viewer.style.display === 'block') this.hideViewer();
+            return;
+        }
+
         const media = this.getMediaUnderCursor(e.clientX, e.clientY, e.target);
         if (media && (media !== this.state.currentMedia || (media.src||'video') !== this.state.currentSrc)) {
             if (Date.now() - this.state.keyboardSwitchTime < 500) return;
-            this.triggerZoom(media); return;
+            // ✨ 放大镜过滤：鼠标快速划过时也检测
+            if (!this.isMediaFiltered(media)) { this.triggerZoom(media); }
+            return;
         }
 
         if (this.state.currentMedia && this.render.elements.viewer.style.display === 'block' && this.state.cachedRect) {
@@ -158,21 +167,38 @@ window.Mix01InputController = class InputController {
 
     handleMouseOver(e) {
         if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
+        // ✨ 站点级开关：该域名已被用户禁用则直接返回
+        if (!this.cfg.isSiteEnabled()) return;
+
         const t = e.target;
         if ((t.tagName === 'IMG' || t.tagName === 'VIDEO') && (t.src || t.tagName === 'VIDEO')) {
-            this.triggerZoom(t);
+            // ✨ 放大镜过滤：尺寸或选择器命中则跳过
+            if (this.isMediaFiltered(t)) return;
+
+            const delay = this.cfg.state.triggerDelay || 0;
+            if (delay > 0) {
+                // ✨ 悬停延迟：等待用户真正"停住"后再触发
+                clearTimeout(this._hoverDelayTimer);
+                this._hoverDelayTimer = setTimeout(() => this.triggerZoom(t), delay);
+            } else {
+                this.triggerZoom(t);
+            }
         }
     }
 
     handleMouseOut(e) {
-        if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return; 
+        // ✨ 取消尚未触发的悬停延迟
+        clearTimeout(this._hoverDelayTimer);
+        if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
         if (e.target === this.state.currentMedia) {
             if (e.relatedTarget && this.state.currentMedia.contains(e.relatedTarget)) return;
-            if (Date.now() - this.state.keyboardSwitchTime > 500) this.hideViewer(); 
+            if (Date.now() - this.state.keyboardSwitchTime > 500) this.hideViewer();
         }
     }
 
     handleMouseLeave() {
+        // ✨ 取消尚未触发的悬停延迟
+        clearTimeout(this._hoverDelayTimer);
         if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
         if (Date.now() - this.state.keyboardSwitchTime > 500) this.hideViewer();
     }
@@ -441,6 +467,35 @@ window.Mix01InputController = class InputController {
         return e.key.toLowerCase() === config.key || e.code.toLowerCase() === config.key;
     }
 
+    /**
+     * ✨ 新增：判断媒体元素是否应被放大镜跳过
+     * 过滤条件：(1) 元素尺寸小于 minZoomSize  (2) 匹配 excludeSelectors 中任意选择器
+     * @param {HTMLElement} el
+     * @returns {boolean} true = 应跳过
+     */
+    isMediaFiltered(el) {
+        const minSize = this.cfg.state.minZoomSize || 0;
+        if (minSize > 0) {
+            const rect = el.getBoundingClientRect();
+            // 宽或高任意一个 >= minZoomSize 即认为是有意义的内容图，不过滤
+            if (rect.width < minSize && rect.height < minSize) return true;
+        }
+
+        const selectorStr = this.cfg.state.excludeSelectors || '';
+        if (selectorStr.trim()) {
+            // 编译并缓存选择器列表，避免每次 mouseover 都 split
+            if (selectorStr !== this._lastExcludeSelectorStr) {
+                this._lastExcludeSelectorStr = selectorStr;
+                this._compiledExcludeSelectors = selectorStr.split(',')
+                    .map(s => s.trim()).filter(Boolean);
+            }
+            for (const sel of (this._compiledExcludeSelectors || [])) {
+                try { if (el.matches(sel)) return true; } catch (e) { /* 忽略非法选择器 */ }
+            }
+        }
+        return false;
+    }
+
     getGalleryImages() {
         if (!this.state._galleryCacheDirty && this.state._galleryCache) {
             return this.state._galleryCache;
@@ -605,6 +660,8 @@ window.Mix01InputController = class InputController {
 
     handleKeyDown(e) {
         if (!this.cfg.state.hasAgreed) return;
+        // ✨ 站点级开关：该站点已禁用则所有快捷键均不响应
+        if (!this.cfg.isSiteEnabled()) return;
         const k = e.key.toLowerCase(); let up = false;
         const modeList = ['partial', 'full-follow', 'full-center'];
         const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
@@ -656,6 +713,16 @@ window.Mix01InputController = class InputController {
         if (this.matchCombo(e, this.cfg.keys.downloadVideo || 'd')) {
             if (this.cfg.state.isImmersive && this.state.currentMedia) {
                 this.triggerGlobalDownload();
+                e.preventDefault(); return;
+            }
+        }
+
+        // ✨ 新增：在新标签页打开原图 / 高清图
+        if (this.matchCombo(e, this.cfg.keys.openInTab || 'o')) {
+            const urlToOpen = this.state.currentHdUrl || this.render.elements.img.src;
+            if (urlToOpen && urlToOpen !== window.location.href) {
+                window.open(urlToOpen, '_blank', 'noopener,noreferrer');
+                this.render.showToast('🔗 已在新标签页打开原图');
                 e.preventDefault(); return;
             }
         }

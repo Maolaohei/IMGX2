@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Mix01 Immersive Engine Core",
-  "version": "3.1.1",
+  "version": "3.2.0",
   "description": "极客级流媒体沉浸浏览与下载引擎 (强力复刻版)",
   "permissions": [
     "storage",
     "downloads",
     "contextMenus",
     "declarativeNetRequest",
-    "declarativeNetRequestWithHostAccess"
+    "declarativeNetRequestWithHostAccess",
+    "tabs"
   ],
   "host_permissions": [
     "<all_urls>"

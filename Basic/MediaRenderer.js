@@ -181,18 +181,26 @@ window.Mix01MediaRenderer = class MediaRenderer {
         }
         this.setStyle(this.elements.status, 'display', 'block');
 
+        // ✨ 优化：展示真实图片原始分辨率（而非放大后的视口尺寸）
+        const nw = isVideo ? 0 : (this.elements.img.naturalWidth || 0);
+        const nh = isVideo ? 0 : (this.elements.img.naturalHeight || 0);
+        const dimStr = (nw > 0 && nh > 0) ? ` · ${nw}×${nh}` : '';
+
         if (isVideo) {
-            this.elements.status.textContent = '🎥 视频流媒体';
+            const vw = this.elements.canvas.width || 0;
+            const vh = this.elements.canvas.height || 0;
+            const vDim = (vw > 0 && vh > 0) ? ` · ${vw}×${vh}` : '';
+            this.elements.status.textContent = `🎥 视频${vDim}`;
             this.setClass(this.elements.status, 'status-hd');
             this.setStyle(this.elements.status, 'background-color', '#1da1f2');
         } else if (type === 'hd') {
             const loading = this.hdState.isLoading;
             this.setClass(this.elements.status, loading ? 'status-hd is-loading' : 'status-hd');
-            this.elements.status.textContent = loading ? '⏳ 高清解析中...' : '高清解析';
+            this.elements.status.textContent = loading ? '⏳ 高清解析中...' : `高清${dimStr}`;
             this.setStyle(this.elements.status, 'background-color', '');
         } else {
             this.setClass(this.elements.status, 'status-original');
-            this.elements.status.textContent = '原图放大';
+            this.elements.status.textContent = `原图${dimStr}`;
             this.setStyle(this.elements.status, 'background-color', '');
         }
     }
