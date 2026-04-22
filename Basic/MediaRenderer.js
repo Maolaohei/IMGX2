@@ -38,12 +38,30 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.elements.notice.innerHTML = '⚠️ 未同意协议<br>请点击右上角图标同意并开启功能';
         this.elements.hint    = create('div', 'img-zoom-pro-immersive-hint');
 
+        // ✨ 右键上下文菜单
+        this.elements.ctxMenu = create('div', 'mix01-ctx-menu');
+        this.elements.ctxMenu.innerHTML = `
+            <div class="ctx-item" data-action="copy-img">📋 复制图片</div>
+            <div class="ctx-item" data-action="copy-url">🔗 复制链接</div>
+            <div class="ctx-item" data-action="open-tab">↗️ 在新标签页打开</div>
+            <div class="ctx-sep"></div>
+            <div class="ctx-item" data-action="save">💾 保存图片</div>
+            <div class="ctx-sep"></div>
+            <div class="ctx-item ctx-item-danger" data-action="disable-site">🚫 在此网站禁用引擎</div>
+            <div class="ctx-item" data-action="close">✕ 关闭预览</div>
+        `;
+
+        // ✨ 沉浸模式计数器
+        this.elements.counter = create('div', 'mix01-gallery-counter');
+
         // 关键：在样式表层面锁定最高 z-index，确保放大镜/沉浸层不被任何页面元素遮挡
         const styleBlock = document.createElement('style');
         styleBlock.textContent = `
             #img-zoom-pro-viewer-xyz { z-index: 2147483647 !important; will-change: transform; }
             .img-zoom-toast-xyz      { z-index: 2147483647 !important; }
             #img-zoom-pro-immersive-hint { z-index: 2147483647 !important; }
+            #mix01-ctx-menu { z-index: 2147483647 !important; }
+            #mix01-gallery-counter { z-index: 2147483647 !important; }
             .kbd-btn { background:rgba(255,255,255,0.2); padding:2px 6px; border-radius:4px; font-family:monospace; font-weight:bold; margin:0 2px; }
             .author-tag { color:#1da1f2; font-weight:bold; margin:0 4px; }
             .hud-status-item { font-weight:bold; transition:color 0.3s ease; display:inline-block; }
@@ -71,6 +89,8 @@ window.Mix01MediaRenderer = class MediaRenderer {
             });
             document.body.appendChild(this.elements.viewer);
             document.body.appendChild(this.elements.toast);
+            document.body.appendChild(this.elements.ctxMenu);
+            document.body.appendChild(this.elements.counter);
             // 附加到 DOM 后立刻强制 z-index，防止页面已有高层级元素
             this._enforceTopLayer();
         };
@@ -81,6 +101,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
             if (!document.getElementById('img-zoom-pro-viewer-xyz') && document.body) {
                 document.body.appendChild(this.elements.viewer);
                 document.body.appendChild(this.elements.toast);
+                // ✨ 同步保护新增元素
+                if (!document.getElementById('mix01-ctx-menu'))      document.body.appendChild(this.elements.ctxMenu);
+                if (!document.getElementById('mix01-gallery-counter')) document.body.appendChild(this.elements.counter);
                 this._enforceTopLayer();
             }
         });
@@ -92,7 +115,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
     /** 强制放大镜和沉浸层始终位于最顶层，任何时候都可安全调用 */
     _enforceTopLayer() {
         this.elements.viewer.style.setProperty('z-index', '2147483647', 'important');
-        this.elements.toast.style.setProperty('z-index', '2147483647', 'important');
+        this.elements.toast.style.setProperty('z-index',  '2147483647', 'important');
+        if (this.elements.ctxMenu)  this.elements.ctxMenu.style.setProperty('z-index',  '2147483647', 'important');
+        if (this.elements.counter)  this.elements.counter.style.setProperty('z-index',  '2147483647', 'important');
     }
 
     setupMessageListener() {
@@ -222,6 +247,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.setStyles(this.elements.spinner, { display: 'none' });
         this.setStyles(this.elements.progressContainer, { display: 'none' });
         this.setStyle(this.elements.hint, 'opacity', '0');
+        // ✨ 关闭时同步隐藏右键菜单和计数器
+        this.hideContextMenu();
+        if (this.elements.counter) this.elements.counter.style.setProperty('display', 'none', 'important');
 
         clearTimeout(this.hudState.cursorTimer);
         clearTimeout(this.hudState.hintTimer);
@@ -494,6 +522,80 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
         this.updateStatus(activeMedia.src !== currentHoveredSrc ? 'hd' : 'original', cDW, cDH, isVideo);
         return activeZoom;
+    }
+
+    /**
+     * ✨ 右键菜单：在指定坐标弹出，绑定回调
+     * @param {number} x  clientX
+     * @param {number} y  clientY
+     * @param {Object} callbacks  { 'copy-img', 'copy-url', 'open-tab', 'save', 'disable-site', 'close' }
+     */
+    showContextMenu(x, y, callbacks) {
+        const menu = this.elements.ctxMenu;
+        if (!menu) return;
+
+        // 更新"禁用站点"项的文本，反映当前状态
+        const disableItem = menu.querySelector('[data-action="disable-site"]');
+        if (disableItem) {
+            const isEnabled = this.cfg.isSiteEnabled();
+            disableItem.textContent = isEnabled ? '🚫 在此网站禁用引擎' : '✅ 在此网站启用引擎';
+        }
+
+        // 移除旧监听，防止重复绑定
+        const newMenu = menu.cloneNode(true);
+        menu.parentNode.replaceChild(newMenu, menu);
+        this.elements.ctxMenu = newMenu;
+
+        newMenu.querySelectorAll('.ctx-item[data-action]').forEach(item => {
+            item.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const action = item.dataset.action;
+                if (callbacks[action]) callbacks[action]();
+                this.hideContextMenu();
+            });
+        });
+
+        // 定位：自动避免超出视口
+        newMenu.style.setProperty('display', 'block', 'important');
+        const mW = newMenu.offsetWidth, mH = newMenu.offsetHeight;
+        const vW = window.innerWidth, vH = window.innerHeight;
+        const finalX = (x + mW > vW) ? Math.max(0, x - mW) : x;
+        const finalY = (y + mH > vH) ? Math.max(0, y - mH) : y;
+        newMenu.style.setProperty('left', `${finalX}px`, 'important');
+        newMenu.style.setProperty('top',  `${finalY}px`, 'important');
+        newMenu.style.setProperty('opacity', '0', 'important');
+        requestAnimationFrame(() => newMenu.style.setProperty('opacity', '1', 'important'));
+
+        // 点击其他区域关闭
+        this._ctxOutsideHandler = (e) => {
+            if (!newMenu.contains(e.target)) this.hideContextMenu();
+        };
+        setTimeout(() => document.addEventListener('mousedown', this._ctxOutsideHandler, { once: true }), 10);
+    }
+
+    hideContextMenu() {
+        if (!this.elements.ctxMenu) return;
+        this.elements.ctxMenu.style.setProperty('display', 'none', 'important');
+        if (this._ctxOutsideHandler) {
+            document.removeEventListener('mousedown', this._ctxOutsideHandler);
+            this._ctxOutsideHandler = null;
+        }
+    }
+
+    /**
+     * ✨ 沉浸模式图片计数器
+     * @param {number} current  当前索引（0-based）
+     * @param {number} total    总数
+     */
+    updateCounter(current, total) {
+        const counter = this.elements.counter;
+        if (!counter) return;
+        if (!this.cfg.state.isImmersive || total <= 1) {
+            counter.style.setProperty('display', 'none', 'important');
+            return;
+        }
+        counter.textContent = `${current + 1} / ${total}`;
+        counter.style.setProperty('display', 'block', 'important');
     }
 
     async handleImmersiveActivity(currentMedia, currentSrc, keys) {

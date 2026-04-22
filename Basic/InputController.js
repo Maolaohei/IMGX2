@@ -19,7 +19,9 @@ window.Mix01InputController = class InputController {
         this.compiledKeys = {}; 
         this._preloadTimer = null;   // 用于网络防抖
         this._resizeTimer = null;    // 沉浸模式 resize 防抖
-        this._hoverDelayTimer = null; // ✨ 新增：悬停延迟触发定时器
+        this._hoverDelayTimer = null; // ✨ 悬停延迟触发定时器
+        // ✨ 放大镜拖拽状态
+        this._drag = { active: false, startX: 0, startY: 0, origLeft: 0, origTop: 0 };
 
         this.mediaObserver = new MutationObserver((mutations) => {
             let newSrc = null;
@@ -109,6 +111,59 @@ window.Mix01InputController = class InputController {
                 e.stopPropagation(); 
             }
         });
+
+        // ✨ 右键上下文菜单
+        this.render.elements.viewer.addEventListener('contextmenu', (e) => {
+            if (!this.cfg.state.hasAgreed) return;
+            e.preventDefault();
+            e.stopPropagation();
+            this.render.showContextMenu(e.clientX, e.clientY, {
+                'copy-img':     () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) window.Mix01Utils.copyImageToClipboard(u, this.render); },
+                'copy-url':     () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) { navigator.clipboard.writeText(u).catch(() => {}); this.render.showToast('🔗 链接已复制'); } },
+                'open-tab':     () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) { window.open(u, '_blank', 'noopener,noreferrer'); this.render.showToast('↗️ 已在新标签页打开'); } },
+                'save':         () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) window.Mix01Utils.downloadImage(u, this.render); },
+                'disable-site': () => { this._quickToggleSite(); },
+                'close':        () => { this.cfg.state.isImmersive ? this.exitImmersive() : this.hideViewer(); },
+            });
+        });
+
+        // ✨ 放大镜窗口拖拽（非沉浸模式下，按住 Alt 键可拖动查看器窗口固定位置）
+        this.render.elements.viewer.addEventListener('mousedown', (e) => {
+            if (this.cfg.state.isImmersive) return;
+            if (!e.altKey) return;  // 必须按住 Alt 才触发拖拽，避免与正常鼠标交互冲突
+            e.preventDefault();
+            e.stopPropagation();
+            const v = this.render.elements.viewer;
+            const rect = v.getBoundingClientRect();
+            this._drag.active  = true;
+            this._drag.startX  = e.clientX;
+            this._drag.startY  = e.clientY;
+            this._drag.origLeft = rect.left;
+            this._drag.origTop  = rect.top;
+            v.style.setProperty('cursor', 'grabbing', 'important');
+            // 拖拽时暂停自动跟随
+            this.state.keyboardSwitchTime = Date.now() + 99999;
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!this._drag.active) return;
+            const dx = e.clientX - this._drag.startX;
+            const dy = e.clientY - this._drag.startY;
+            const v = this.render.elements.viewer;
+            const newLeft = this._drag.origLeft + dx;
+            const newTop  = this._drag.origTop  + dy;
+            v.style.setProperty('transform', `translate3d(${newLeft}px,${newTop}px,0)`, 'important');
+            v.style.setProperty('left', '0px', 'important');
+            v.style.setProperty('top',  '0px', 'important');
+        }, { capture: true, passive: true });
+
+        document.addEventListener('mouseup', () => {
+            if (!this._drag.active) return;
+            this._drag.active = false;
+            this.render.elements.viewer.style.setProperty('cursor', 'default', 'important');
+            // 松开后恢复正常跟随（重置 keyboardSwitchTime）
+            this.state.keyboardSwitchTime = 0;
+        }, { capture: true });
     }
 
     getMediaUnderCursor(clientX, clientY, target) {
@@ -335,6 +390,8 @@ window.Mix01InputController = class InputController {
         this.render.setStyle(this.render.elements.viewer, 'display', 'block');
         if (this.cfg.state.isImmersive) {
             this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
+            // ✨ 更新沉浸模式计数器（延迟以等待 galleryCacheDirty 刷新）
+            setTimeout(() => this._updateGalleryCounter(), 60);
         }
         
         this.triggerPreload();
@@ -496,6 +553,22 @@ window.Mix01InputController = class InputController {
         return false;
     }
 
+    /**
+     * ✨ 更新沉浸模式图库计数器（当前 / 总数）
+     */
+    _updateGalleryCounter() {
+        if (!this.cfg.state.isImmersive) {
+            this.render.updateCounter(0, 0);
+            return;
+        }
+        const gallery = this.getGalleryImages();
+        let idx = gallery.indexOf(this.state.currentMedia);
+        if (idx === -1 && this.state.currentSrc) {
+            idx = gallery.findIndex(m => (m.src || 'video') === this.state.currentSrc);
+        }
+        this.render.updateCounter(idx >= 0 ? idx : 0, gallery.length);
+    }
+
     getGalleryImages() {
         if (!this.state._galleryCacheDirty && this.state._galleryCache) {
             return this.state._galleryCache;
@@ -518,6 +591,25 @@ window.Mix01InputController = class InputController {
         return result;
     }
 
+    /**
+     * ✨ 快速切换当前站点引擎开关（右键菜单 & 快捷键均调用此方法）
+     */
+    _quickToggleSite() {
+        const host = window.location.hostname;
+        if (!host) return;
+        if (this.cfg.disabledSites[host]) {
+            delete this.cfg.disabledSites[host];
+        } else {
+            this.cfg.disabledSites[host] = true;
+            // 禁用时立即关闭当前预览
+            if (this.cfg.state.isImmersive) this.exitImmersive();
+            else this.hideViewer();
+        }
+        this.cfg.save({ disabledSites: this.cfg.disabledSites });
+        const isEnabled = this.cfg.isSiteEnabled();
+        this.render.showToast(isEnabled ? '✅ 已在此站点启用引擎' : '🚫 已在此站点禁用引擎');
+    }
+
     performSwitch(nextImg, msgText) {
         if (msgText) this.render.showToast(msgText);
         this.state.keyboardSwitchTime = Date.now();
@@ -531,8 +623,10 @@ window.Mix01InputController = class InputController {
                 window.lastMouseY = newRect.top + newRect.height / 2;
                 this.updateRender();
                 this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
+                // ✨ 更新计数器
+                this._updateGalleryCounter();
             }
-        }, 50); 
+        }, 50);
     }
 
     async executePhantomAction(actionType) {
@@ -666,6 +760,12 @@ window.Mix01InputController = class InputController {
         const modeList = ['partial', 'full-follow', 'full-center'];
         const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
         
+        // ✨ Ctrl+Shift+X：快速禁用/启用当前站点（无需打开设置页）
+        if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'x') {
+            this._quickToggleSite();
+            e.preventDefault(); return;
+        }
+
         if (this.matchCombo(e, this.cfg.keys.immersive)) {
             e.preventDefault();
             if (this.cfg.state.isImmersive) {
@@ -688,6 +788,7 @@ window.Mix01InputController = class InputController {
                     }
                 } else {
                     this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
+                    this._updateGalleryCounter();
                 }
             }
             return;
