@@ -181,20 +181,22 @@
        '(?:.+\\.)?pixiv\\.net': {
             getContainer: (media) => document.body,
 
+            // 【性能优化】illustId → userId 的 API 查询结果缓存，避免同一张图触发 getStates+like+follow
+            // 三次独立 fetch，改为最多查一次。键：illustId，值：userId
+            _userIdCache: Object.create(null),
+
             _getPixivContext: async (media) => {
                 let illustId = null;
-                let pageIndex = 0; // 新增：用于存储当前图片的页码
+                let pageIndex = 0;
 
                 if (media && media.src) {
-                    // 1. 优先从图片链接中精准提取 ID 和 页码
                     const m = media.src.match(/\/(\d+)_/);
                     if (m) illustId = m[1];
-                    
+
                     const pm = media.src.match(/_p(\d+)/);
                     if (pm) pageIndex = parseInt(pm[1], 10);
                 }
-                
-                // 2. 其次从 DOM 上下文获取
+
                 if (!illustId && media) {
                     const parentA = media.closest('a');
                     if (parentA && parentA.href) {
@@ -202,8 +204,7 @@
                         if (m) illustId = m[1];
                     }
                 }
-                
-                // 3. 最后才使用 URL 兜底（防止划到相关推荐时串号）
+
                 if (!illustId) {
                     illustId = window.location.pathname.match(/artworks\/(\d+)/)?.[1];
                 }
@@ -218,7 +219,7 @@
                     }
                 }
                 if (!authorLink) authorLink = document.querySelector('a[data-click-label="creator"], a[href*="/users/"]');
-                
+
                 if (authorLink) {
                     const m = authorLink.getAttribute('href')?.match(/users\/(\d+)/);
                     if (m) userId = m[1];
@@ -230,14 +231,21 @@
                     if (meta) { try { token = JSON.parse(meta.content).token; } catch (e) { } }
                 }
 
+                const self = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net'];
+
                 if (illustId && !userId) {
-                    try {
-                        const res = await fetch(`/ajax/illust/${illustId}`).then(r => r.json());
-                        userId = res?.body?.userId;
-                    } catch (e) { }
+                    // 【Bug修复】原版无缓存，getStates/like/follow 各自独立 fetch 同一个 illustId
+                    if (self._userIdCache[illustId]) {
+                        userId = self._userIdCache[illustId];
+                    } else {
+                        try {
+                            const res = await fetch(`/ajax/illust/${illustId}`).then(r => r.json());
+                            userId = res?.body?.userId;
+                            if (userId) self._userIdCache[illustId] = userId;
+                        } catch (e) { }
+                    }
                 }
-                
-                // 返回新增的 pageIndex
+
                 return { illustId, userId, token, pageIndex };
             },
 

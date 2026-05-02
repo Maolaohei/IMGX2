@@ -40,18 +40,26 @@
     z-index: 2147483646 !important;
     filter: none !important;
     box-shadow: var(--mix01-shadow-ambient) !important;
-    
+
     /* 核心修复：斩断原生拖拽幽灵图与选中机制 */
     -webkit-user-drag: none !important;
     user-select: none !important;
     -webkit-user-select: none !important;
 
-    /* 性能核心：强制独立 GPU 复合层，消除 4K 拖拽掉帧 */
-    will-change: transform, opacity !important;
+    /* 【Bug修复】will-change 不应静态声明：浏览器会为页面上所有图片永久分配独立
+       GPU 层，反而大幅增加 VRAM 占用和合成开销。改为仅在查看器激活时才注入
+       will-change（由 JS 在打开/关闭时切换 .is-active class）。
+       下方 .is-active 规则负责实际的 GPU 提升。 */
     backface-visibility: hidden !important;
     transform-style: preserve-3d !important;
     contain: paint layout !important;
     transition: transform 0.15s cubic-bezier(0.1, 0.9, 0.2, 1), opacity 0.25s ease-out !important;
+}
+
+/* 仅在查看器激活（正在展示内容）时才提升 GPU 层 */
+#img-zoom-pro-viewer-xyz.is-active img#zoom-img-xyz,
+#img-zoom-pro-viewer-xyz.is-active canvas#zoom-canvas-xyz {
+    will-change: transform, opacity !important;
 }
 
 /* ================== 模式样式 ================== */

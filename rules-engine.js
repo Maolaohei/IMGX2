@@ -1,6 +1,57 @@
 // rules-engine.js
 // Mix01 高性能原生规则引擎 (终极优化版：附带LRU并发控制、API内存级缓存、智能防风控)
 
+// ============================================================
+// 【快捷键冲突修复】必须在所有模块加载前执行，提前劫持
+// document.addEventListener，为后续注册的所有 keydown/keyup
+// 监听器自动注入"输入框保护"与"修饰键保护"过滤层。
+// 这修复了 Ctrl+V 触发 V 快捷键、Alt+D 触发 D 快捷键等问题。
+// ============================================================
+(function patchKeyboardGuard() {
+    const _origAdd = Document.prototype.addEventListener;
+    const _origRemove = Document.prototype.removeEventListener;
+    // WeakMap：原始 handler → 包装后的 handler，用于 removeEventListener 配对
+    const _guardMap = new WeakMap();
+
+    // 判断焦点是否落在可编辑元素内
+    function _isEditableTarget(tgt) {
+        if (!tgt) return false;
+        const tag = tgt.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+        if (tgt.isContentEditable) return true;
+        const role = tgt.getAttribute && tgt.getAttribute('role');
+        return role === 'textbox' || role === 'combobox' || role === 'searchbox' || role === 'spinbutton';
+    }
+
+    Document.prototype.addEventListener = function(type, handler, options) {
+        if ((type === 'keydown' || type === 'keyup') && typeof handler === 'function') {
+            // 避免重复包装
+            if (_guardMap.has(handler)) {
+                return _origAdd.call(this, type, _guardMap.get(handler), options);
+            }
+            const guarded = function(e) {
+                // 保护 1：焦点在输入框/富文本时，不触发插件单键快捷键
+                if (_isEditableTarget(e.target)) return;
+                // 保护 2：有 Ctrl / Meta / Alt 修饰键时，不触发单字符快捷键
+                //         防止 Ctrl+V → V、Ctrl+C → C、Alt+F → F 等冲突
+                if ((e.ctrlKey || e.metaKey || e.altKey) &&
+                    (e.key.length === 1 || e.key === ' ' || e.key === 'Spacebar')) return;
+                handler.call(this, e);
+            };
+            _guardMap.set(handler, guarded);
+            return _origAdd.call(this, type, guarded, options);
+        }
+        return _origAdd.call(this, type, handler, options);
+    };
+
+    Document.prototype.removeEventListener = function(type, handler, options) {
+        if ((type === 'keydown' || type === 'keyup') && _guardMap.has(handler)) {
+            return _origRemove.call(this, type, _guardMap.get(handler), options);
+        }
+        return _origRemove.call(this, type, handler, options);
+    };
+})();
+
 (function () {
     // 【极致优化】：轻量级 LRU 缓存，防止 Pixiv/Twitter 瀑布流狂刷导致的内存溢出 (OOM)
     const LRUCache = {
@@ -22,26 +73,25 @@
         getLargestImgSrc: function (container) {
             if (!container || !container.querySelectorAll) return '';
             const imgs = Array.from(container.querySelectorAll('img, [style*="background"]'));
-            
-            const measurements = imgs.map(el => ({
-                el: el,
-                area: el.clientWidth * el.clientHeight,
-                bgStyle: el.style.backgroundImage
-            }));
 
             let maxArea = 0;
             let bestSrc = '';
-            measurements.forEach(item => {
-                let src = item.el.src;
-                if (!src && item.bgStyle) {
-                    const match = item.bgStyle.match(/url\(['"]?(.*?)['"]?\)/);
+            for (const el of imgs) {
+                const area = el.clientWidth * el.clientHeight;
+                // 【Bug修复】原为 >=，导致等面积时错误覆盖已有结果；改为严格 >
+                if (area <= maxArea) continue;
+
+                let src = el.src || '';
+                if (!src) {
+                    const match = el.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
                     if (match) src = match[1];
                 }
-                if (item.area >= maxArea && src) {
-                    maxArea = item.area;
+                // 跳过 data URI（无法下载为文件）和空字符串
+                if (src && !src.startsWith('data:')) {
+                    maxArea = area;
                     bestSrc = src;
                 }
-            });
+            }
             return bestSrc;
         },
         getBackgroundImgSrc: function (el) {
@@ -51,31 +101,26 @@
             return match ? match[1] : '';
         },
         detectImage: async function (primarySrc, fallbackSrc) {
-            if (!window.__mix01DetectCache) window.__mix01DetectCache = {};
-            const cacheKey = primarySrc;
-            if (window.__mix01DetectCache[cacheKey] !== undefined) {
-                return window.__mix01DetectCache[cacheKey];
-            }
+            // 【Bug修复】原来使用无限增长的普通对象，在 Pixiv/Pinterest 瀑布流下会 OOM
+            // 改为复用已有的 LRUCache 机制，最多缓存 60 条探测结果
+            const cached = LRUCache.get('__mix01DetectCache', primarySrc);
+            if (cached !== undefined) return cached;
+
             return new Promise((resolve) => {
                 const img = new Image();
-                let timeoutId = setTimeout(() => {
-                    img.src = ''; // 取消加载
-                    const fallback = fallbackSrc || primarySrc;
-                    window.__mix01DetectCache[cacheKey] = fallback;
-                    resolve(fallback);
-                }, 8000); // 8秒超时
-                
-                img.onload = () => {
+                const fallback = fallbackSrc || primarySrc;
+                let settled = false;
+                const settle = (url) => {
+                    if (settled) return;
+                    settled = true;
                     clearTimeout(timeoutId);
-                    window.__mix01DetectCache[cacheKey] = primarySrc;
-                    resolve(primarySrc);
+                    img.src = ''; // 中止加载，释放网络资源
+                    LRUCache.set('__mix01DetectCache', primarySrc, url, 60);
+                    resolve(url);
                 };
-                img.onerror = () => {
-                    clearTimeout(timeoutId);
-                    const fallback = fallbackSrc || primarySrc;
-                    window.__mix01DetectCache[cacheKey] = fallback;
-                    resolve(fallback);
-                };
+                const timeoutId = setTimeout(() => settle(fallback), 8000);
+                img.onload  = () => settle(primarySrc);
+                img.onerror = () => settle(fallback);
                 img.src = primarySrc;
             });
         }
@@ -588,10 +633,17 @@
                         const result = await rule.processor(triggerElement, originalSrc, srcRegExpObj);
                         if (result) return result;
                     } else if (typeof rule.processor === 'string' && srcRegExpObj) {
-                        return originalSrc.replace(srcRegExpObj, rule.processor);
+                        const replaced = originalSrc.replace(srcRegExpObj, rule.processor);
+                        // 【Bug修复】processor 为空字符串('')时是有意清除参数，应返回替换结果；
+                        // 但若结果与原始相同说明规则未匹配，继续向下找
+                        if (replaced !== originalSrc || rule.processor === '') return replaced;
                     }
                 } else if (srcRegExpObj) {
-                    return RegExp['$&'];
+                    // 【Bug修复】原版 RegExp['$&'] 是非标准用法，等价于 srcRegExpObj 上次 test()
+                    // 留下的 lastMatch，在异步代码中极易被其他 test() 覆盖导致返回错误值。
+                    // 改为直接返回整个匹配到的部分（即原 src 匹配的子串）。
+                    const m = srcRegExpObj.exec(originalSrc);
+                    if (m) return m[0];
                 }
             }
 

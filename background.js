@@ -15,18 +15,28 @@ chrome.contextMenus.create({ id: "saveOriginalImgMix01", title: "保存原图 (M
     }
 });
 
-let _historyCache = null; 
+let _historyCache = null;
+let _historyDirty = false; // 防止并发写入竞争：标记是否有未刷新的内存变更
 
 function saveToHistory(filename, statusMsg) {
     const timeStr = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     const newItem = { time: timeStr, filename: filename, status: statusMsg };
-    chrome.storage.local.get(['mix01_download_history'], (res) => {
-        _historyCache = res.mix01_download_history || [];
-        // 优化：使用 pop() 剔除尾部元素，代替耗时的 slice() 数组截取重建
+
+    if (_historyCache !== null) {
+        // 【Bug修复】原版每次都从 storage 读，并发下载时第二个读到的是旧数据，
+        // 导致两次写入互相覆盖，丢失历史记录。改为优先使用内存缓存。
         _historyCache.unshift(newItem);
-        if (_historyCache.length > 50) _historyCache.pop(); 
+        if (_historyCache.length > 50) _historyCache.pop();
         chrome.storage.local.set({ mix01_download_history: _historyCache });
-    });
+    } else {
+        // 首次：从 storage 初始化内存缓存
+        chrome.storage.local.get(['mix01_download_history'], (res) => {
+            _historyCache = res.mix01_download_history || [];
+            _historyCache.unshift(newItem);
+            if (_historyCache.length > 50) _historyCache.pop();
+            chrome.storage.local.set({ mix01_download_history: _historyCache });
+        });
+    }
 }
 
 // 缓存全局变量，避免每次下载都重新执行 O(N) 的正则拆分和编译
@@ -116,45 +126,39 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     } else if (initialUrl.includes('_p0')) {
                         const targetExt = initialUrl.endsWith('.png') ? '.jpg' : '.png';
                         altUrls.push(initialUrl.replace(/\.\w+$/, targetExt));
-                        // 添加更多备用：不同分辨率
                         altUrls.push(initialUrl.replace('_p0', '_p1'), initialUrl.replace('_p0', '_p2'));
                     } else {
-                        // 对于其他情况，尝试添加_p0
                         const base = initialUrl.replace(/\.\w+$/, '');
                         altUrls.push(`${base}_p0.jpg`, `${base}_p0.png`, `${base}.jpg`, `${base}.png`);
                     }
-                    
+
                     if (altUrls.length > 0) {
                         try {
-                            // 并发发起 HEAD 请求，谁先返回 200 OK 谁就赢
-                            const fetchPromises = altUrls.map(alt => 
-                                fetch(alt, { 
+                            const fetchPromises = altUrls.map(alt =>
+                                fetch(alt, {
                                     method: 'HEAD',
                                     headers: {
                                         'Referer': request.pageUrl || 'https://www.pixiv.net/',
                                         'User-Agent': navigator.userAgent
                                     }
                                 }).then(testRes => {
-                                    if (testRes.ok) return { res: testRes, url: alt };
+                                    if (testRes.ok) return alt; // 只返回 URL，不保留 HEAD response
                                     throw new Error('Not ok');
                                 })
                             );
-                            const firstSuccess = await Promise.any(fetchPromises);
-                            finalUrl = firstSuccess.url;
-                            
-                            // 修正原版 Bug：如果使用了 Base64，HEAD 请求是没有 Body 的，必须重新发起 GET
-                            if (useBase64) {
-                                res = await fetch(finalUrl, {
-                                    headers: {
-                                        'Referer': request.pageUrl || 'https://www.pixiv.net/',
-                                        'User-Agent': navigator.userAgent
-                                    }
-                                });
-                            } else {
-                                res = firstSuccess.res; 
-                            }
+                            finalUrl = await Promise.any(fetchPromises);
+
+                            // 【Bug修复】无论是否 Base64，都必须重新发 GET 请求获取响应体。
+                            // 原版在非 Base64 分支直接用 HEAD response 的 res 对象，
+                            // 导致后续 res.ok 检查虽然通过，但实际下载的是空响应。
+                            res = await fetch(finalUrl, {
+                                headers: {
+                                    'Referer': request.pageUrl || 'https://www.pixiv.net/',
+                                    'User-Agent': navigator.userAgent,
+                                    'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8'
+                                }
+                            });
                         } catch(e) {
-                            // 所有备用链接都 404，跳出继续走报错逻辑
                             console.warn('All Pixiv alt URLs failed:', altUrls, e);
                         }
                     }
@@ -173,6 +177,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const fullPath = urlObj.pathname.split('/').pop();
                 let filename = "media", ext = "";
 
+                // 预计算 MIME 映射（用于兜底）
+                const _mimeToExt = { 'jpeg': 'jpg', 'jpg': 'jpg', 'png': 'png', 'gif': 'gif',
+                    'webp': 'webp', 'svg+xml': 'svg', 'bmp': 'bmp', 'mp4': 'mp4',
+                    'webm': 'webm', 'avif': 'avif' };
+                const _rawCt = (res.headers.get('content-type') || 'image/jpeg').split(';')[0].trim();
+                const _rawSubtype = _rawCt.split('/')[1] || 'jpeg';
+                // 【Bug修复】原 split(';')[0] 对 'image/svg+xml' 给出 'svg+xml'，现在用映射修正
+                const _resolvedExt = '.' + (_mimeToExt[_rawSubtype] || _rawSubtype.split('+')[0] || 'jpg');
+
                 // 1. 优先检查 URL 参数 (解决 X.com 问题)
                 const paramExt = urlObj.searchParams.get('format') || urlObj.searchParams.get('ext');
                 if (paramExt) {
@@ -185,31 +198,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         filename = fullPath.substring(0, dotIndex);
                         ext = fullPath.substring(dotIndex);
                     } else {
-                        // 3. 兜底：从 Content-Type 提取
+                        // 3. 兜底：从 Content-Type 提取（使用修复后的 MIME 映射）
                         filename = fullPath || "media";
-                        const ct = res.headers.get('content-type');
-                        if (ct && ct.includes('image/')) ext = "." + ct.split('/')[1].split(';')[0];
-                        if (!ext) ext = ".jpg"; 
+                        ext = _resolvedExt;
                     }
                 }
-                
+
                 filename = filename.replace(/[\\/:*?"<>|]/g, "_");
                 const finalDownloadName = `IMG_Download/${filename}${ext}`;
                 // --------------------------------
 
-                const contentType = res.headers.get('content-type') || 'image/jpeg';
+                const contentType = _rawCt; // 供下方 blob 使用
                 
                 if (useBase64) {
                     // 优化：检查文件大小，大文件直接下载避免内存溢出
                     const contentLength = res.headers.get('content-length');
                     const sizeLimit = 20 * 1024 * 1024; // 20MB
+
                     if (contentLength && parseInt(contentLength) > sizeLimit) {
                         console.warn('File too large for Base64, falling back to direct download');
                         chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
                             saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (大文件直接下载)" : "✅ 成功 (大文件直接下载)");
                         });
                     } else {
-                        // 【神级优化】：抛弃 JS 循环拼接，调用浏览器原生 C++ 引擎进行高并发、零阻塞的 Base64 编码
                         const blob = await res.blob();
                         if (blob.size > sizeLimit) {
                             console.warn('Blob too large for Base64, falling back to direct download');
@@ -217,21 +228,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                                 saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (大文件直接下载)" : "✅ 成功 (大文件直接下载)");
                             });
                         } else {
-                            const reader = new FileReader();
-                            
-                            reader.onloadend = () => {
-                                const dataUrl = reader.result; // 这里直接就是原生生成好的 base64 字符串
-                                chrome.downloads.download({ url: dataUrl, filename: finalDownloadName, saveAs: false }, () => {
-                                    saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功 (Base64)");
-                                });
-                            };
-                            
-                            reader.onerror = () => {
-                                saveToHistory(finalDownloadName, "❌ 失败 (Base64 编码异常)");
-                            };
-                            
-                            // 发起底层异步读取
-                            reader.readAsDataURL(blob);
+                            // 【性能优化 & Bug修复】
+                            // 原版用 FileReader.readAsDataURL，会把整个文件 Base64 编码后塞进内存字符串，
+                            // 实际体积比原文件大 ~33%，service worker 内存会瞬间暴涨。
+                            // 改用 URL.createObjectURL：直接引用底层 Blob，零拷贝，用完后即刻释放。
+                            const blobUrl = URL.createObjectURL(blob);
+                            chrome.downloads.download({ url: blobUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, (downloadId) => {
+                                // 延迟释放，确保下载引擎已持有引用
+                                setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+                                saveToHistory(finalDownloadName, (chrome.runtime.lastError || downloadId === undefined) ? "❌ 失败" : "✅ 成功 (BlobURL)");
+                            });
                         }
                     }
                 } else {
