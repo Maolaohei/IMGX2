@@ -20,6 +20,7 @@ window.Mix01InputController = class InputController {
         this._preloadTimer = null;   // 用于网络防抖
         this._resizeTimer = null;    // 沉浸模式 resize 防抖
         this._hoverDelayTimer = null; // ✨ 悬停延迟触发定时器
+        this._cursorHideTimer = null; // ✨ 沉浸模式光标自动隐藏定时器
         // ✨ 放大镜拖拽状态
         this._drag = { active: false, startX: 0, startY: 0, origLeft: 0, origTop: 0 };
 
@@ -70,7 +71,11 @@ window.Mix01InputController = class InputController {
                 const delta = e.deltaY > 0 ? -0.15 : 0.15;
                 this.state.activeZoom = Math.max(0.2, this.state.activeZoom + delta);
                 this.state.isZoomManuallyChanged = true;
-                this.updateRender(e); 
+                this.updateRender(e);
+                clearTimeout(this._wheelToastTimer);
+                this._wheelToastTimer = setTimeout(() => {
+                    this.render.showToast(`🔍 ${this.state.activeZoom.toFixed(1)}x`);
+                }, 200);
             }
         }, { passive: false });
 
@@ -108,7 +113,22 @@ window.Mix01InputController = class InputController {
                     this.state.currentMedia.currentTime = pos * this.state.currentMedia.duration;
                     this.render.elements.progressBar.style.setProperty('width', `${pos * 100}%`, 'important');
                 }
-                e.stopPropagation(); 
+                e.stopPropagation();
+            }
+        });
+
+        // ✨ 沉浸模式点击视频画面切换播放/暂停
+        this.render.elements.canvas.addEventListener('click', (e) => {
+            if (this.cfg.state.isImmersive && this.state.currentMedia && this.state.currentMedia.tagName === 'VIDEO') {
+                e.stopPropagation();
+                if (window.__mix01UserPaused) {
+                    window.__mix01UserPaused = false;
+                    this.state.currentMedia.play().catch(() => {});
+                } else {
+                    window.__mix01UserPaused = true;
+                    this.state.currentMedia.pause();
+                }
+                this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
             }
         });
 
@@ -189,6 +209,13 @@ window.Mix01InputController = class InputController {
 
     handleMouseMove(e) {
         if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') {
+            // ✨ 光标自动隐藏：移动时显示，2 秒不动则隐藏
+            this.render.elements.viewer.style.setProperty('cursor', 'default', 'important');
+            clearTimeout(this._cursorHideTimer);
+            this._cursorHideTimer = setTimeout(() => {
+                this.render.elements.viewer.style.setProperty('cursor', 'none', 'important');
+            }, 2000);
+
             this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
             this.updateRender(e);
             return;
@@ -463,6 +490,7 @@ window.Mix01InputController = class InputController {
 
     hideViewer() {
         this.render.hide();
+        clearTimeout(this._cursorHideTimer);
         this.mediaObserver.disconnect();
         if (this._resizeTimer) {
             clearTimeout(this._resizeTimer);
@@ -795,6 +823,11 @@ window.Mix01InputController = class InputController {
         }
 
         if (this.render.elements.viewer.style.display !== 'block') return;
+
+        // ✨ 沉浸模式下按任意键唤醒 HUD 提示栏
+        if (this.cfg.state.isImmersive) {
+            this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
+        }
 
         if (this.matchCombo(e, this.cfg.keys.playVideo || 'space') || e.code === 'Space') {
             if (this.cfg.state.isImmersive && this.state.currentMedia && this.state.currentMedia.tagName === 'VIDEO') {
