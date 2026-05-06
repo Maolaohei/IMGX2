@@ -33,8 +33,9 @@
                 // 保护 1：焦点在输入框/富文本时，不触发插件单键快捷键
                 if (_isEditableTarget(e.target)) return;
                 // 保护 2：有 Ctrl / Meta / Alt 修饰键时，不触发单字符快捷键
-                //         防止 Ctrl+V → V、Ctrl+C → C、Alt+F → F 等冲突
-                if ((e.ctrlKey || e.metaKey || e.altKey) &&
+                //         防止 Ctrl+V → V、Ctrl+C → C、Alt+F → F 等冲突。
+                //         但若同时按住 Shift（如 Ctrl+Shift+X），视为用户主动组合键，予以放行。
+                if ((e.ctrlKey || e.metaKey || e.altKey) && !e.shiftKey &&
                     (e.key.length === 1 || e.key === ' ' || e.key === 'Spacebar')) return;
                 handler.call(this, e);
             };

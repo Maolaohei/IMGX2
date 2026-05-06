@@ -341,9 +341,8 @@ document.addEventListener('DOMContentLoaded', () => {
         elements.manualSiteAddBtn.addEventListener('click', () => {
             let host = elements.manualSiteInput.value.trim().toLowerCase();
             if (!host) return;
-            // 容错：允许用户输入完整 URL
-            try { host = new URL(host.includes('://') ? host : 'https://' + host).hostname; } catch (e) {}
-            if (!host) return;
+            // 容错：允许用户输入完整 URL；解析失败则放弃
+            try { host = new URL(host.includes('://') ? host : 'https://' + host).hostname; } catch (e) { return; }
             disabledSites[host] = true;
             chrome.storage.local.set({ disabledSites }, () => {
                 elements.manualSiteInput.value = '';

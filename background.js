@@ -16,27 +16,27 @@ chrome.contextMenus.create({ id: "saveOriginalImgMix01", title: "保存原图 (M
 });
 
 let _historyCache = null;
-let _historyDirty = false; // 防止并发写入竞争：标记是否有未刷新的内存变更
+let _historyInitPromise = null;
 
-function saveToHistory(filename, statusMsg) {
+async function saveToHistory(filename, statusMsg) {
     const timeStr = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     const newItem = { time: timeStr, filename: filename, status: statusMsg };
 
-    if (_historyCache !== null) {
-        // 【Bug修复】原版每次都从 storage 读，并发下载时第二个读到的是旧数据，
-        // 导致两次写入互相覆盖，丢失历史记录。改为优先使用内存缓存。
-        _historyCache.unshift(newItem);
-        if (_historyCache.length > 50) _historyCache.pop();
-        chrome.storage.local.set({ mix01_download_history: _historyCache });
-    } else {
-        // 首次：从 storage 初始化内存缓存
-        chrome.storage.local.get(['mix01_download_history'], (res) => {
-            _historyCache = res.mix01_download_history || [];
-            _historyCache.unshift(newItem);
-            if (_historyCache.length > 50) _historyCache.pop();
-            chrome.storage.local.set({ mix01_download_history: _historyCache });
-        });
+    if (_historyCache === null) {
+        if (!_historyInitPromise) {
+            _historyInitPromise = new Promise((resolve) => {
+                chrome.storage.local.get(['mix01_download_history'], (res) => {
+                    _historyCache = res.mix01_download_history || [];
+                    resolve();
+                });
+            });
+        }
+        await _historyInitPromise;
     }
+
+    _historyCache.unshift(newItem);
+    if (_historyCache.length > 50) _historyCache.pop();
+    chrome.storage.local.set({ mix01_download_history: _historyCache });
 }
 
 // 缓存全局变量，避免每次下载都重新执行 O(N) 的正则拆分和编译
@@ -66,6 +66,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             let initialUrl = request.url;
             if (initialUrl.startsWith('//')) initialUrl = 'https:' + initialUrl;
 
+            try {
             try {
                 const config = await chrome.storage.local.get(['base64Domains']);
                 const useBase64 = isBase64Domain(initialUrl, config.base64Domains);
@@ -111,7 +112,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         chrome.downloads.download({ url: initialUrl, filename: `IMG_Download/${initialUrl.split('/').pop() || 'media'}`, saveAs: false }, () => {
                             saveToHistory(initialUrl.split('/').pop() || "media", chrome.runtime.lastError ? "❌ 失败 (直接下载)" : "✅ 成功 (直接下载)");
                         });
-                        return true;
+                        return;
                     }
                 }
                 let finalUrl = initialUrl;
@@ -169,7 +170,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     chrome.downloads.download({ url: finalUrl, filename: `IMG_Download/${finalUrl.split('/').pop() || 'media'}`, saveAs: false, conflictAction: 'uniquify' }, () => {
                         saveToHistory(finalUrl.split('/').pop() || "media", chrome.runtime.lastError ? "❌ 失败 (直接下载回退)" : "✅ 成功 (直接下载回退)");
                     });
-                    return true;
+                    return;
                 }
 
                 // --- 【核心修复：智能后缀提取】 ---
@@ -247,6 +248,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 }
             } catch (err) {
                 saveToHistory(initialUrl.split('/').pop() || "media", "❌ 拦截: " + err.message);
+            } finally {
+                sendResponse({ success: true });
             }
         })();
         return true; 

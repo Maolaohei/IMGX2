@@ -796,7 +796,7 @@ window.Mix01InputController = class InputController {
 
         if (this.render.elements.viewer.style.display !== 'block') return;
 
-        if (this.matchCombo(e, this.cfg.keys.playVideo || 'space') || e.code.toLowerCase() === 'space') {
+        if (this.matchCombo(e, this.cfg.keys.playVideo || 'space') || e.code === 'Space') {
             if (this.cfg.state.isImmersive && this.state.currentMedia && this.state.currentMedia.tagName === 'VIDEO') {
                 if (window.__mix01UserPaused) {
                     window.__mix01UserPaused = false;

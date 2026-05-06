@@ -7,7 +7,9 @@ window.Mix01Utils = {
     async copyImageToClipboard(url, renderer) {
         renderer.showToast("⏳ 正在获取并处理原图...");
         try {
-            const response = await fetch(url);
+            const response = await fetch(url, {
+                headers: { 'Referer': window.location.href }
+            });
             if (!response.ok) throw new Error("Network response was not ok");
             const blob = await response.blob();
             const img = new Image();
