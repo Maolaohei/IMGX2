@@ -7,7 +7,7 @@ window.Mix01InputController = class InputController {
         this.state = {
             currentMedia: null, currentSrc: null, currentHdUrl: null, cachedRect: null,
             activeZoom: 2.0, isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
-            isZoomManuallyChanged: false, keyboardSwitchTime: 0, isTicking: false,
+            isZoomManuallyChanged: false, panOffsetX: 0, panOffsetY: 0, keyboardSwitchTime: 0, isTicking: false,
             bgClickCount: 0, bgClickTimer: null, lastTarget: null, lastFoundMedia: null,
             isRenderingLock: false,
             lastRenderX: null, lastRenderY: null, lastRenderZoom: null, lastRenderMediaSrc: null,
@@ -23,6 +23,8 @@ window.Mix01InputController = class InputController {
         this._cursorHideTimer = null; // ✨ 沉浸模式光标自动隐藏定时器
         // ✨ 放大镜拖拽状态
         this._drag = { active: false, startX: 0, startY: 0, origLeft: 0, origTop: 0 };
+        // ✨ 沉浸模式平移状态
+        this._pan = { active: false, moved: false, startX: 0, startY: 0, origPanX: 0, origPanY: 0 };
 
         this.mediaObserver = new MutationObserver((mutations) => {
             let newSrc = null;
@@ -132,6 +134,20 @@ window.Mix01InputController = class InputController {
             }
         });
 
+        // ✨ 沉浸模式双击图片重置视图（缩放/旋转/镜像/平移一键还原）
+        this.render.elements.img.addEventListener('dblclick', (e) => {
+            if (!this.cfg.state.isImmersive) return;
+            e.stopPropagation();
+            this.cfg.state.rotate = 0;
+            this.cfg.state.mirror = 1;
+            this.state.activeZoom = this.cfg.state.zoom;
+            this.state.isZoomManuallyChanged = false;
+            this.state.panOffsetX = 0;
+            this.state.panOffsetY = 0;
+            this.updateRender();
+            this.render.showToast('🔄 视图已重置');
+        });
+
         // ✨ 右键上下文菜单
         this.render.elements.viewer.addEventListener('contextmenu', (e) => {
             if (!this.cfg.state.hasAgreed) return;
@@ -139,8 +155,9 @@ window.Mix01InputController = class InputController {
             e.stopPropagation();
             this.render.showContextMenu(e.clientX, e.clientY, {
                 'copy-img':     () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) window.Mix01Utils.copyImageToClipboard(u, this.render); },
-                'copy-url':     () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) { navigator.clipboard.writeText(u).catch(() => {}); this.render.showToast('🔗 链接已复制'); } },
-                'open-tab':     () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) { window.open(u, '_blank', 'noopener,noreferrer'); this.render.showToast('↗️ 已在新标签页打开'); } },
+                'copy-url':      () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) { navigator.clipboard.writeText(u).catch(() => {}); this.render.showToast('🔗 链接已复制'); } },
+                'copy-markdown': () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) { navigator.clipboard.writeText(`![](${u})`).catch(() => {}); this.render.showToast('📋 Markdown 已复制'); } },
+                'open-tab':      () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) { window.open(u, '_blank', 'noopener,noreferrer'); this.render.showToast('↗️ 已在新标签页打开'); } },
                 'save':         () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) window.Mix01Utils.downloadImage(u, this.render); },
                 'disable-site': () => { this._quickToggleSite(); },
                 'close':        () => { this.cfg.state.isImmersive ? this.exitImmersive() : this.hideViewer(); },
@@ -165,7 +182,35 @@ window.Mix01InputController = class InputController {
             this.state.keyboardSwitchTime = Date.now() + 99999;
         });
 
+        // ✨ 沉浸模式拖拽平移（放大后拖拽画面浏览细节）
+        this.render.elements.viewer.addEventListener('mousedown', (e) => {
+            if (!this.cfg.state.isImmersive) return;
+            if (e.target === this.render.elements.progressContainer) return;
+            const nw = this.state.currentMedia?.naturalWidth || 0;
+            const nh = this.state.currentMedia?.naturalHeight || 0;
+            const sw = window.innerWidth, sh = window.innerHeight;
+            if (nw * this.state.activeZoom <= sw && nh * this.state.activeZoom <= sh) return;
+            e.preventDefault();
+            this._pan.active  = true;
+            this._pan.moved   = false;
+            this._pan.startX  = e.clientX;
+            this._pan.startY  = e.clientY;
+            this._pan.origPanX = this.state.panOffsetX;
+            this._pan.origPanY = this.state.panOffsetY;
+        });
+
         document.addEventListener('mousemove', (e) => {
+            if (this._pan.active) {
+                const dx = e.clientX - this._pan.startX;
+                const dy = e.clientY - this._pan.startY;
+                if (!this._pan.moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) this._pan.moved = true;
+                if (this._pan.moved) {
+                    this.state.panOffsetX = this._pan.origPanX + dx;
+                    this.state.panOffsetY = this._pan.origPanY + dy;
+                    this.updateRender(e);
+                }
+                return;
+            }
             if (!this._drag.active) return;
             const dx = e.clientX - this._drag.startX;
             const dy = e.clientY - this._drag.startY;
@@ -178,6 +223,19 @@ window.Mix01InputController = class InputController {
         }, { capture: true, passive: true });
 
         document.addEventListener('mouseup', () => {
+            if (this._pan.active) {
+                this._pan.active = false;
+                // 平移后钳制偏移量，防止完全拖出视野
+                if (this.state.currentMedia && this.cfg.state.isImmersive) {
+                    const nw = this.state.currentMedia.naturalWidth || 0;
+                    const nh = this.state.currentMedia.naturalHeight || 0;
+                    const sw = window.innerWidth, sh = window.innerHeight;
+                    const tW = nw * this.state.activeZoom, tH = nh * this.state.activeZoom;
+                    this.state.panOffsetX = Math.max(-(tW - sw), Math.min(0, this.state.panOffsetX || 0));
+                    this.state.panOffsetY = Math.max(-(tH - sh), Math.min(0, this.state.panOffsetY || 0));
+                }
+                this.updateRender();
+            }
             if (!this._drag.active) return;
             this._drag.active = false;
             this.render.elements.viewer.style.setProperty('cursor', 'default', 'important');
@@ -476,9 +534,10 @@ window.Mix01InputController = class InputController {
                 
                 // 将计算好的全量数据直接压入渲染管线
                 this.state.activeZoom = this.render.updateLayout(
-                    activeMedia, rect, this.state.activeZoom, xP, yP, 
-                    this.state.isSmallOptimized, this.state.customLensWidth, this.state.customLensHeight, 
-                    this.state.isZoomManuallyChanged, this.state.currentSrc, sW, sH
+                    activeMedia, rect, this.state.activeZoom, xP, yP,
+                    this.state.isSmallOptimized, this.state.customLensWidth, this.state.customLensHeight,
+                    this.state.isZoomManuallyChanged, this.state.currentSrc, sW, sH,
+                    this.state.panOffsetX, this.state.panOffsetY
                 );
             } catch (err) {
                 console.warn("Mix01 Render Engine:", err);
@@ -504,6 +563,8 @@ window.Mix01InputController = class InputController {
         this.state.customLensWidth = null;
         this.state.customLensHeight = null;
         this.state.isZoomManuallyChanged = false;
+        this.state.panOffsetX = 0;
+        this.state.panOffsetY = 0;
         window.isFetchingMore = false;
         this.state.isRenderingLock = false;
     }

@@ -43,6 +43,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.elements.ctxMenu.innerHTML = `
             <div class="ctx-item" data-action="copy-img">📋 复制图片</div>
             <div class="ctx-item" data-action="copy-url">🔗 复制链接</div>
+            <div class="ctx-item" data-action="copy-markdown">📋 复制 Markdown</div>
             <div class="ctx-item" data-action="open-tab">↗️ 在新标签页打开</div>
             <div class="ctx-sep"></div>
             <div class="ctx-item" data-action="save">💾 保存图片</div>
@@ -347,7 +348,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.currentVideoEl = null;
     }
 
-    updateLayout(activeMedia, rect, activeZoom, xP, yP, isSmallOptimized, customLensWidth, customLensHeight, isZoomManuallyChanged, currentHoveredSrc) {
+    updateLayout(activeMedia, rect, activeZoom, xP, yP, isSmallOptimized, customLensWidth, customLensHeight, isZoomManuallyChanged, currentHoveredSrc, _sw, _sh, panOffsetX, panOffsetY) {
         const sW = window.innerWidth, sH = window.innerHeight;
         const isVideo = activeMedia === this.elements.canvas;
         const nw = isVideo ? (activeMedia.width  || rect.width  || 1) : (activeMedia.naturalWidth  || rect.width  || 1);
@@ -394,6 +395,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 offsetX = (tW > sW) ? -(tW - sW) * xP : offsetX;
                 offsetY = (tH > sH) ? -(tH - sH) * yP : offsetY;
             }
+            // 叠加手工拖拽平移偏移
+            if (panOffsetX) offsetX += panOffsetX;
+            if (panOffsetY) offsetY += panOffsetY;
 
             this.setStyle(activeMedia, 'transform',
                 `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`);
