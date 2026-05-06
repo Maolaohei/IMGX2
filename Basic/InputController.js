@@ -785,8 +785,8 @@ window.Mix01InputController = class InputController {
         // ✨ 站点级开关：该站点已禁用则所有快捷键均不响应
         if (!this.cfg.isSiteEnabled()) return;
         const k = e.key.toLowerCase(); let up = false;
-        const modeList = ['partial', 'full-follow', 'full-center'];
-        const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
+        const modeList = ['partial', 'full-follow'];
+        const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随' };
         
         // ✨ Ctrl+Shift+X：快速禁用/启用当前站点（无需打开设置页）
         if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'x') {

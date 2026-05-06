@@ -57,6 +57,8 @@ window.Mix01ConfigManager = class ConfigManager {
         } else {
             this.state.mode = this.globalMode || 'partial';
         }
+        // 兼容已移除的 full-center 模式
+        if (this.state.mode === 'full-center') this.state.mode = 'full-follow';
 
         Object.keys(this.keys).forEach(k => {
             let storageKey = 'key' + k.charAt(0).toUpperCase() + k.slice(1);

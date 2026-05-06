@@ -363,7 +363,7 @@ document.addEventListener('DOMContentLoaded', () => {
             elements.siteModesList.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">暂无站点独立视图记忆 —— 所有站点使用全局默认模式</span>';
             return;
         }
-        const modeLabels = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随', 'full-center': '📐 智能避让' };
+        const modeLabels = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随' };
         elements.siteModesList.innerHTML = entries.map(([host, mode]) => `
             <div class="disabled-site-item">
                 <span class="site-name">${escapeHTML(host)}</span>
