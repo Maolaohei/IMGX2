@@ -67,7 +67,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             if (initialUrl.startsWith('//')) initialUrl = 'https:' + initialUrl;
 
             try {
-            try {
                 const config = await chrome.storage.local.get(['base64Domains']);
                 const useBase64 = isBase64Domain(initialUrl, config.base64Domains);
 
