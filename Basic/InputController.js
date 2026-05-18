@@ -1,8 +1,22 @@
 // Basic/InputController.js
+
+// 🚀 Optimization 5: 高频对象池，消灭 GC 内存回收卡顿
+class Mix01ImagePool {
+    constructor() { this.pool = []; }
+    acquire() { return this.pool.pop() || new Image(); }
+    release(img) {
+        img.onload = null; img.onerror = null; img.src = '';
+        if (this.pool.length < 30) this.pool.push(img);
+    }
+}
+
 window.Mix01InputController = class InputController {
     constructor(configManager, renderer) {
         this.cfg = configManager;
         this.render = renderer;
+        
+        this.imgPool = new Mix01ImagePool();
+        this.activePreloads = new Set();
         
         this.state = {
             _currentMediaRef: null,
@@ -18,17 +32,22 @@ window.Mix01InputController = class InputController {
             set lastTarget(el) { this._lastTargetRef = el ? new WeakRef(el) : null; },
 
             currentSrc: null, currentHdUrl: null, cachedRect: null,
-            activeZoom: 2.0, isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
-            isZoomManuallyChanged: false, panOffsetX: 0, panOffsetY: 0, keyboardSwitchTime: 0, isTicking: false,
+            isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
+            isZoomManuallyChanged: false, keyboardSwitchTime: 0, isTicking: false,
             bgClickCount: 0, bgClickTimer: null,
             isRenderingLock: false,
             lastRenderSignature: null,
-            _galleryCache: null, 
-            _galleryCacheDirty: true,
+            _galleryCache: null, _galleryCacheDirty: true,
             
-            currentMode: 'partial',
-            currentRotate: 0,
-            currentMirror: 1
+            currentMode: 'partial', currentRotate: 0, currentMirror: 1
+        };
+
+        // 🚀 Optimization 1: 物理插值状态机
+        this.physics = {
+            targetZoom: 2.0, currentZoom: 2.0,
+            targetPanX: 0, currentPanX: 0,
+            targetPanY: 0, currentPanY: 0,
+            active: false
         };
         
         this.preloadedUrls = new Set();
@@ -38,20 +57,33 @@ window.Mix01InputController = class InputController {
         this._resizeTimer = null;    
         this._hoverDelayTimer = null; 
         this._cursorHideTimer = null; 
-        
         this._lastDetectTime = 0;
         this._lastRectTime = 0;
-
         this._drag = { active: false, startX: 0, startY: 0, origLeft: 0, origTop: 0 };
         this._pan = { active: false, moved: false, startX: 0, startY: 0, origPanX: 0, origPanY: 0 };
+
+        // 🚀 Optimization 3: IntersectionObserver 空间树，彻底干掉 elementsFromPoint
+        this.visibleMediaElements = new Set();
+        this.mediaIO = new IntersectionObserver((entries) => {
+            for (let e of entries) {
+                if (e.isIntersecting) this.visibleMediaElements.add(e.target);
+                else this.visibleMediaElements.delete(e.target);
+            }
+        }, { rootMargin: '200px' });
+        
+        setInterval(() => {
+            if (!this.cfg.isSiteEnabled()) return;
+            document.querySelectorAll('img, video').forEach(el => {
+                if (!el._mix01Observed) { el._mix01Observed = true; this.mediaIO.observe(el); }
+            });
+        }, 1500);
 
         this.mediaObserver = new MutationObserver((mutations) => {
             let newSrc = null;
             for (let m of mutations) {
                 if (m.type === 'attributes' && m.attributeName === 'src' && m.target === this.state.currentMedia) {
                     if (this.state.currentMedia && this.state.currentMedia.src !== this.state.currentSrc) {
-                        newSrc = this.state.currentMedia.src;
-                        break; 
+                        newSrc = this.state.currentMedia.src; break; 
                     }
                 }
             }
@@ -59,7 +91,6 @@ window.Mix01InputController = class InputController {
                 this.state.currentSrc = newSrc;
                 if (this.render.elements.img.src !== this.state.currentHdUrl) {
                     this.render.elements.img.src = newSrc;
-                    this.render.elements.img.decode().catch(()=>{});
                     this.updateRender();
                 }
                 this.upgradeToHDQuietly(this.state.currentMedia, newSrc);
@@ -83,6 +114,58 @@ window.Mix01InputController = class InputController {
         this.render.handleImmersiveActivity(v, this.state.currentSrc, this.cfg.keys);
     }
 
+    // 🚀 Optimization 1: 物理弹性阻尼循环
+    _startPhysicsLoop() {
+        if (this.physics.active) return;
+        this.physics.active = true;
+
+        const loop = () => {
+            if (!this.state.currentMedia || this.render.elements.viewer.style.display !== 'block' || this._drag.active) {
+                this.physics.active = false;
+                return;
+            }
+
+            const lerp = (s, e, f) => s + (e - s) * f;
+            let zDiff = this.physics.targetZoom - this.physics.currentZoom;
+            let xDiff = this.physics.targetPanX - this.physics.currentPanX;
+            let yDiff = this.physics.targetPanY - this.physics.currentPanY;
+
+            // 精度到达阈值，终止动画
+            if (Math.abs(zDiff) < 0.001 && Math.abs(xDiff) < 0.5 && Math.abs(yDiff) < 0.5) {
+                this.physics.currentZoom = this.physics.targetZoom;
+                this.physics.currentPanX = this.physics.targetPanX;
+                this.physics.currentPanY = this.physics.targetPanY;
+                this.physics.active = false;
+                this.updateRender(); 
+                return;
+            }
+
+            this.physics.currentZoom = lerp(this.physics.currentZoom, this.physics.targetZoom, 0.25);
+            this.physics.currentPanX = lerp(this.physics.currentPanX, this.physics.targetPanX, 0.25);
+            this.physics.currentPanY = lerp(this.physics.currentPanY, this.physics.targetPanY, 0.25);
+
+            this.updateRender();
+            requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
+    }
+
+    _clampTargetPan() {
+        if (!this.state.currentMedia) return;
+        const nw = this.state.currentMedia.naturalWidth || 0;
+        const nh = this.state.currentMedia.naturalHeight || 0;
+        const isRotated = this.state.currentRotate % 180 !== 0;
+        const vW = (isRotated ? nh : nw) * this.physics.targetZoom;
+        const vH = (isRotated ? nw : nh) * this.physics.targetZoom;
+        const sw = window.innerWidth, sh = window.innerHeight;
+
+        if (vW <= sw) this.physics.targetPanX = 0;
+        else this.physics.targetPanX = Math.max(-(vW - sw), Math.min(0, this.physics.targetPanX));
+
+        if (vH <= sh) this.physics.targetPanY = 0;
+        else this.physics.targetPanY = Math.max(-(vH - sh), Math.min(0, this.physics.targetPanY));
+    }
+
     bindEvents() {
         document.addEventListener('mousemove', (e) => {
             window.lastMouseX = e.clientX; window.lastMouseY = e.clientY;
@@ -103,13 +186,16 @@ window.Mix01InputController = class InputController {
         document.addEventListener('wheel', (e) => {
             if (this.cfg.state.wheelZoomEnabled && this.render.elements.viewer.style.display === 'block') {
                 e.preventDefault();
-                const delta = e.deltaY > 0 ? -0.15 : 0.15;
-                this.state.activeZoom = Math.max(0.2, this.state.activeZoom + delta);
+                const delta = e.deltaY > 0 ? -0.25 : 0.25;
+                this.physics.targetZoom = Math.max(0.2, this.physics.targetZoom + delta);
                 this.state.isZoomManuallyChanged = true;
-                this.updateRender(e);
+                
+                this._clampTargetPan();
+                this._startPhysicsLoop();
+
                 clearTimeout(this._wheelToastTimer);
                 this._wheelToastTimer = setTimeout(() => {
-                    this.render.showToast(`🔍 ${this.state.activeZoom.toFixed(1)}x`);
+                    this.render.showToast(`🔍 ${this.physics.targetZoom.toFixed(1)}x`);
                 }, 200);
             }
         }, { passive: false });
@@ -152,13 +238,9 @@ window.Mix01InputController = class InputController {
             }
         });
 
-        this.render.elements.canvas.addEventListener('click', (e) => {
-            e.stopPropagation(); this._toggleVideoPlay();
-        });
+        this.render.elements.canvas.addEventListener('click', (e) => { e.stopPropagation(); this._toggleVideoPlay(); });
         if (this.render.elements.videoClone) {
-            this.render.elements.videoClone.addEventListener('click', (e) => {
-                e.stopPropagation(); this._toggleVideoPlay();
-            });
+            this.render.elements.videoClone.addEventListener('click', (e) => { e.stopPropagation(); this._toggleVideoPlay(); });
         }
 
         this.render.elements.img.addEventListener('dblclick', (e) => {
@@ -166,22 +248,19 @@ window.Mix01InputController = class InputController {
             e.stopPropagation();
             this.state.currentRotate = 0;
             this.state.currentMirror = 1;
-            this.state.activeZoom = this.cfg.state.zoom;
             this.state.isZoomManuallyChanged = false;
-            this.state.panOffsetX = 0;
-            this.state.panOffsetY = 0;
-            this.updateRender();
+            this.physics.targetZoom = this.cfg.state.zoom;
+            this.physics.targetPanX = 0;
+            this.physics.targetPanY = 0;
+            this._startPhysicsLoop();
             this.render.showToast('🔄 视图已重置');
         });
 
-        // 🔧 FIX: 原生层面的图裂失败容错。一瞬间回退原图，消灭图裂框
         this.render.elements.img.addEventListener('error', () => {
             if (this.state.currentHdUrl && this.render.elements.img.src !== this.state.currentSrc) {
                 this.render.hdState.badUrls.add(this.state.currentHdUrl);
                 this.state.currentHdUrl = null;
-                if (this.state.currentSrc) {
-                    this.render.elements.img.src = this.state.currentSrc;
-                }
+                if (this.state.currentSrc) this.render.elements.img.src = this.state.currentSrc;
                 this.render.showToast('⚠️ 高清资源已失效，自动回退至原图');
                 this.updateRender();
             }
@@ -189,8 +268,7 @@ window.Mix01InputController = class InputController {
 
         this.render.elements.viewer.addEventListener('contextmenu', (e) => {
             if (!this.cfg.state.hasAgreed) return;
-            e.preventDefault();
-            e.stopPropagation();
+            e.preventDefault(); e.stopPropagation();
             this.render.showContextMenu(e.clientX, e.clientY, {
                 'copy-img':     () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) window.Mix01Utils.copyImageToClipboard(u, this.render); },
                 'copy-url':      () => { const u = this.state.currentHdUrl || this.render.elements.img.src; if (u) { navigator.clipboard.writeText(u).catch(() => {}); this.render.showToast('🔗 链接已复制'); } },
@@ -205,15 +283,11 @@ window.Mix01InputController = class InputController {
         this.render.elements.viewer.addEventListener('mousedown', (e) => {
             if (this.cfg.state.isImmersive) return;
             if (!e.altKey) return;  
-            e.preventDefault();
-            e.stopPropagation();
+            e.preventDefault(); e.stopPropagation();
             const v = this.render.elements.viewer;
             const rect = v.getBoundingClientRect();
-            this._drag.active  = true;
-            this._drag.startX  = e.clientX;
-            this._drag.startY  = e.clientY;
-            this._drag.origLeft = rect.left;
-            this._drag.origTop  = rect.top;
+            this._drag.active  = true; this._drag.startX  = e.clientX; this._drag.startY  = e.clientY;
+            this._drag.origLeft = rect.left; this._drag.origTop  = rect.top;
             v.style.setProperty('cursor', 'grabbing', 'important');
             this.state.keyboardSwitchTime = Date.now() + 99999;
         });
@@ -224,17 +298,15 @@ window.Mix01InputController = class InputController {
             const nw = this.state.currentMedia?.naturalWidth || 0;
             const nh = this.state.currentMedia?.naturalHeight || 0;
             const isRotated = this.state.currentRotate % 180 !== 0;
-            const vW = (isRotated ? nh : nw) * this.state.activeZoom;
-            const vH = (isRotated ? nw : nh) * this.state.activeZoom;
+            const vW = (isRotated ? nh : nw) * this.physics.targetZoom;
+            const vH = (isRotated ? nw : nh) * this.physics.targetZoom;
             const sw = window.innerWidth, sh = window.innerHeight;
             if (vW <= sw && vH <= sh) return;
             e.preventDefault();
-            this._pan.active  = true;
-            this._pan.moved   = false;
-            this._pan.startX  = e.clientX;
-            this._pan.startY  = e.clientY;
-            this._pan.origPanX = this.state.panOffsetX;
-            this._pan.origPanY = this.state.panOffsetY;
+            this._pan.active  = true; this._pan.moved   = false;
+            this._pan.startX  = e.clientX; this._pan.startY  = e.clientY;
+            this._pan.origPanX = this.physics.targetPanX;
+            this._pan.origPanY = this.physics.targetPanY;
         });
 
         document.addEventListener('mousemove', (e) => {
@@ -243,8 +315,11 @@ window.Mix01InputController = class InputController {
                 const dy = e.clientY - this._pan.startY;
                 if (!this._pan.moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) this._pan.moved = true;
                 if (this._pan.moved) {
-                    this.state.panOffsetX = this._pan.origPanX + dx;
-                    this.state.panOffsetY = this._pan.origPanY + dy;
+                    this.physics.targetPanX = this._pan.origPanX + dx;
+                    this.physics.targetPanY = this._pan.origPanY + dy;
+                    // 拖拽时瞬间跟随，保持黏手感
+                    this.physics.currentPanX = this.physics.targetPanX;
+                    this.physics.currentPanY = this.physics.targetPanY;
                     this.updateRender(e);
                 }
                 return;
@@ -264,16 +339,10 @@ window.Mix01InputController = class InputController {
             if (this._pan.active) {
                 this._pan.active = false;
                 if (this.state.currentMedia && this.cfg.state.isImmersive) {
-                    const nw = this.state.currentMedia.naturalWidth || 0;
-                    const nh = this.state.currentMedia.naturalHeight || 0;
-                    const isRotated = this.state.currentRotate % 180 !== 0;
-                    const vW = (isRotated ? nh : nw) * this.state.activeZoom;
-                    const vH = (isRotated ? nw : nh) * this.state.activeZoom;
-                    const sw = window.innerWidth, sh = window.innerHeight;
-                    this.state.panOffsetX = Math.max(-(vW - sw), Math.min(0, this.state.panOffsetX || 0));
-                    this.state.panOffsetY = Math.max(-(vH - sh), Math.min(0, this.state.panOffsetY || 0));
+                    // 🚀 Optimization 1: 拖拽松手，触发边缘回弹 (Rubber Band)
+                    this._clampTargetPan();
+                    this._startPhysicsLoop();
                 }
-                this.updateRender();
             }
             if (!this._drag.active) return;
             this._drag.active = false;
@@ -282,23 +351,30 @@ window.Mix01InputController = class InputController {
         }, { capture: true });
     }
 
+    // 🚀 Optimization 3: O(N) 纯数学空间碰撞，告别 elementsFromPoint 的强制重排性能地狱
     getMediaUnderCursor(clientX, clientY, target) {
         if (target && (target.tagName === 'IMG' || target.tagName === 'VIDEO') && (target.src || target.tagName === 'VIDEO')) {
             this.state.lastTarget = target; this.state.lastFoundMedia = target; return target;
         }
         if (target && target === this.state.lastTarget && this.state.lastFoundMedia) return this.state.lastFoundMedia;
 
-        const elements = document.elementsFromPoint(clientX, clientY);
-        if (!elements) return null;
-        
         let found = null;
-        for (let i = 0; i < elements.length; i++) {
-            const el = elements[i];
+        let minArea = Infinity;
+
+        for (let el of this.visibleMediaElements) {
             if (el.id.includes('xyz') || el.id.includes('mix01')) continue;
-            if ((el.tagName === 'IMG' || el.tagName === 'VIDEO') && (el.src || el.tagName === 'VIDEO')) {
-                found = el; break;
+            if (!el.src && el.tagName !== 'VIDEO') continue;
+
+            const rect = el.getBoundingClientRect(); 
+            if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+                const area = rect.width * rect.height;
+                if (area < minArea) {
+                    minArea = area;
+                    found = el;
+                }
             }
         }
+        
         this.state.lastTarget = target; this.state.lastFoundMedia = found;
         return found;
     }
@@ -406,15 +482,13 @@ window.Mix01InputController = class InputController {
                             this.updateRender(); 
                         }
                     }, 150);
-
                     this.updateRender(); 
 
-                    const tempImg = new Image();
+                    // 🚀 Optimization 5: 使用池化 Image 对象，消灭卡顿
+                    const tempImg = this.imgPool.acquire();
                     tempImg.onload = () => {
-                        // 🔧 FIX: 过滤掉 CDN 恶意返回的 1x1 透明防盗链图片或无效图片，主动报错降级
                         if (tempImg.naturalWidth <= 10 && tempImg.naturalHeight <= 10) {
-                            tempImg.onerror();
-                            return;
+                            tempImg.onerror(); return;
                         }
 
                         if (this.state.currentSrc === src) { 
@@ -431,11 +505,13 @@ window.Mix01InputController = class InputController {
                                 if (nw > 350 || nh > 350) {
                                     this.state.customLensWidth = Math.min(nw, window.innerWidth * 0.9);
                                     this.state.customLensHeight = Math.min(nh, window.innerHeight * 0.9);
-                                    this.state.activeZoom = nw / (this.state.cachedRect.width || 1);
+                                    this.physics.targetZoom = nw / (this.state.cachedRect.width || 1);
+                                    this._startPhysicsLoop();
                                 }
                             }
                             this.updateRender(); 
                         }
+                        this.imgPool.release(tempImg);
                     };
                     
                     tempImg.onerror = () => {
@@ -448,6 +524,7 @@ window.Mix01InputController = class InputController {
                             this.updateRender(); 
                         }
                         this.render.hdState.badUrls.add(hdUrl); 
+                        this.imgPool.release(tempImg);
                     };
 
                     tempImg.src = hdUrl;
@@ -527,7 +604,6 @@ window.Mix01InputController = class InputController {
         this.render.setStyle(this.render.elements.img, 'opacity', '0');
 
         let initialSrc = target.src;
-        // 🔧 FIX: 如果缓存池里的链接已经被拉黑（由于图裂等问题），绝对不使用它
         if (window.__mix01HdUrlMap && window.__mix01HdUrlMap[initialSrc]) {
             const mappedUrl = window.__mix01HdUrlMap[initialSrc];
             if (!this.render.hdState.badUrls.has(mappedUrl)) {
@@ -542,6 +618,7 @@ window.Mix01InputController = class InputController {
 
         this.render.elements.img.src = initialSrc;
         
+        // 此处的 initialSrc 是低分辨率图，快速解码保留
         this.render.elements.img.decode().then(() => {
             this.render.setStyle(this.render.elements.img, 'opacity', '1');
         }).catch(() => {
@@ -549,12 +626,16 @@ window.Mix01InputController = class InputController {
         });
 
         if (this.cfg.state.smallImageOptimization) {
-            if (this.state.cachedRect.width <= 50 && this.state.cachedRect.height <= 50) { this.state.activeZoom = 9.0; this.state.isSmallOptimized = true; }
-            else if (this.state.cachedRect.width <= 100 && this.state.cachedRect.height <= 100) { this.state.activeZoom = 6.0; this.state.isSmallOptimized = true; }
-            else { this.state.activeZoom = this.cfg.state.zoom; }
+            if (this.state.cachedRect.width <= 50 && this.state.cachedRect.height <= 50) { this.physics.targetZoom = 9.0; this.state.isSmallOptimized = true; }
+            else if (this.state.cachedRect.width <= 100 && this.state.cachedRect.height <= 100) { this.physics.targetZoom = 6.0; this.state.isSmallOptimized = true; }
+            else { this.physics.targetZoom = this.cfg.state.zoom; }
         } else {
-            this.state.activeZoom = this.cfg.state.zoom;
+            this.physics.targetZoom = this.cfg.state.zoom;
         }
+        
+        this.physics.currentZoom = this.physics.targetZoom;
+        this.physics.targetPanX = 0; this.physics.currentPanX = 0;
+        this.physics.targetPanY = 0; this.physics.currentPanY = 0;
 
         this.updateRender();
         this.upgradeToHDQuietly(target, target.src);
@@ -593,10 +674,11 @@ window.Mix01InputController = class InputController {
 
         const roundedX = Math.round(xP * 1000);
         const roundedY = Math.round(yP * 1000);
-        const roundedZoom = Math.round(this.state.activeZoom * 1000);
+        const roundedZoom = Math.round(this.physics.currentZoom * 1000);
         const mediaSrc = this.state.currentSrc || '';
         
-        const renderSignature = `${mediaSrc}|${roundedX}|${roundedY}|${roundedZoom}|${this.state.currentMode}|${this.state.currentRotate}|${this.state.currentMirror}|${this.state.panOffsetX}|${this.state.panOffsetY}|${this.cfg.state.isImmersive}`;
+        // 包含物理引擎状态的终极渲染签名
+        const renderSignature = `${mediaSrc}|${roundedX}|${roundedY}|${roundedZoom}|${this.state.currentMode}|${this.state.currentRotate}|${this.state.currentMirror}|${this.physics.currentPanX.toFixed(2)}|${this.physics.currentPanY.toFixed(2)}|${this.cfg.state.isImmersive}`;
 
         if (this.state.lastRenderSignature === renderSignature) {
             this.state.isRenderingLock = false;
@@ -613,13 +695,18 @@ window.Mix01InputController = class InputController {
                 const isVideo = this.state.currentMedia.tagName === 'VIDEO';
                 const activeMedia = isVideo ? this.render.elements.videoClone : this.render.elements.img;
                 
-                this.state.activeZoom = this.render.updateLayout(
-                    activeMedia, rect, this.state.activeZoom, xP, yP,
+                const returnedZoom = this.render.updateLayout(
+                    activeMedia, rect, this.physics.currentZoom, xP, yP,
                     this.state.isSmallOptimized, this.state.customLensWidth, this.state.customLensHeight,
                     this.state.isZoomManuallyChanged, this.state.currentSrc, sW, sH,
-                    this.state.panOffsetX, this.state.panOffsetY,
+                    this.physics.currentPanX, this.physics.currentPanY,
                     this.state.currentMode, this.state.currentRotate, this.state.currentMirror
                 );
+                
+                if (!this.state.isZoomManuallyChanged) {
+                    this.physics.currentZoom = returnedZoom;
+                    this.physics.targetZoom = returnedZoom;
+                }
             } catch (err) {
                 console.warn("Mix01 Render Engine:", err);
             } finally {
@@ -640,6 +727,7 @@ window.Mix01InputController = class InputController {
             clearInterval(this.render.hdState.progressTimer);
             this.render.hdState.progressTimer = null;
         }
+        this.physics.active = false;
         this.state.currentMedia = null;
         this.state.currentSrc = null;
         this.state.currentHdUrl = null; 
@@ -648,8 +736,6 @@ window.Mix01InputController = class InputController {
         this.state.customLensWidth = null;
         this.state.customLensHeight = null;
         this.state.isZoomManuallyChanged = false;
-        this.state.panOffsetX = 0;
-        this.state.panOffsetY = 0;
         this.state.lastRenderSignature = null;
         window.isFetchingMore = false;
         this.state.isRenderingLock = false;
@@ -878,6 +964,12 @@ window.Mix01InputController = class InputController {
             }
             if (currentIndex === -1) return;
 
+            // 🚀 Optimization 2: 抢占式预加载 (中止遗留废弃任务，节约带宽)
+            for (let img of this.activePreloads) {
+                this.imgPool.release(img);
+            }
+            this.activePreloads.clear();
+
             for (let i = 1; i <= this.cfg.state.preloadCount; i++) {
                 const targetIndex = currentIndex + i;
                 if (targetIndex >= galleryImages.length) break;
@@ -901,13 +993,19 @@ window.Mix01InputController = class InputController {
                                 this.preloadedUrls.delete(oldest);
                             }
                             
-                            const preloaderImg = new Image();
+                            const preloaderImg = this.imgPool.acquire();
+                            this.activePreloads.add(preloaderImg);
+
+                            preloaderImg.onload = preloaderImg.onerror = () => {
+                                this.activePreloads.delete(preloaderImg);
+                                this.imgPool.release(preloaderImg);
+                            };
                             preloaderImg.src = targetUrl;
                         }
                     })();
                 }
             }
-        }, 300);
+        }, 150); 
     }
 
     handleKeyDown(e) {
@@ -992,19 +1090,33 @@ window.Mix01InputController = class InputController {
             if (this.cfg.state.isImmersive) { this.executePhantomAction('follow'); e.preventDefault(); return; }
         }
 
-        if (k === this.cfg.keys.rotate) { this.state.currentRotate = (this.state.currentRotate + 90) % 360; up = true; } 
-        else if (k === this.cfg.keys.mirror) { this.state.currentMirror *= -1; up = true; } 
+        if (k === this.cfg.keys.rotate) { 
+            this.state.currentRotate = (this.state.currentRotate + 90) % 360; 
+            up = true; this._clampTargetPan(); this._startPhysicsLoop();
+        } 
+        else if (k === this.cfg.keys.mirror) { 
+            this.state.currentMirror *= -1; 
+            up = true; this._startPhysicsLoop();
+        } 
         else if (k === this.cfg.keys.mode) { 
             if (this.cfg.state.isImmersive) {
                 this.render.showToast(`⚠️ 请双击背景或按 ${(this.cfg.keys.immersive || 'Esc').toUpperCase()} 退出沉浸模式`);
             } else {
                 this.state.currentMode = modeList[(modeList.indexOf(this.state.currentMode) + 1) % modeList.length]; 
-                up = true; 
+                up = true; this._startPhysicsLoop();
                 this.render.showToast(modeNames[this.state.currentMode]); 
             }
         }
-        else if (k === this.cfg.keys.zoomIn || k === '+') { this.state.activeZoom += 0.5; this.state.isZoomManuallyChanged = true; this.render.showToast(`${this.state.activeZoom.toFixed(1)}x`); up = true; } 
-        else if (k === this.cfg.keys.zoomOut || k === '-') { this.state.activeZoom = Math.max(0.5, this.state.activeZoom - 0.5); this.state.isZoomManuallyChanged = true; this.render.showToast(`${this.state.activeZoom.toFixed(1)}x`); up = true; }
+        else if (k === this.cfg.keys.zoomIn || k === '+') { 
+            this.physics.targetZoom += 0.5; this.state.isZoomManuallyChanged = true; 
+            this.render.showToast(`${this.physics.targetZoom.toFixed(1)}x`); up = true; 
+            this._clampTargetPan(); this._startPhysicsLoop();
+        } 
+        else if (k === this.cfg.keys.zoomOut || k === '-') { 
+            this.physics.targetZoom = Math.max(0.5, this.physics.targetZoom - 0.5); this.state.isZoomManuallyChanged = true; 
+            this.render.showToast(`${this.physics.targetZoom.toFixed(1)}x`); up = true; 
+            this._clampTargetPan(); this._startPhysicsLoop();
+        }
         
         else if (e.key === 'Escape') {
             if (this.cfg.state.isImmersive) {

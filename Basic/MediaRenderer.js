@@ -27,7 +27,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.elements.viewer           = create('div',    'img-zoom-pro-viewer-xyz');
         this.elements.img              = create('img',    'zoom-img-xyz');
         
-        // 🔧 FIX: 清除 alt，配合下面 CSS 的 color: transparent 屏蔽图裂 icon
         this.elements.img.alt          = ''; 
 
         this.elements.canvas           = create('canvas', 'zoom-canvas-xyz'); 
@@ -71,7 +70,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
             }
             #zoom-img-xyz, #zoom-canvas-xyz, #zoom-video-xyz {
                 will-change: transform, opacity !important;
-                color: transparent !important; /* 🔧 FIX: 隐藏浏览器的裂图alt占位符 */
+                color: transparent !important; 
             }
             .img-zoom-toast-xyz      { z-index: 2147483647 !important; }
             #img-zoom-pro-immersive-hint { z-index: 2147483647 !important; }
@@ -304,7 +303,8 @@ window.Mix01MediaRenderer = class MediaRenderer {
             if (!window.__mix01UserPaused) vc.play().catch(() => {});
         }
 
-        this._videoSyncInterval = setInterval(() => {
+        // 🚀 Optimization 4: 帧级视频同步 (原生渲染管线替代 setInterval)
+        const updateFrame = () => {
             if (!this.videoState.isRunning) return;
 
             if (vc.srcObject && !vc.srcObject.active && !videoEl.ended) {
@@ -325,12 +325,22 @@ window.Mix01MediaRenderer = class MediaRenderer {
                     this._lastProgressPct = pct;
                 }
             }
-        }, 250);
+
+            if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+                this.videoState.lastNw = videoEl.videoWidth;
+                this.videoState.lastNh = videoEl.videoHeight;
+            }
+
+            if (videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
+            else requestAnimationFrame(updateFrame);
+        };
+
+        if (videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
+        else requestAnimationFrame(updateFrame);
     }
 
     stopVideoRender() {
         this.videoState.isRunning = false;
-        clearInterval(this._videoSyncInterval);
         this._lastProgressPct = null;
 
         if (this.elements.videoClone) {
@@ -351,15 +361,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
     updateLayout(activeMedia, rect, activeZoom, xP, yP, isSmallOptimized, customLensWidth, customLensHeight, isZoomManuallyChanged, currentHoveredSrc, _sw, _sh, panOffsetX, panOffsetY, mode, rotate, mirror) {
         const sW = window.innerWidth, sH = window.innerHeight;
         const isVideo = activeMedia === this.elements.canvas || activeMedia === this.elements.videoClone;
-        
-        if (isVideo) {
-            const vW = this.currentVideoEl?.videoWidth || activeMedia.videoWidth || 0;
-            const vH = this.currentVideoEl?.videoHeight || activeMedia.videoHeight || 0;
-            if (vW > 0 && vH > 0) {
-                this.videoState.lastNw = vW;
-                this.videoState.lastNh = vH;
-            }
-        }
 
         const nw = isVideo ? (this.videoState.lastNw || activeMedia.width || rect.width || 1) : (activeMedia.naturalWidth || rect.width || 1);
         const nh = isVideo ? (this.videoState.lastNh || activeMedia.height || rect.height || 1) : (activeMedia.naturalHeight || rect.height || 1);
