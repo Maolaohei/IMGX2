@@ -5,34 +5,36 @@ window.Mix01Utils = {
     },
 
     async copyImageToClipboard(url, renderer) {
-        renderer.showToast("⏳ 正在获取并处理原图...");
+        renderer.showToast("⏳ 正在安全获取并处理原图...");
         try {
-            const response = await fetch(url, {
-                headers: { 'Referer': window.location.href }
-            });
-            if (!response.ok) throw new Error("Network response was not ok");
-            const blob = await response.blob();
-            const img = new Image();
-            const blobUrl = URL.createObjectURL(blob);
-            
-            await new Promise((resolve, reject) => {
-                img.onload = resolve;
-                img.onerror = reject;
-                img.src = blobUrl;
-            });
+            // 🚀 P2: 绕过前端 CSP 跨域限制，让具有最高特权的后台发送请求并传回 Base64 数据
+            chrome.runtime.sendMessage({ action: "fetchImageAsBase64", url: url, pageUrl: window.location.href }, async (res) => {
+                if (!res || !res.success) throw new Error("Background fetch failed");
+                
+                const fetchRes = await fetch(res.base64); 
+                const blob = await fetchRes.blob();
+                const img = new Image();
+                const blobUrl = URL.createObjectURL(blob);
+                
+                await new Promise((resolve, reject) => {
+                    img.onload = resolve;
+                    img.onerror = reject;
+                    img.src = blobUrl;
+                });
 
-            const canvas = document.createElement('canvas');
-            canvas.width = img.naturalWidth; 
-            canvas.height = img.naturalHeight;
-            canvas.getContext('2d', { alpha: false }).drawImage(img, 0, 0);
-            
-            const pngBlob = await new Promise(res => canvas.toBlob(res, 'image/png'));
-            await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
-            
-            renderer.showToast("✅ 已成功复制原图到剪切板！");
-            URL.revokeObjectURL(blobUrl);
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth; 
+                canvas.height = img.naturalHeight;
+                canvas.getContext('2d', { alpha: false }).drawImage(img, 0, 0);
+                
+                const pngBlob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+                await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
+                
+                renderer.showToast("✅ 已成功复制原图到剪切板！");
+                URL.revokeObjectURL(blobUrl);
+            });
         } catch (err) { 
-            renderer.showToast("❌ 获取图片失败，受限于浏览器的跨域/安全策略"); 
+            renderer.showToast("❌ 获取图片失败，剪贴板 API 被拒绝"); 
             console.error("Clipboard Copy Failed:", err);
         }
     },

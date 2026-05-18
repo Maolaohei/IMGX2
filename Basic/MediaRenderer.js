@@ -4,11 +4,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.cfg = configManager;
         this.styleCache = new WeakMap();
         this.elements = {};
-        this.videoState = { isRunning: false, callbackId: null, rAFId: null, original: null };
+        this.videoState = { isRunning: false, original: null, lastNw: 0, lastNh: 0 };
         this.hudState = { cursorTimer: null, hintTimer: null };
-        this.hdState = { isLoading: false, badUrls: new Set() };
+        this.hdState = { isLoading: false, badUrls: new Set(), progress: 0, progressTimer: null };
         this.immersiveState = { lastMedia: null, lastSrc: null, lastHudSignature: null };
-        // Map 替代全局对象：size 是 O(1)，无原型污染，迭代有序
         this._hdUrlCache = new Map();
 
         this.initDOM();
@@ -27,7 +26,14 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
         this.elements.viewer           = create('div',    'img-zoom-pro-viewer-xyz');
         this.elements.img              = create('img',    'zoom-img-xyz');
-        this.elements.canvas           = create('canvas', 'zoom-canvas-xyz');
+        
+        // 🔧 FIX: 清除 alt，配合下面 CSS 的 color: transparent 屏蔽图裂 icon
+        this.elements.img.alt          = ''; 
+
+        this.elements.canvas           = create('canvas', 'zoom-canvas-xyz'); 
+        this.elements.videoClone       = create('video',  'zoom-video-xyz');  
+        this.elements.videoClone.muted = true;
+        this.elements.videoClone.playsInline = true;
         this.elements.spinner          = create('div',    'zoom-loading-xyz');
         this.elements.progressContainer= create('div',    'mix01-video-progress-container');
         this.elements.progressBar      = create('div',    'mix01-video-progress-bar');
@@ -38,7 +44,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.elements.notice.innerHTML = '⚠️ 未同意协议<br>请点击右上角图标同意并开启功能';
         this.elements.hint    = create('div', 'img-zoom-pro-immersive-hint');
 
-        // ✨ 右键上下文菜单
         this.elements.ctxMenu = create('div', 'mix01-ctx-menu');
         this.elements.ctxMenu.innerHTML = `
             <div class="ctx-item" data-action="copy-img">📋 复制图片</div>
@@ -52,13 +57,22 @@ window.Mix01MediaRenderer = class MediaRenderer {
             <div class="ctx-item" data-action="close">✕ 关闭预览</div>
         `;
 
-        // ✨ 沉浸模式计数器
         this.elements.counter = create('div', 'mix01-gallery-counter');
 
-        // 关键：在样式表层面锁定最高 z-index，确保放大镜/沉浸层不被任何页面元素遮挡
         const styleBlock = document.createElement('style');
         styleBlock.textContent = `
             #img-zoom-pro-viewer-xyz { z-index: 2147483647 !important; will-change: transform; }
+            #img-zoom-pro-viewer-xyz.mode-immersive {
+                transform: none !important;
+                left: 0 !important;
+                top: 0 !important;
+                width: 100vw !important;
+                height: 100vh !important;
+            }
+            #zoom-img-xyz, #zoom-canvas-xyz, #zoom-video-xyz {
+                will-change: transform, opacity !important;
+                color: transparent !important; /* 🔧 FIX: 隐藏浏览器的裂图alt占位符 */
+            }
             .img-zoom-toast-xyz      { z-index: 2147483647 !important; }
             #img-zoom-pro-immersive-hint { z-index: 2147483647 !important; }
             #mix01-ctx-menu { z-index: 2147483647 !important; }
@@ -69,9 +83,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
         `;
         document.head.appendChild(styleBlock);
 
-        // 配合 inputController decode().then 渐现动画；will-change 提前提升到合成层
-        this.elements.img.style.setProperty('transition', 'opacity 0.2s ease, transform 0.1s cubic-bezier(0.2,0,0.2,1)', 'important');
-        this.elements.img.style.setProperty('will-change', 'transform, opacity', 'important');
+        this.elements.img.style.setProperty('transition', 'opacity 0.2s ease', 'important');
 
         try { this.canvasCtx = this.elements.canvas.getContext('2d', { alpha: false }); } catch(e) {}
 
@@ -85,24 +97,21 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
         const appendAll = () => {
             if (!document.body) { setTimeout(appendAll, 100); return; }
-            ['img', 'canvas', 'spinner', 'progressContainer', 'status', 'notice', 'hint'].forEach(k => {
+            ['img', 'canvas', 'videoClone', 'spinner', 'progressContainer', 'status', 'notice', 'hint'].forEach(k => {
                 this.elements.viewer.appendChild(this.elements[k]);
             });
             document.body.appendChild(this.elements.viewer);
             document.body.appendChild(this.elements.toast);
             document.body.appendChild(this.elements.ctxMenu);
             document.body.appendChild(this.elements.counter);
-            // 附加到 DOM 后立刻强制 z-index，防止页面已有高层级元素
             this._enforceTopLayer();
         };
         appendAll();
 
-        // DOM 守卫：被页面意外移除后自动重新插入，并恢复 z-index
         this.domGuard = new MutationObserver(() => {
             if (!document.getElementById('img-zoom-pro-viewer-xyz') && document.body) {
                 document.body.appendChild(this.elements.viewer);
                 document.body.appendChild(this.elements.toast);
-                // ✨ 同步保护新增元素
                 if (!document.getElementById('mix01-ctx-menu'))      document.body.appendChild(this.elements.ctxMenu);
                 if (!document.getElementById('mix01-gallery-counter')) document.body.appendChild(this.elements.counter);
                 this._enforceTopLayer();
@@ -113,7 +122,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         else document.addEventListener('DOMContentLoaded', startGuard, { once: true });
     }
 
-    /** 强制放大镜和沉浸层始终位于最顶层，任何时候都可安全调用 */
     _enforceTopLayer() {
         this.elements.viewer.style.setProperty('z-index', '2147483647', 'important');
         this.elements.toast.style.setProperty('z-index',  '2147483647', 'important');
@@ -125,28 +133,30 @@ window.Mix01MediaRenderer = class MediaRenderer {
         chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const getUrlAndProcess = async (actionFn) => {
                 const src = request.clickedUrl || this.elements.img.src;
-
-                // Map.has() 是 O(1)，直接命中缓存
                 if (this._hdUrlCache.has(src)) {
                     actionFn(this._hdUrlCache.get(src));
                     return;
                 }
-                // 超出 100 条时删除最旧的一半（Map 迭代有序，最先插入的在前）
                 if (this._hdUrlCache.size > 100) {
                     const iter = this._hdUrlCache.keys();
                     for (let i = 0; i < 50; i++) this._hdUrlCache.delete(iter.next().value);
                 }
 
+                let hoveredMedia = window.lastHoveredMedia;
+                if (hoveredMedia instanceof WeakRef) {
+                    hoveredMedia = hoveredMedia.deref();
+                }
+
                 const targetEl = request.clickedUrl
-                    ? (window.lastHoveredSrc === request.clickedUrl ? window.lastHoveredMedia : document.createElement('img'))
+                    ? (window.lastHoveredSrc === request.clickedUrl ? (hoveredMedia || document.createElement('img')) : document.createElement('img'))
                     : this.elements.img;
+                
                 let targetUrl = src;
                 if (window.Mix01RuleEngine?.getHighResUrl) {
                     targetUrl = await window.Mix01RuleEngine.getHighResUrl(targetEl, src);
                 }
                 if (targetUrl && targetUrl !== src) {
                     this._hdUrlCache.set(src, targetUrl);
-                    // 兼容其他模块可能读取的全局 map
                     (window.__mix01HdUrlMap || (window.__mix01HdUrlMap = {}))[src] = targetUrl;
                 }
                 actionFn(targetUrl);
@@ -174,7 +184,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         }
     }
 
-    // 内联缓存查找，避免每个属性都调用 setStyle 造成双重 WeakMap 查找
     setStyles(el, styles) {
         let cache = this.styleCache.get(el);
         if (!cache) { cache = {}; this.styleCache.set(el, cache); }
@@ -195,34 +204,33 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
     showToast(text) {
         clearTimeout(this._toastTimer);
-        this.elements.toast.textContent = text; // textContent 不触发布局，比 innerText 快
+        this.elements.toast.textContent = text; 
         this.elements.toast.classList.add('show');
         this._toastTimer = setTimeout(() => this.elements.toast.classList.remove('show'), 1200);
     }
 
-    updateStatus(type, currentW, currentH, isVideo) {
-        if (!this.cfg.state.showStatus || currentW < 300 || currentH < 200) {
+    updateStatus(type, vW, vH, isVideo) {
+        if (!this.cfg.state.showStatus || vW < 300 || vH < 200) {
             this.setStyle(this.elements.status, 'display', 'none');
             return;
         }
         this.setStyle(this.elements.status, 'display', 'block');
 
-        // ✨ 优化：展示真实图片原始分辨率（而非放大后的视口尺寸）
         const nw = isVideo ? 0 : (this.elements.img.naturalWidth || 0);
         const nh = isVideo ? 0 : (this.elements.img.naturalHeight || 0);
         const dimStr = (nw > 0 && nh > 0) ? ` · ${nw}×${nh}` : '';
 
         if (isVideo) {
-            const vw = this.elements.canvas.width || 0;
-            const vh = this.elements.canvas.height || 0;
-            const vDim = (vw > 0 && vh > 0) ? ` · ${vw}×${vh}` : '';
+            const w = this.videoState.lastNw || 0;
+            const h = this.videoState.lastNh || 0;
+            const vDim = (w > 0 && h > 0) ? ` · ${w}×${h}` : '';
             this.elements.status.textContent = `🎥 视频${vDim}`;
             this.setClass(this.elements.status, 'status-hd');
             this.setStyle(this.elements.status, 'background-color', '#1da1f2');
         } else if (type === 'hd') {
             const loading = this.hdState.isLoading;
             this.setClass(this.elements.status, loading ? 'status-hd is-loading' : 'status-hd');
-            this.elements.status.textContent = loading ? '⏳ 高清解析中...' : `高清${dimStr}`;
+            this.elements.status.textContent = loading ? `⏳ 高清缓冲中 ${this.hdState.progress || 0}%` : `高清${dimStr}`;
             this.setStyle(this.elements.status, 'background-color', '');
         } else {
             this.setClass(this.elements.status, 'status-original');
@@ -231,8 +239,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         }
     }
 
-    // 按需检查协议状态，取代原来的 setInterval 轮询
-    // 在 updateLayout 中自动调用，完全事件驱动，零额外开销
     _syncNoticeVisibility() {
         if (this.cfg.state.hasAgreed && this.elements.notice.style.display !== 'none') {
             this.elements.notice.style.display = 'none';
@@ -240,15 +246,13 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     hide() {
-        this.setStyles(this.elements.viewer, {
-            display: 'none', cursor: 'default', 'pointer-events': 'none'
-        });
+        this.setStyles(this.elements.viewer, { display: 'none', cursor: 'default', 'pointer-events': 'none' });
         this.setStyles(this.elements.img,    { display: 'none', cursor: 'default' });
         this.setStyles(this.elements.canvas, { display: 'none' });
+        this.setStyles(this.elements.videoClone, { display: 'none' }); 
         this.setStyles(this.elements.spinner, { display: 'none' });
         this.setStyles(this.elements.progressContainer, { display: 'none' });
         this.setStyle(this.elements.hint, 'opacity', '0');
-        // ✨ 关闭时同步隐藏右键菜单和计数器
         this.hideContextMenu();
         if (this.elements.counter) this.elements.counter.style.setProperty('display', 'none', 'important');
 
@@ -261,43 +265,59 @@ window.Mix01MediaRenderer = class MediaRenderer {
     startVideoRender(videoEl) {
         this.videoState.isRunning = true;
         this.videoState.original = { paused: videoEl.paused, muted: videoEl.muted };
+        this.videoState.lastNw = 0;
+        this.videoState.lastNh = 0;
         this.currentVideoEl = videoEl;
         this._lastProgressPct = null;
 
         this.setStyles(this.elements.img,              { display: 'none' });
-        this.setStyles(this.elements.canvas,           { display: 'block' });
+        this.setStyles(this.elements.canvas,           { display: 'none' });
+        this.setStyles(this.elements.videoClone,       { display: 'block' });
         this.setStyles(this.elements.progressContainer,{ display: 'block' });
 
-        this.elements.canvas.width  = videoEl.videoWidth  || videoEl.clientWidth  || 800;
-        this.elements.canvas.height = videoEl.videoHeight || videoEl.clientHeight || 600;
+        const vc = this.elements.videoClone;
+        vc.muted = true;
+        
+        try {
+            if (videoEl.captureStream) {
+                const stream = videoEl.captureStream();
+                if (stream.active) vc.srcObject = stream;
+                else throw new Error("Stream inactive");
+            } else if (videoEl.mozCaptureStream) {
+                vc.srcObject = videoEl.mozCaptureStream();
+            } else {
+                throw new Error("No captureStream");
+            }
+        } catch (e) {
+            vc.srcObject = null;
+            vc.src = videoEl.src;
+            vc.currentTime = videoEl.currentTime;
+        }
 
-        videoEl.muted = false;
         if (videoEl.readyState === 0) {
             this.setStyle(this.elements.spinner, 'display', 'block');
             videoEl.addEventListener('canplay', () => {
                 this.setStyle(this.elements.spinner, 'display', 'none');
-                if (!window.__mix01UserPaused) videoEl.play().catch(() => {});
+                if (!window.__mix01UserPaused) vc.play().catch(() => {});
             }, { once: true });
         } else {
-            videoEl.play().catch(() => {});
+            if (!window.__mix01UserPaused) vc.play().catch(() => {});
         }
 
-        // 纯绘制循环，不再混入 play() 逻辑，保持每帧职责单一
-        const drawFrame = () => {
-            if (!this.videoState.isRunning || !this.canvasCtx) return;
+        this._videoSyncInterval = setInterval(() => {
+            if (!this.videoState.isRunning) return;
 
-            if (videoEl.videoWidth) {
-                // 仅在分辨率真正变化时才 resize canvas，避免无谓的内存重分配
-                if (this.elements.canvas.width !== videoEl.videoWidth) {
-                    this.elements.canvas.width  = videoEl.videoWidth;
-                    this.elements.canvas.height = videoEl.videoHeight;
-                }
-                if (!videoEl.paused || videoEl.readyState >= 2) {
-                    this.canvasCtx.drawImage(videoEl, 0, 0, this.elements.canvas.width, this.elements.canvas.height);
-                }
+            if (vc.srcObject && !vc.srcObject.active && !videoEl.ended) {
+                try { vc.srcObject = videoEl.captureStream(); } catch(e){}
             }
 
-            // 进度条：缓存上次百分比，避免每帧都 setProperty
+            if (videoEl.paused && videoEl.readyState >= 3 && !window.__mix01UserPaused) {
+                if (!videoEl.ended) videoEl.play().catch(() => {});
+            }
+            if (vc.paused && !window.__mix01UserPaused && vc.readyState >= 3) {
+                if (!videoEl.ended) vc.play().catch(() => {});
+            }
+
             if (videoEl.duration > 0) {
                 const pct = ((videoEl.currentTime / videoEl.duration) * 100).toFixed(2) + '%';
                 if (pct !== this._lastProgressPct) {
@@ -305,39 +325,19 @@ window.Mix01MediaRenderer = class MediaRenderer {
                     this._lastProgressPct = pct;
                 }
             }
-
-            if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
-                this.videoState.callbackId = videoEl.requestVideoFrameCallback(drawFrame);
-            } else {
-                this.videoState.rAFId = requestAnimationFrame(drawFrame);
-            }
-        };
-
-        // 播放恢复检测独立到 1s 间隔，不污染高频绘制循环
-        this._videoStallInterval = setInterval(() => {
-            if (!this.videoState.isRunning) return;
-            if (videoEl.paused && videoEl.readyState >= 3 && !window.__mix01UserPaused) {
-                videoEl.play().catch(() => {});
-            }
-        }, 1000);
-
-        drawFrame();
+        }, 250);
     }
 
     stopVideoRender() {
         this.videoState.isRunning = false;
-        clearInterval(this._videoStallInterval);
+        clearInterval(this._videoSyncInterval);
         this._lastProgressPct = null;
 
-        if (this.videoState.callbackId != null && this.currentVideoEl &&
-            'cancelVideoFrameCallback' in HTMLVideoElement.prototype) {
-            this.currentVideoEl.cancelVideoFrameCallback(this.videoState.callbackId);
+        if (this.elements.videoClone) {
+            this.elements.videoClone.pause();
+            this.elements.videoClone.srcObject = null;
+            this.elements.videoClone.src = '';
         }
-        if (this.videoState.rAFId) {
-            cancelAnimationFrame(this.videoState.rAFId);
-        }
-        this.videoState.callbackId = null;
-        this.videoState.rAFId = null;
 
         if (this.currentVideoEl && this.videoState.original) {
             this.currentVideoEl.muted = this.videoState.original.muted;
@@ -348,85 +348,98 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.currentVideoEl = null;
     }
 
-    updateLayout(activeMedia, rect, activeZoom, xP, yP, isSmallOptimized, customLensWidth, customLensHeight, isZoomManuallyChanged, currentHoveredSrc, _sw, _sh, panOffsetX, panOffsetY) {
+    updateLayout(activeMedia, rect, activeZoom, xP, yP, isSmallOptimized, customLensWidth, customLensHeight, isZoomManuallyChanged, currentHoveredSrc, _sw, _sh, panOffsetX, panOffsetY, mode, rotate, mirror) {
         const sW = window.innerWidth, sH = window.innerHeight;
-        const isVideo = activeMedia === this.elements.canvas;
-        const nw = isVideo ? (activeMedia.width  || rect.width  || 1) : (activeMedia.naturalWidth  || rect.width  || 1);
-        const nh = isVideo ? (activeMedia.height || rect.height || 1) : (activeMedia.naturalHeight || rect.height || 1);
-        const naturalRatio = nw / nh;
-        let cDW = 0, cDH = 0;
-        const mode = this.cfg.state.mode;
+        const isVideo = activeMedia === this.elements.canvas || activeMedia === this.elements.videoClone;
+        
+        if (isVideo) {
+            const vW = this.currentVideoEl?.videoWidth || activeMedia.videoWidth || 0;
+            const vH = this.currentVideoEl?.videoHeight || activeMedia.videoHeight || 0;
+            if (vW > 0 && vH > 0) {
+                this.videoState.lastNw = vW;
+                this.videoState.lastNh = vH;
+            }
+        }
 
-        // 协议状态按需同步，无需 setInterval 轮询
+        const nw = isVideo ? (this.videoState.lastNw || activeMedia.width || rect.width || 1) : (activeMedia.naturalWidth || rect.width || 1);
+        const nh = isVideo ? (this.videoState.lastNh || activeMedia.height || rect.height || 1) : (activeMedia.naturalHeight || rect.height || 1);
+        
         this._syncNoticeVisibility();
-
         this.setClass(this.elements.viewer, this.cfg.state.isImmersive ? 'mode-immersive' : `mode-${mode}`);
 
+        const isRotated = rotate % 180 !== 0;
+        let cDW = 0, cDH = 0; 
+        let vW = 0, vH = 0;   
+
+        let vxP = xP, vyP = yP;
+        if (rotate === 90) { vxP = 1 - yP; vyP = xP; }
+        else if (rotate === 180) { vxP = 1 - xP; vyP = 1 - yP; }
+        else if (rotate === 270) { vxP = yP; vyP = 1 - xP; }
+        if (mirror === -1) { vxP = 1 - vxP; }
+
         if (this.cfg.state.isImmersive) {
-            // 沉浸模式：全屏覆盖，pointer-events 开启以响应交互
             this.setStyles(this.elements.viewer, {
                 display: 'block', position: 'fixed', width: '100vw', height: '100vh',
                 left: '0px', top: '0px', 'background-color': 'rgba(0,0,0,0.95)',
                 'background-image': 'none', border: 'none', 'border-radius': '0',
-                transform: 'none', 'pointer-events': 'auto'
+                'pointer-events': 'auto', transform: 'none'
             });
-            // 沉浸模式也需要保证最高层级（页面可能在 show 之后动态插入高 z-index 元素）
             this._enforceTopLayer();
+
+            let vNw = isRotated ? nh : nw;
+            let vNh = isRotated ? nw : nh;
 
             if (!isZoomManuallyChanged) {
                 const maxW = sW * 0.95, maxH = sH * 0.95;
-                let fitW = nw, fitH = nh;
-                if (fitW > maxW) { fitW = maxW; fitH = fitW / naturalRatio; }
-                if (fitH > maxH) { fitH = maxH; fitW = fitH * naturalRatio; }
-                activeZoom = fitW / nw;
+                const scaleW = maxW / (vNw || 1);
+                const scaleH = maxH / (vNh || 1);
+                activeZoom = Math.min(scaleW, scaleH);
+                if (activeZoom > 50) activeZoom = 50; 
             }
 
-            let tW = nw * activeZoom, tH = nh * activeZoom;
-            cDW = tW; cDH = tH;
+            cDW = nw * activeZoom; cDH = nh * activeZoom;
+            vW = isRotated ? cDH : cDW;
+            vH = isRotated ? cDW : cDH;
 
-            this.setStyles(activeMedia, {
-                position: 'absolute', width: `${tW}px`, height: `${tH}px`, margin: '0px'
-            });
+            this.setStyles(activeMedia, { position: 'absolute', width: `${cDW}px`, height: `${cDH}px`, margin: '0px', left: '0px', top: '0px' });
 
-            let offsetX = (sW - tW) / 2;
-            let offsetY = (sH - tH) / 2;
+            let visualOffsetX = (sW - vW) / 2;
+            let visualOffsetY = (sH - vH) / 2;
 
-            if (isZoomManuallyChanged && (tW > sW || tH > sH)) {
-                offsetX = (tW > sW) ? -(tW - sW) * xP : offsetX;
-                offsetY = (tH > sH) ? -(tH - sH) * yP : offsetY;
+            if (isZoomManuallyChanged && (vW > sW || vH > sH)) {
+                visualOffsetX = (vW > sW) ? -(vW - sW) * vxP : visualOffsetX;
+                visualOffsetY = (vH > sH) ? -(vH - sH) * vyP : visualOffsetY;
             }
-            // 叠加手工拖拽平移偏移
-            if (panOffsetX) offsetX += panOffsetX;
-            if (panOffsetY) offsetY += panOffsetY;
+            
+            if (panOffsetX) visualOffsetX += panOffsetX;
+            if (panOffsetY) visualOffsetY += panOffsetY;
 
-            this.setStyle(activeMedia, 'transform',
-                `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`);
-            this.setStyle(activeMedia, 'left', '0px');
-            this.setStyle(activeMedia, 'top',  '0px');
+            let offsetX = visualOffsetX + vW / 2 - cDW / 2;
+            let offsetY = visualOffsetY + vH / 2 - cDH / 2;
+
+            this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`);
         }
         else if (mode === 'partial') {
-            this.setStyle(this.elements.viewer, 'display',   'block');
-            this.setStyle(this.elements.viewer, 'position',  'fixed');
-            this.setStyle(this.elements.viewer, 'overflow',  'hidden');
-            // 放大镜模式同样强制最高层级
+            this.setStyles(this.elements.viewer, { display: 'block', position: 'fixed', overflow: 'hidden', left: '0px', top: '0px' });
             this._enforceTopLayer();
 
             if (this.cfg.state.hasAgreed) {
-                cDW = rect.width  * activeZoom;
+                cDW = rect.width * activeZoom;
                 cDH = rect.height * activeZoom;
-                this.setStyle(activeMedia, 'width',    cDW + 'px');
-                this.setStyle(activeMedia, 'height',   cDH + 'px');
-                this.setStyle(activeMedia, 'position', 'absolute');
+                vW = isRotated ? cDH : cDW;
+                vH = isRotated ? cDW : cDH;
+
+                this.setStyles(activeMedia, { width: cDW + 'px', height: cDH + 'px', position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
 
                 let lensW, lensH;
                 if (isSmallOptimized && customLensWidth && customLensHeight) {
-                    lensW = customLensWidth; lensH = customLensHeight;
+                    lensW = isRotated ? customLensHeight : customLensWidth;
+                    lensH = isRotated ? customLensWidth : customLensHeight;
                 } else {
-                    lensW = Math.min(350, Math.max(100, cDW + 20));
-                    lensH = Math.min(350, Math.max(100, cDH + 20));
+                    lensW = Math.min(350, Math.max(100, vW + 20));
+                    lensH = Math.min(350, Math.max(100, vH + 20));
                 }
-                this.setStyle(this.elements.viewer, 'width',  lensW + 'px');
-                this.setStyle(this.elements.viewer, 'height', lensH + 'px');
+                this.setStyles(this.elements.viewer, { width: lensW + 'px', height: lensH + 'px' });
 
                 const clientX = window.lastMouseX || rect.left + rect.width  / 2;
                 const clientY = window.lastMouseY || rect.top  + rect.height / 2;
@@ -434,40 +447,45 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 let vX = clientX + 20, vY = clientY + 20;
                 if (vX + lensW > sW) vX = clientX - lensW - 20;
                 if (vY + lensH > sH) vY = clientY - lensH - 20;
+                
                 this.setStyle(this.elements.viewer, 'transform', `translate3d(${vX}px,${vY}px,0)`);
-                this.setStyle(this.elements.viewer, 'left', '0px');
-                this.setStyle(this.elements.viewer, 'top',  '0px');
 
                 if (cDW < 350 && cDH < 350 && !customLensWidth) {
-                    this.setStyle(this.elements.viewer, 'border', '1px solid rgba(255,255,255,0.2)');
-                    this.setStyle(this.elements.viewer, 'background-image', 'radial-gradient(circle, rgba(20,20,20,1) 0%, rgba(0,0,0,1) 100%)');
-                    this.setStyle(this.elements.viewer, 'background-color', '#000');
+                    this.setStyles(this.elements.viewer, {
+                        border: '1px solid rgba(255,255,255,0.2)',
+                        'background-image': 'radial-gradient(circle, rgba(20,20,20,1) 0%, rgba(0,0,0,1) 100%)',
+                        'background-color': '#000'
+                    });
                 } else {
-                    this.setStyle(this.elements.viewer, 'background-image', 'none');
-                    this.setStyle(this.elements.viewer, 'background-color', 'transparent');
-                    this.setStyle(this.elements.viewer, 'border', '1px solid rgba(255,255,255,0.4)');
+                    this.setStyles(this.elements.viewer, {
+                        'background-image': 'none', 'background-color': 'transparent', border: '1px solid rgba(255,255,255,0.4)'
+                    });
                 }
 
-                this.setStyles(activeMedia, { right: 'auto', bottom: 'auto', margin: '0px' });
-                let offsetX = 0, offsetY = 0;
-                if (cDW > lensW) offsetX = -(cDW * xP - lensW / 2);
-                else              offsetX = (lensW - cDW) / 2;
-                if (cDH > lensH) offsetY = -(cDH * yP - lensH / 2);
-                else              offsetY = (lensH - cDH) / 2;
-                this.setStyles(activeMedia, {
-                    transform: `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`,
-                    left: '0px', top: '0px'
-                });
+                let visualOffsetX = 0, visualOffsetY = 0;
+                if (vW > lensW) visualOffsetX = -(vW * vxP - lensW / 2);
+                else             visualOffsetX = (lensW - vW) / 2;
+                if (vH > lensH) visualOffsetY = -(vH * vyP - lensH / 2);
+                else             visualOffsetY = (lensH - vH) / 2;
+                
+                let offsetX = visualOffsetX + vW / 2 - cDW / 2;
+                let offsetY = visualOffsetY + vH / 2 - cDH / 2;
+
+                this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`);
             }
         } else {
             this.setStyles(this.elements.viewer, {
-                display: 'block', position: 'fixed',
+                display: 'block', position: 'fixed', left: '0px', top: '0px',
                 'background-color': 'rgba(20,20,20,0.9)', 'background-image': 'none'
             });
             this._enforceTopLayer();
-            this.setStyles(activeMedia, { position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px' });
+            this.setStyles(activeMedia, { position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
 
             let tW = rect.width * activeZoom, tH = rect.height * activeZoom;
+            cDW = tW; cDH = tH;
+            vW = isRotated ? cDH : cDW;
+            vH = isRotated ? cDW : cDH;
+
             const maxVW = sW * (mode === 'full-follow' ? 0.7 : 0.95);
             const maxVH = sH * (mode === 'full-follow' ? 0.7 : 0.95);
 
@@ -476,76 +494,64 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
             if (!this.cfg.state.breakoutView || !this.cfg.state.hasAgreed) {
                 const safeMaxVW = maxVW - 10, safeMaxVH = maxVH - 10;
-                const ratio = (rect.width / rect.height) || 1;
-                if (tW > safeMaxVW) { tW = safeMaxVW; tH = tW / ratio; }
-                if (tH > safeMaxVH) { tH = safeMaxVH; tW = tH * ratio; }
-                cDW = tW; cDH = tH;
-                this.setStyle(this.elements.viewer, 'width',  `${tW}px`);
-                this.setStyle(this.elements.viewer, 'height', `${tH}px`);
+                const ratio = vW / vH;
+                if (vW > safeMaxVW) { vW = safeMaxVW; vH = vW / ratio; }
+                if (vH > safeMaxVH) { vH = safeMaxVH; vW = vH * ratio; }
+                
+                cDW = isRotated ? vH : vW;
+                cDH = isRotated ? vW : vH;
+
+                this.setStyles(this.elements.viewer, { width: `${vW}px`, height: `${vH}px` });
+                
                 if (this.cfg.state.hasAgreed) {
-                    this.setStyle(activeMedia, 'width',  '100%');
-                    this.setStyle(activeMedia, 'height', '100%');
-                    this.setStyle(activeMedia, 'transform',
-                        `translate3d(0,0,0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`);
-                    this.setStyle(activeMedia, 'left', '0px');
-                    this.setStyle(activeMedia, 'top',  '0px');
+                    this.setStyles(activeMedia, { width: `${cDW}px`, height: `${cDH}px` });
+                    let offsetX = vW / 2 - cDW / 2;
+                    let offsetY = vH / 2 - cDH / 2;
+                    this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`);
                 }
             } else {
-                const vW = Math.min(tW, maxVW), vH = Math.min(tH, maxVH);
-                cDW = vW; cDH = vH;
-                this.setStyle(this.elements.viewer, 'width',  `${vW}px`);
-                this.setStyle(this.elements.viewer, 'height', `${vH}px`);
-                this.setStyle(activeMedia, 'width',  `${tW}px`);
-                this.setStyle(activeMedia, 'height', `${tH}px`);
-                let mX = (tW > vW) ? -(tW - vW) * xP : 0;
-                let mY = (tH > vH) ? -(tH - vH) * yP : 0;
-                this.setStyles(activeMedia, {
-                    transform: `translate3d(${mX}px,${mY}px,0) scaleX(${this.cfg.state.mirror}) rotate(${this.cfg.state.rotate}deg)`,
-                    left: '0px', top: '0px'
-                });
+                const lensW = Math.min(vW, maxVW), lensH = Math.min(vH, maxVH);
+                this.setStyles(this.elements.viewer, { width: `${lensW}px`, height: `${lensH}px` });
+                this.setStyles(activeMedia, { width: `${cDW}px`, height: `${cDH}px` });
+
+                let visualOffsetX = (vW > lensW) ? -(vW - lensW) * vxP : 0;
+                let visualOffsetY = (vH > lensH) ? -(vH - lensH) * vyP : 0;
+
+                let offsetX = visualOffsetX + vW / 2 - cDW / 2;
+                let offsetY = visualOffsetY + vH / 2 - cDH / 2;
+                
+                this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`);
             }
 
+            let vX, vY;
             if (mode === 'full-follow') {
-                let vX = clientX + 25, vY = clientY + 25;
-                if (vX + cDW > sW) vX = clientX - cDW - 20;
-                if (vY + cDH > sH) vY = clientY - cDH - 20;
-                this.setStyle(this.elements.viewer, 'transform', `translate3d(${vX}px,${vY}px,0)`);
-                this.setStyle(this.elements.viewer, 'left', '0px');
-                this.setStyle(this.elements.viewer, 'top',  '0px');
+                vX = clientX + 25; vY = clientY + 25;
+                if (vX + vW > sW) vX = clientX - vW - 20;
+                if (vY + vH > sH) vY = clientY - vH - 20;
             } else {
                 const margin = 30;
-                let vX = (clientX < sW / 2) ? sW - cDW - margin : margin;
-                let vY = clientY - (cDH / 2);
-                if (vY < margin)          vY = margin;
-                if (vY + cDH > sH - margin) vY = sH - cDH - margin;
-                this.setStyle(this.elements.viewer, 'transform', `translate3d(${vX}px,${vY}px,0)`);
-                this.setStyle(this.elements.viewer, 'left', '0px');
-                this.setStyle(this.elements.viewer, 'top',  '0px');
+                vX = (clientX < sW / 2) ? sW - vW - margin : margin;
+                vY = clientY - (vH / 2);
+                if (vY < margin) vY = margin;
+                if (vY + vH > sH - margin) vY = sH - vH - margin;
             }
+            this.setStyle(this.elements.viewer, 'transform', `translate3d(${vX}px,${vY}px,0)`);
         }
 
-        this.updateStatus(activeMedia.src !== currentHoveredSrc ? 'hd' : 'original', cDW, cDH, isVideo);
+        this.updateStatus(activeMedia.src !== currentHoveredSrc ? 'hd' : 'original', vW, vH, isVideo);
         return activeZoom;
     }
 
-    /**
-     * ✨ 右键菜单：在指定坐标弹出，绑定回调
-     * @param {number} x  clientX
-     * @param {number} y  clientY
-     * @param {Object} callbacks  { 'copy-img', 'copy-url', 'open-tab', 'save', 'disable-site', 'close' }
-     */
     showContextMenu(x, y, callbacks) {
         const menu = this.elements.ctxMenu;
         if (!menu) return;
 
-        // 更新"禁用站点"项的文本，反映当前状态
         const disableItem = menu.querySelector('[data-action="disable-site"]');
         if (disableItem) {
             const isEnabled = this.cfg.isSiteEnabled();
             disableItem.textContent = isEnabled ? '🚫 在此网站禁用引擎' : '✅ 在此网站启用引擎';
         }
 
-        // 移除旧监听，防止重复绑定
         const newMenu = menu.cloneNode(true);
         menu.parentNode.replaceChild(newMenu, menu);
         this.elements.ctxMenu = newMenu;
@@ -559,7 +565,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
             });
         });
 
-        // 定位：自动避免超出视口
         newMenu.style.setProperty('display', 'block', 'important');
         const mW = newMenu.offsetWidth, mH = newMenu.offsetHeight;
         const vW = window.innerWidth, vH = window.innerHeight;
@@ -570,7 +575,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         newMenu.style.setProperty('opacity', '0', 'important');
         requestAnimationFrame(() => newMenu.style.setProperty('opacity', '1', 'important'));
 
-        // 点击其他区域关闭
         this._ctxOutsideHandler = (e) => {
             if (!newMenu.contains(e.target)) this.hideContextMenu();
         };
@@ -586,11 +590,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         }
     }
 
-    /**
-     * ✨ 沉浸模式图片计数器
-     * @param {number} current  当前索引（0-based）
-     * @param {number} total    总数
-     */
     updateCounter(current, total) {
         const counter = this.elements.counter;
         if (!counter) return;
@@ -659,7 +658,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.elements.hint.innerHTML = hudHTML;
         this.setStyle(this.elements.hint, 'display', 'block');
 
-        void this.elements.hint.offsetWidth; // 强制 reflow，触发 transition
+        void this.elements.hint.offsetWidth; 
         this.setStyle(this.elements.hint, 'opacity', '1');
 
         clearTimeout(this.hudState.hintTimer);

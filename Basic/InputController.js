@@ -1,29 +1,48 @@
 // Basic/InputController.js
-// 终极性能优化版：包含 SPA 缓存失效、DOM读写分离、预加载网络防抖、逃逸边界修复
 window.Mix01InputController = class InputController {
     constructor(configManager, renderer) {
         this.cfg = configManager;
         this.render = renderer;
+        
         this.state = {
-            currentMedia: null, currentSrc: null, currentHdUrl: null, cachedRect: null,
+            _currentMediaRef: null,
+            get currentMedia() { return this._currentMediaRef?.deref() || null; },
+            set currentMedia(el) { this._currentMediaRef = el ? new WeakRef(el) : null; },
+            
+            _lastFoundMediaRef: null,
+            get lastFoundMedia() { return this._lastFoundMediaRef?.deref() || null; },
+            set lastFoundMedia(el) { this._lastFoundMediaRef = el ? new WeakRef(el) : null; },
+            
+            _lastTargetRef: null,
+            get lastTarget() { return this._lastTargetRef?.deref() || null; },
+            set lastTarget(el) { this._lastTargetRef = el ? new WeakRef(el) : null; },
+
+            currentSrc: null, currentHdUrl: null, cachedRect: null,
             activeZoom: 2.0, isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
             isZoomManuallyChanged: false, panOffsetX: 0, panOffsetY: 0, keyboardSwitchTime: 0, isTicking: false,
-            bgClickCount: 0, bgClickTimer: null, lastTarget: null, lastFoundMedia: null,
+            bgClickCount: 0, bgClickTimer: null,
             isRenderingLock: false,
-            lastRenderX: null, lastRenderY: null, lastRenderZoom: null, lastRenderMediaSrc: null,
-            _galleryCache: null,
-            _galleryCacheDirty: true
+            lastRenderSignature: null,
+            _galleryCache: null, 
+            _galleryCacheDirty: true,
+            
+            currentMode: 'partial',
+            currentRotate: 0,
+            currentMirror: 1
         };
+        
         this.preloadedUrls = new Set();
         this.preloadedUrlsQueue = [];
         this.compiledKeys = {}; 
-        this._preloadTimer = null;   // 用于网络防抖
-        this._resizeTimer = null;    // 沉浸模式 resize 防抖
-        this._hoverDelayTimer = null; // ✨ 悬停延迟触发定时器
-        this._cursorHideTimer = null; // ✨ 沉浸模式光标自动隐藏定时器
-        // ✨ 放大镜拖拽状态
+        this._preloadTimer = null;   
+        this._resizeTimer = null;    
+        this._hoverDelayTimer = null; 
+        this._cursorHideTimer = null; 
+        
+        this._lastDetectTime = 0;
+        this._lastRectTime = 0;
+
         this._drag = { active: false, startX: 0, startY: 0, origLeft: 0, origTop: 0 };
-        // ✨ 沉浸模式平移状态
         this._pan = { active: false, moved: false, startX: 0, startY: 0, origPanX: 0, origPanY: 0 };
 
         this.mediaObserver = new MutationObserver((mutations) => {
@@ -32,7 +51,7 @@ window.Mix01InputController = class InputController {
                 if (m.type === 'attributes' && m.attributeName === 'src' && m.target === this.state.currentMedia) {
                     if (this.state.currentMedia && this.state.currentMedia.src !== this.state.currentSrc) {
                         newSrc = this.state.currentMedia.src;
-                        break; // 找到一个就够了
+                        break; 
                     }
                 }
             }
@@ -48,6 +67,20 @@ window.Mix01InputController = class InputController {
         });
 
         this.bindEvents();
+    }
+
+    _toggleVideoPlay() {
+        if (!this.state.currentMedia || this.state.currentMedia.tagName !== 'VIDEO') return;
+        const v = this.state.currentMedia;
+        if (window.__mix01UserPaused || v.ended) {
+            window.__mix01UserPaused = false;
+            if (v.ended) v.currentTime = 0; 
+            v.play().catch(() => {});
+        } else {
+            window.__mix01UserPaused = true;
+            v.pause();
+        }
+        this.render.handleImmersiveActivity(v, this.state.currentSrc, this.cfg.keys);
     }
 
     bindEvents() {
@@ -119,27 +152,20 @@ window.Mix01InputController = class InputController {
             }
         });
 
-        // ✨ 沉浸模式点击视频画面切换播放/暂停
         this.render.elements.canvas.addEventListener('click', (e) => {
-            if (this.cfg.state.isImmersive && this.state.currentMedia && this.state.currentMedia.tagName === 'VIDEO') {
-                e.stopPropagation();
-                if (window.__mix01UserPaused) {
-                    window.__mix01UserPaused = false;
-                    this.state.currentMedia.play().catch(() => {});
-                } else {
-                    window.__mix01UserPaused = true;
-                    this.state.currentMedia.pause();
-                }
-                this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
-            }
+            e.stopPropagation(); this._toggleVideoPlay();
         });
+        if (this.render.elements.videoClone) {
+            this.render.elements.videoClone.addEventListener('click', (e) => {
+                e.stopPropagation(); this._toggleVideoPlay();
+            });
+        }
 
-        // ✨ 沉浸模式双击图片重置视图（缩放/旋转/镜像/平移一键还原）
         this.render.elements.img.addEventListener('dblclick', (e) => {
             if (!this.cfg.state.isImmersive) return;
             e.stopPropagation();
-            this.cfg.state.rotate = 0;
-            this.cfg.state.mirror = 1;
+            this.state.currentRotate = 0;
+            this.state.currentMirror = 1;
             this.state.activeZoom = this.cfg.state.zoom;
             this.state.isZoomManuallyChanged = false;
             this.state.panOffsetX = 0;
@@ -148,7 +174,19 @@ window.Mix01InputController = class InputController {
             this.render.showToast('🔄 视图已重置');
         });
 
-        // ✨ 右键上下文菜单
+        // 🔧 FIX: 原生层面的图裂失败容错。一瞬间回退原图，消灭图裂框
+        this.render.elements.img.addEventListener('error', () => {
+            if (this.state.currentHdUrl && this.render.elements.img.src !== this.state.currentSrc) {
+                this.render.hdState.badUrls.add(this.state.currentHdUrl);
+                this.state.currentHdUrl = null;
+                if (this.state.currentSrc) {
+                    this.render.elements.img.src = this.state.currentSrc;
+                }
+                this.render.showToast('⚠️ 高清资源已失效，自动回退至原图');
+                this.updateRender();
+            }
+        });
+
         this.render.elements.viewer.addEventListener('contextmenu', (e) => {
             if (!this.cfg.state.hasAgreed) return;
             e.preventDefault();
@@ -164,10 +202,9 @@ window.Mix01InputController = class InputController {
             });
         });
 
-        // ✨ 放大镜窗口拖拽（非沉浸模式下，按住 Alt 键可拖动查看器窗口固定位置）
         this.render.elements.viewer.addEventListener('mousedown', (e) => {
             if (this.cfg.state.isImmersive) return;
-            if (!e.altKey) return;  // 必须按住 Alt 才触发拖拽，避免与正常鼠标交互冲突
+            if (!e.altKey) return;  
             e.preventDefault();
             e.stopPropagation();
             const v = this.render.elements.viewer;
@@ -178,18 +215,19 @@ window.Mix01InputController = class InputController {
             this._drag.origLeft = rect.left;
             this._drag.origTop  = rect.top;
             v.style.setProperty('cursor', 'grabbing', 'important');
-            // 拖拽时暂停自动跟随
             this.state.keyboardSwitchTime = Date.now() + 99999;
         });
 
-        // ✨ 沉浸模式拖拽平移（放大后拖拽画面浏览细节）
         this.render.elements.viewer.addEventListener('mousedown', (e) => {
             if (!this.cfg.state.isImmersive) return;
             if (e.target === this.render.elements.progressContainer) return;
             const nw = this.state.currentMedia?.naturalWidth || 0;
             const nh = this.state.currentMedia?.naturalHeight || 0;
+            const isRotated = this.state.currentRotate % 180 !== 0;
+            const vW = (isRotated ? nh : nw) * this.state.activeZoom;
+            const vH = (isRotated ? nw : nh) * this.state.activeZoom;
             const sw = window.innerWidth, sh = window.innerHeight;
-            if (nw * this.state.activeZoom <= sw && nh * this.state.activeZoom <= sh) return;
+            if (vW <= sw && vH <= sh) return;
             e.preventDefault();
             this._pan.active  = true;
             this._pan.moved   = false;
@@ -225,21 +263,21 @@ window.Mix01InputController = class InputController {
         document.addEventListener('mouseup', () => {
             if (this._pan.active) {
                 this._pan.active = false;
-                // 平移后钳制偏移量，防止完全拖出视野
                 if (this.state.currentMedia && this.cfg.state.isImmersive) {
                     const nw = this.state.currentMedia.naturalWidth || 0;
                     const nh = this.state.currentMedia.naturalHeight || 0;
+                    const isRotated = this.state.currentRotate % 180 !== 0;
+                    const vW = (isRotated ? nh : nw) * this.state.activeZoom;
+                    const vH = (isRotated ? nw : nh) * this.state.activeZoom;
                     const sw = window.innerWidth, sh = window.innerHeight;
-                    const tW = nw * this.state.activeZoom, tH = nh * this.state.activeZoom;
-                    this.state.panOffsetX = Math.max(-(tW - sw), Math.min(0, this.state.panOffsetX || 0));
-                    this.state.panOffsetY = Math.max(-(tH - sh), Math.min(0, this.state.panOffsetY || 0));
+                    this.state.panOffsetX = Math.max(-(vW - sw), Math.min(0, this.state.panOffsetX || 0));
+                    this.state.panOffsetY = Math.max(-(vH - sh), Math.min(0, this.state.panOffsetY || 0));
                 }
                 this.updateRender();
             }
             if (!this._drag.active) return;
             this._drag.active = false;
             this.render.elements.viewer.style.setProperty('cursor', 'default', 'important');
-            // 松开后恢复正常跟随（重置 keyboardSwitchTime）
             this.state.keyboardSwitchTime = 0;
         }, { capture: true });
     }
@@ -267,7 +305,6 @@ window.Mix01InputController = class InputController {
 
     handleMouseMove(e) {
         if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') {
-            // ✨ 光标自动隐藏：移动时显示，2 秒不动则隐藏
             this.render.elements.viewer.style.setProperty('cursor', 'default', 'important');
             clearTimeout(this._cursorHideTimer);
             this._cursorHideTimer = setTimeout(() => {
@@ -279,23 +316,29 @@ window.Mix01InputController = class InputController {
             return;
         }
 
-        // ✨ 非沉浸模式下：站点已禁用则确保 viewer 隐藏后返回
         if (!this.cfg.isSiteEnabled()) {
             if (this.render.elements.viewer.style.display === 'block') this.hideViewer();
             return;
         }
 
-        const media = this.getMediaUnderCursor(e.clientX, e.clientY, e.target);
-        if (media && (media !== this.state.currentMedia || (media.src||'video') !== this.state.currentSrc)) {
-            if (Date.now() - this.state.keyboardSwitchTime < 500) return;
-            // ✨ 放大镜过滤：鼠标快速划过时也检测
-            if (!this.isMediaFiltered(media)) { this.triggerZoom(media); }
-            return;
+        const now = performance.now();
+        let media = this.state.lastFoundMedia;
+        if (now - this._lastDetectTime > 100) {
+            this._lastDetectTime = now;
+            media = this.getMediaUnderCursor(e.clientX, e.clientY, e.target);
+            
+            if (media && (media !== this.state.currentMedia || (media.src||'video') !== this.state.currentSrc)) {
+                if (Date.now() - this.state.keyboardSwitchTime < 500) return;
+                if (!this.isMediaFiltered(media)) { this.triggerZoom(media); }
+                return;
+            }
         }
 
         if (this.state.currentMedia && this.render.elements.viewer.style.display === 'block' && this.state.cachedRect) {
-            if (media === this.state.currentMedia) this.state.cachedRect = this.state.currentMedia.getBoundingClientRect();
-            else if (Date.now() - this.state.keyboardSwitchTime > 500) {
+            if (media === this.state.currentMedia && now - this._lastRectTime > 250) {
+                this.state.cachedRect = this.state.currentMedia.getBoundingClientRect();
+                this._lastRectTime = now;
+            } else if (Date.now() - this.state.keyboardSwitchTime > 500) {
                 if (e.clientX < this.state.cachedRect.left || e.clientX > this.state.cachedRect.right || 
                     e.clientY < this.state.cachedRect.top || e.clientY > this.state.cachedRect.bottom) {
                     this.hideViewer(); return;
@@ -307,17 +350,14 @@ window.Mix01InputController = class InputController {
 
     handleMouseOver(e) {
         if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
-        // ✨ 站点级开关：该域名已被用户禁用则直接返回
         if (!this.cfg.isSiteEnabled()) return;
 
         const t = e.target;
         if ((t.tagName === 'IMG' || t.tagName === 'VIDEO') && (t.src || t.tagName === 'VIDEO')) {
-            // ✨ 放大镜过滤：尺寸或选择器命中则跳过
             if (this.isMediaFiltered(t)) return;
 
             const delay = this.cfg.state.triggerDelay || 0;
             if (delay > 0) {
-                // ✨ 悬停延迟：等待用户真正"停住"后再触发
                 clearTimeout(this._hoverDelayTimer);
                 this._hoverDelayTimer = setTimeout(() => this.triggerZoom(t), delay);
             } else {
@@ -327,7 +367,6 @@ window.Mix01InputController = class InputController {
     }
 
     handleMouseOut(e) {
-        // ✨ 取消尚未触发的悬停延迟
         clearTimeout(this._hoverDelayTimer);
         if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
         if (e.target === this.state.currentMedia) {
@@ -337,7 +376,6 @@ window.Mix01InputController = class InputController {
     }
 
     handleMouseLeave() {
-        // ✨ 取消尚未触发的悬停延迟
         clearTimeout(this._hoverDelayTimer);
         if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
         if (Date.now() - this.state.keyboardSwitchTime > 500) this.hideViewer();
@@ -350,29 +388,45 @@ window.Mix01InputController = class InputController {
                 const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, src);
                 if (hdUrl && hdUrl !== src && !this.render.hdState.badUrls.has(hdUrl)) {
                     
-                    if (this.state.currentHdUrl === hdUrl) return; 
-                    this.state.currentHdUrl = hdUrl;
                     window.__mix01HdUrlMap = window.__mix01HdUrlMap || {};
                     window.__mix01HdUrlMap[src] = hdUrl;
 
-                    if (!this.render.elements.img.src || this.render.elements.img.src === '') {
-                        this.render.setStyle(this.render.elements.spinner, 'display', 'block');
-                    } else {
-                        this.render.hdState.isLoading = true;
-                        this.updateRender(); 
-                    }
+                    if (this.state.currentSrc !== src) return; 
+                    if (this.render.elements.img.src === hdUrl) return;
+
+                    this.state.currentHdUrl = hdUrl;
+                    this.render.hdState.isLoading = true;
+                    
+                    this.render.hdState.progress = 0;
+                    if (this.render.hdState.progressTimer) clearInterval(this.render.hdState.progressTimer);
+                    this.render.hdState.progressTimer = setInterval(() => {
+                        if (this.render.hdState.progress < 95) {
+                            this.render.hdState.progress += Math.floor(Math.random() * 8) + 2;
+                            if (this.render.hdState.progress > 95) this.render.hdState.progress = 95;
+                            this.updateRender(); 
+                        }
+                    }, 150);
+
+                    this.updateRender(); 
 
                     const tempImg = new Image();
-                    tempImg.src = hdUrl;
-                    
-                    try {
-                        await tempImg.decode(); 
-                        
-                        if (this.state.currentHdUrl === hdUrl && this.state.currentMedia === target) {
-                            this.render.setStyle(this.render.elements.spinner, 'display', 'none');
-                            this.render.hdState.isLoading = false; 
+                    tempImg.onload = () => {
+                        // 🔧 FIX: 过滤掉 CDN 恶意返回的 1x1 透明防盗链图片或无效图片，主动报错降级
+                        if (tempImg.naturalWidth <= 10 && tempImg.naturalHeight <= 10) {
+                            tempImg.onerror();
+                            return;
+                        }
 
-                            if (!this.cfg.state.isImmersive && this.cfg.state.mode === 'partial' && this.state.isSmallOptimized && !this.state.isZoomManuallyChanged) {
+                        if (this.state.currentSrc === src) { 
+                            if (this.render.hdState.progressTimer) {
+                                clearInterval(this.render.hdState.progressTimer);
+                                this.render.hdState.progressTimer = null;
+                            }
+                            this.render.hdState.progress = 100;
+                            this.render.hdState.isLoading = false; 
+                            this.render.elements.img.src = hdUrl; 
+                            
+                            if (!this.cfg.state.isImmersive && this.state.currentMode === 'partial' && this.state.isSmallOptimized && !this.state.isZoomManuallyChanged) {
                                 const nw = tempImg.naturalWidth, nh = tempImg.naturalHeight;
                                 if (nw > 350 || nh > 350) {
                                     this.state.customLensWidth = Math.min(nw, window.innerWidth * 0.9);
@@ -380,18 +434,23 @@ window.Mix01InputController = class InputController {
                                     this.state.activeZoom = nw / (this.state.cachedRect.width || 1);
                                 }
                             }
-                            
-                            this.render.elements.img.src = hdUrl; 
                             this.updateRender(); 
                         }
-                    } catch (err) {
-                        if (this.state.currentHdUrl === hdUrl) {
-                            this.render.setStyle(this.render.elements.spinner, 'display', 'none');
+                    };
+                    
+                    tempImg.onerror = () => {
+                        if (this.state.currentSrc === src) {
+                            if (this.render.hdState.progressTimer) {
+                                clearInterval(this.render.hdState.progressTimer);
+                                this.render.hdState.progressTimer = null;
+                            }
                             this.render.hdState.isLoading = false;
                             this.updateRender(); 
                         }
                         this.render.hdState.badUrls.add(hdUrl); 
-                    }
+                    };
+
+                    tempImg.src = hdUrl;
                 }
             }
         } catch (error) { console.warn('Mix01 Engine 解析失败:', error); }
@@ -402,13 +461,15 @@ window.Mix01InputController = class InputController {
         if (target.tagName === 'VIDEO' && this.cfg.state.disableVideoDefaultView && !this.cfg.state.isImmersive) return;
 
         this.hideViewer();
-        window.lastHoveredMedia = target;
+        
+        window.lastHoveredMedia = target ? new WeakRef(target) : null;
         window.lastHoveredSrc = target.src || 'video';
-        this.state.currentMedia = target;
+        
+        this.state.currentMedia = target; 
         this.state.currentSrc = target.src || 'video';
         this.state.cachedRect = target.getBoundingClientRect();
+        this._lastRectTime = performance.now(); 
         
-        // 【核心修复】：防止 Pixiv 等单页应用在不滚动页面的情况下切换 Tab，强制清除失效图库缓存
         this.state._galleryCacheDirty = true;
         
         this.mediaObserver.disconnect();
@@ -420,6 +481,15 @@ window.Mix01InputController = class InputController {
         this.state.customLensWidth = null; this.state.customLensHeight = null;
         this.state.isZoomManuallyChanged = false;
         window.__mix01UserPaused = false;
+        
+        this.state.currentMode = this.cfg.state.mode;
+        this.state.currentRotate = 0;
+        this.state.currentMirror = 1;
+        
+        if (this.render.hdState.progressTimer) {
+            clearInterval(this.render.hdState.progressTimer);
+            this.render.hdState.progressTimer = null;
+        }
 
         if (!this.cfg.state.hasAgreed) {
             this.render.setStyle(this.render.elements.img, 'display', 'none');
@@ -447,14 +517,31 @@ window.Mix01InputController = class InputController {
             return;
         }
 
-        this.render.setStyle(this.render.elements.canvas, 'display', 'none');
+        if (this.render.elements.canvas) this.render.setStyle(this.render.elements.canvas, 'display', 'none');
+        if (this.render.elements.videoClone) this.render.setStyle(this.render.elements.videoClone, 'display', 'none');
+        
         this.render.setStyle(this.render.elements.progressContainer, 'display', 'none');
         this.render.setStyle(this.render.elements.img, 'display', 'block');
         this.render.setStyle(this.render.elements.img, 'max-width', 'none'); 
         this.render.setStyle(this.render.elements.img, 'max-height', 'none');
-
         this.render.setStyle(this.render.elements.img, 'opacity', '0');
-        this.render.elements.img.src = target.src;
+
+        let initialSrc = target.src;
+        // 🔧 FIX: 如果缓存池里的链接已经被拉黑（由于图裂等问题），绝对不使用它
+        if (window.__mix01HdUrlMap && window.__mix01HdUrlMap[initialSrc]) {
+            const mappedUrl = window.__mix01HdUrlMap[initialSrc];
+            if (!this.render.hdState.badUrls.has(mappedUrl)) {
+                initialSrc = mappedUrl;
+                this.state.currentHdUrl = initialSrc;
+            } else {
+                this.state.currentHdUrl = null;
+            }
+        } else {
+            this.state.currentHdUrl = null;
+        }
+
+        this.render.elements.img.src = initialSrc;
+        
         this.render.elements.img.decode().then(() => {
             this.render.setStyle(this.render.elements.img, 'opacity', '1');
         }).catch(() => {
@@ -475,7 +562,6 @@ window.Mix01InputController = class InputController {
         this.render.setStyle(this.render.elements.viewer, 'display', 'block');
         if (this.cfg.state.isImmersive) {
             this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
-            // ✨ 更新沉浸模式计数器（延迟以等待 galleryCacheDirty 刷新）
             setTimeout(() => this._updateGalleryCounter(), 60);
         }
         
@@ -487,8 +573,6 @@ window.Mix01InputController = class InputController {
         if (this.state.isRenderingLock) return;
         this.state.isRenderingLock = true;
 
-        // 【阶段一：纯读取 Phase (Read)】
-        // 将引起重绘的所有读取操作分离在 rAF 之外，消除 Layout Thrashing
         const sW = window.innerWidth;
         const sH = window.innerHeight;
         const rect = this.state.cachedRect;
@@ -496,7 +580,6 @@ window.Mix01InputController = class InputController {
         const y = e ? e.clientY : (window.lastMouseY !== undefined ? window.lastMouseY : sH / 2);
         
         let xP, yP;
-        // 【核心修复】：沉浸模式下使用窗口坐标系；非沉浸模式使用元素坐标系
         if (this.cfg.state.isImmersive) {
             xP = x / sW;
             yP = y / sH;
@@ -505,7 +588,6 @@ window.Mix01InputController = class InputController {
             yP = (y - rect.top) / (rect.height || 1);
         }
 
-        // 绝对边界锁（Clamp），防止意外溢出导致图片飞走
         xP = Math.max(0, Math.min(1, xP));
         yP = Math.max(0, Math.min(1, yP));
 
@@ -513,16 +595,15 @@ window.Mix01InputController = class InputController {
         const roundedY = Math.round(yP * 1000);
         const roundedZoom = Math.round(this.state.activeZoom * 1000);
         const mediaSrc = this.state.currentSrc || '';
-        if (this.state.lastRenderMediaSrc === mediaSrc && this.state.lastRenderX === roundedX && this.state.lastRenderY === roundedY && this.state.lastRenderZoom === roundedZoom) {
+        
+        const renderSignature = `${mediaSrc}|${roundedX}|${roundedY}|${roundedZoom}|${this.state.currentMode}|${this.state.currentRotate}|${this.state.currentMirror}|${this.state.panOffsetX}|${this.state.panOffsetY}|${this.cfg.state.isImmersive}`;
+
+        if (this.state.lastRenderSignature === renderSignature) {
             this.state.isRenderingLock = false;
             return;
         }
-        this.state.lastRenderMediaSrc = mediaSrc;
-        this.state.lastRenderX = roundedX;
-        this.state.lastRenderY = roundedY;
-        this.state.lastRenderZoom = roundedZoom;
+        this.state.lastRenderSignature = renderSignature;
 
-        // 【阶段二：纯写入 Phase (Write)】
         requestAnimationFrame(() => {
             if (!this.state.currentMedia || !this.state.cachedRect) {
                 this.state.isRenderingLock = false;
@@ -530,14 +611,14 @@ window.Mix01InputController = class InputController {
             }
             try {
                 const isVideo = this.state.currentMedia.tagName === 'VIDEO';
-                const activeMedia = isVideo ? this.render.elements.canvas : this.render.elements.img;
+                const activeMedia = isVideo ? this.render.elements.videoClone : this.render.elements.img;
                 
-                // 将计算好的全量数据直接压入渲染管线
                 this.state.activeZoom = this.render.updateLayout(
                     activeMedia, rect, this.state.activeZoom, xP, yP,
                     this.state.isSmallOptimized, this.state.customLensWidth, this.state.customLensHeight,
                     this.state.isZoomManuallyChanged, this.state.currentSrc, sW, sH,
-                    this.state.panOffsetX, this.state.panOffsetY
+                    this.state.panOffsetX, this.state.panOffsetY,
+                    this.state.currentMode, this.state.currentRotate, this.state.currentMirror
                 );
             } catch (err) {
                 console.warn("Mix01 Render Engine:", err);
@@ -555,6 +636,10 @@ window.Mix01InputController = class InputController {
             clearTimeout(this._resizeTimer);
             this._resizeTimer = null;
         }
+        if (this.render.hdState.progressTimer) {
+            clearInterval(this.render.hdState.progressTimer);
+            this.render.hdState.progressTimer = null;
+        }
         this.state.currentMedia = null;
         this.state.currentSrc = null;
         this.state.currentHdUrl = null; 
@@ -565,6 +650,7 @@ window.Mix01InputController = class InputController {
         this.state.isZoomManuallyChanged = false;
         this.state.panOffsetX = 0;
         this.state.panOffsetY = 0;
+        this.state.lastRenderSignature = null;
         window.isFetchingMore = false;
         this.state.isRenderingLock = false;
     }
@@ -613,38 +699,27 @@ window.Mix01InputController = class InputController {
         return e.key.toLowerCase() === config.key || e.code.toLowerCase() === config.key;
     }
 
-    /**
-     * ✨ 新增：判断媒体元素是否应被放大镜跳过
-     * 过滤条件：(1) 元素尺寸小于 minZoomSize  (2) 匹配 excludeSelectors 中任意选择器
-     * @param {HTMLElement} el
-     * @returns {boolean} true = 应跳过
-     */
     isMediaFiltered(el) {
         const minSize = this.cfg.state.minZoomSize || 0;
         if (minSize > 0) {
             const rect = el.getBoundingClientRect();
-            // 宽或高任意一个 >= minZoomSize 即认为是有意义的内容图，不过滤
             if (rect.width < minSize && rect.height < minSize) return true;
         }
 
         const selectorStr = this.cfg.state.excludeSelectors || '';
         if (selectorStr.trim()) {
-            // 编译并缓存选择器列表，避免每次 mouseover 都 split
             if (selectorStr !== this._lastExcludeSelectorStr) {
                 this._lastExcludeSelectorStr = selectorStr;
                 this._compiledExcludeSelectors = selectorStr.split(',')
                     .map(s => s.trim()).filter(Boolean);
             }
             for (const sel of (this._compiledExcludeSelectors || [])) {
-                try { if (el.matches(sel)) return true; } catch (e) { /* 忽略非法选择器 */ }
+                try { if (el.matches(sel)) return true; } catch (e) { }
             }
         }
         return false;
     }
 
-    /**
-     * ✨ 更新沉浸模式图库计数器（当前 / 总数）
-     */
     _updateGalleryCounter() {
         if (!this.cfg.state.isImmersive) {
             this.render.updateCounter(0, 0);
@@ -660,7 +735,8 @@ window.Mix01InputController = class InputController {
 
     getGalleryImages() {
         if (!this.state._galleryCacheDirty && this.state._galleryCache) {
-            return this.state._galleryCache;
+            const arr = this.state._galleryCache.map(ref => ref.deref()).filter(Boolean);
+            if (arr.length > 0) return arr;
         }
 
         const adapter = window.Mix01Utils.getImmersiveAdapter();
@@ -669,20 +745,17 @@ window.Mix01InputController = class InputController {
             result = adapter.getGalleryImages();
         } else {
             result = Array.from(document.querySelectorAll('img, video')).filter(media => {
-                if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz') return false;
+                if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') return false;
                 const rect = media.getBoundingClientRect();
                 return rect.width > 50 && rect.height > 50; 
             });
         }
         
-        this.state._galleryCache = result;
+        this.state._galleryCache = result.map(el => new WeakRef(el));
         this.state._galleryCacheDirty = false;
         return result;
     }
 
-    /**
-     * ✨ 快速切换当前站点引擎开关（右键菜单 & 快捷键均调用此方法）
-     */
     _quickToggleSite() {
         const host = window.location.hostname;
         if (!host) return;
@@ -690,7 +763,6 @@ window.Mix01InputController = class InputController {
             delete this.cfg.disabledSites[host];
         } else {
             this.cfg.disabledSites[host] = true;
-            // 禁用时立即关闭当前预览
             if (this.cfg.state.isImmersive) this.exitImmersive();
             else this.hideViewer();
         }
@@ -712,7 +784,6 @@ window.Mix01InputController = class InputController {
                 window.lastMouseY = newRect.top + newRect.height / 2;
                 this.updateRender();
                 this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
-                // ✨ 更新计数器
                 this._updateGalleryCounter();
             }
         }, 50);
@@ -796,10 +867,8 @@ window.Mix01InputController = class InputController {
     triggerPreload() {
         if (!this.cfg.state.isImmersive || this.cfg.state.preloadCount <= 0 || !this.state.currentMedia) return;
 
-        // 【核心优化】：如果正在预加载倒计时，取消它（斩断快速切换时的请求风暴）
         if (this._preloadTimer) clearTimeout(this._preloadTimer);
 
-        // 延迟 300ms，确认用户真实驻留再启动预加载
         this._preloadTimer = setTimeout(() => {
             const galleryImages = this.getGalleryImages();
             let currentIndex = galleryImages.indexOf(this.state.currentMedia);
@@ -843,13 +912,11 @@ window.Mix01InputController = class InputController {
 
     handleKeyDown(e) {
         if (!this.cfg.state.hasAgreed) return;
-        // ✨ 站点级开关：该站点已禁用则所有快捷键均不响应
         if (!this.cfg.isSiteEnabled()) return;
         const k = e.key.toLowerCase(); let up = false;
         const modeList = ['partial', 'full-follow'];
         const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随' };
         
-        // ✨ Ctrl+Shift+X：快速禁用/启用当前站点（无需打开设置页）
         if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'x') {
             this._quickToggleSite();
             e.preventDefault(); return;
@@ -885,22 +952,13 @@ window.Mix01InputController = class InputController {
 
         if (this.render.elements.viewer.style.display !== 'block') return;
 
-        // ✨ 沉浸模式下按任意键唤醒 HUD 提示栏
         if (this.cfg.state.isImmersive) {
             this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
         }
 
         if (this.matchCombo(e, this.cfg.keys.playVideo || 'space') || e.code === 'Space') {
             if (this.cfg.state.isImmersive && this.state.currentMedia && this.state.currentMedia.tagName === 'VIDEO') {
-                if (window.__mix01UserPaused) {
-                    window.__mix01UserPaused = false;
-                    let playPromise = this.state.currentMedia.play();
-                    if (playPromise !== undefined) playPromise.then(() => { this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys); }).catch(()=>{});
-                } else {
-                    window.__mix01UserPaused = true;
-                    this.state.currentMedia.pause();
-                    this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
-                }
+                this._toggleVideoPlay();
                 e.preventDefault(); return;
             }
         }
@@ -912,7 +970,6 @@ window.Mix01InputController = class InputController {
             }
         }
 
-        // ✨ 新增：在新标签页打开原图 / 高清图
         if (this.matchCombo(e, this.cfg.keys.openInTab || 'o')) {
             const urlToOpen = this.state.currentHdUrl || this.render.elements.img.src;
             if (urlToOpen && urlToOpen !== window.location.href) {
@@ -935,17 +992,15 @@ window.Mix01InputController = class InputController {
             if (this.cfg.state.isImmersive) { this.executePhantomAction('follow'); e.preventDefault(); return; }
         }
 
-        if (k === this.cfg.keys.rotate) { this.cfg.state.rotate = (this.cfg.state.rotate + 90) % 360; up = true; } 
-        else if (k === this.cfg.keys.mirror) { this.cfg.state.mirror *= -1; up = true; } 
+        if (k === this.cfg.keys.rotate) { this.state.currentRotate = (this.state.currentRotate + 90) % 360; up = true; } 
+        else if (k === this.cfg.keys.mirror) { this.state.currentMirror *= -1; up = true; } 
         else if (k === this.cfg.keys.mode) { 
             if (this.cfg.state.isImmersive) {
                 this.render.showToast(`⚠️ 请双击背景或按 ${(this.cfg.keys.immersive || 'Esc').toUpperCase()} 退出沉浸模式`);
             } else {
-                this.cfg.state.mode = modeList[(modeList.indexOf(this.cfg.state.mode) + 1) % modeList.length]; 
-                this.cfg.siteModes[window.location.hostname] = this.cfg.state.mode;
-                this.cfg.save({ siteModes: this.cfg.siteModes }); 
+                this.state.currentMode = modeList[(modeList.indexOf(this.state.currentMode) + 1) % modeList.length]; 
                 up = true; 
-                this.render.showToast(modeNames[this.cfg.state.mode]); 
+                this.render.showToast(modeNames[this.state.currentMode]); 
             }
         }
         else if (k === this.cfg.keys.zoomIn || k === '+') { this.state.activeZoom += 0.5; this.state.isZoomManuallyChanged = true; this.render.showToast(`${this.state.activeZoom.toFixed(1)}x`); up = true; } 
@@ -958,6 +1013,18 @@ window.Mix01InputController = class InputController {
             }
         }
         else if (k === 'arrowleft' || k === 'a' || k === 'arrowright' || k === 'd') {
+            if (this.cfg.state.isImmersive && this.state.currentMedia && this.state.currentMedia.tagName === 'VIDEO') {
+                const isForward = (k === 'arrowright' || k === 'd');
+                const v = this.state.currentMedia;
+                if (v.duration) {
+                    v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + (isForward ? 5 : -5)));
+                    this.render.showToast(isForward ? "⏩ 快进 5 秒" : "⏪ 快退 5 秒");
+                }
+                e.preventDefault(); 
+                return;
+            }
+        }
+        else if (k === 'arrowup' || k === 'w' || k === 'arrowdown' || k === 's') {
             if (!this.cfg.state.isImmersive || window.isFetchingMore) return;
 
             const galleryImages = this.getGalleryImages();
@@ -969,51 +1036,72 @@ window.Mix01InputController = class InputController {
             }
             if (currentIndex === -1) currentIndex = 0;
 
-            const isNext = (k === 'arrowright' || k === 'd');
+            const isNext = (k === 'arrowdown' || k === 's');
 
             if (isNext) {
                 if (currentIndex < galleryImages.length - 1) {
-                    this.performSwitch(galleryImages[currentIndex + 1], "下一项 ➡️");
+                    this.performSwitch(galleryImages[currentIndex + 1], "下一项 ⬇️");
                 } else {
                     window.isFetchingMore = true;
                     this.render.showToast("⏳ 正在加载更多动态...");
-                    window.scrollBy({ top: window.innerHeight * 0.8, behavior: 'smooth' });
+                    
+                    let previousLastSrc = galleryImages[galleryImages.length - 1] ? (galleryImages[galleryImages.length - 1].src || 'video') : null;
+                    window.scrollBy({ top: window.innerHeight * 1.5, behavior: 'smooth' });
                     
                     setTimeout(() => {
                         this.state._galleryCacheDirty = true;
                         const newGallery = this.getGalleryImages();
+                        
                         let newIdx = newGallery.indexOf(this.state.currentMedia);
                         if (newIdx === -1) newIdx = newGallery.findIndex(media => (media.src||'video') === this.state.currentSrc);
                         
                         if (newIdx !== -1 && newIdx < newGallery.length - 1) {
-                            this.performSwitch(newGallery[newIdx + 1], "下一项 ➡️");
+                            this.performSwitch(newGallery[newIdx + 1], "下一项 ⬇️");
                         } else {
-                            this.render.showToast("🚧 到底啦！没有更多内容了");
+                            let currentLastSrc = newGallery[newGallery.length - 1]?.src || 'video';
+                            if (currentLastSrc !== previousLastSrc && currentLastSrc !== this.state.currentSrc) {
+                                this.performSwitch(newGallery[0], "下一项 ⬇️");
+                            } else {
+                                this.render.showToast("🚧 到底啦！没有更多内容了");
+                            }
                         }
                         window.isFetchingMore = false;
-                    }, 800);
+                    }, 1200); 
                 }
             } else {
                 if (currentIndex > 0) {
-                    this.performSwitch(galleryImages[currentIndex - 1], "⬅️ 上一项");
+                    this.performSwitch(galleryImages[currentIndex - 1], "⬆️ 上一项");
                 } else {
                     window.isFetchingMore = true;
                     this.render.showToast("⏳ 正在向上翻阅...");
-                    window.scrollBy({ top: -window.innerHeight * 0.8, behavior: 'smooth' });
+                    
+                    let previousFirstSrc = galleryImages[0] ? (galleryImages[0].src || 'video') : null;
+                    window.scrollBy({ top: -window.innerHeight * 1.5, behavior: 'smooth' });
                     
                     setTimeout(() => {
                         this.state._galleryCacheDirty = true;
                         const newGallery = this.getGalleryImages();
+                        if (newGallery.length === 0) {
+                            this.render.showToast("🚧 到顶啦！");
+                            window.isFetchingMore = false;
+                            return;
+                        }
+
                         let newIdx = newGallery.indexOf(this.state.currentMedia);
                         if (newIdx === -1) newIdx = newGallery.findIndex(media => (media.src||'video') === this.state.currentSrc);
                         
                         if (newIdx !== -1 && newIdx > 0) {
-                            this.performSwitch(newGallery[newIdx - 1], "⬅️ 上一项");
+                            this.performSwitch(newGallery[newIdx - 1], "⬆️ 上一项");
                         } else {
-                            this.render.showToast("🚧 到顶啦！");
+                            let currentFirstSrc = newGallery[0].src || 'video';
+                            if (currentFirstSrc !== previousFirstSrc && currentFirstSrc !== this.state.currentSrc) {
+                                this.performSwitch(newGallery[newGallery.length - 1], "⬆️ 上一项");
+                            } else {
+                                this.render.showToast("🚧 真的到顶啦！");
+                            }
                         }
                         window.isFetchingMore = false;
-                    }, 800);
+                    }, 1200);
                 }
             }
             e.preventDefault(); 

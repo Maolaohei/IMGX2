@@ -1,19 +1,9 @@
 // rules-engine.js
-// Mix01 高性能原生规则引擎 (终极优化版：附带LRU并发控制、API内存级缓存、智能防风控)
-
-// ============================================================
-// 【快捷键冲突修复】必须在所有模块加载前执行，提前劫持
-// document.addEventListener，为后续注册的所有 keydown/keyup
-// 监听器自动注入"输入框保护"与"修饰键保护"过滤层。
-// 这修复了 Ctrl+V 触发 V 快捷键、Alt+D 触发 D 快捷键等问题。
-// ============================================================
 (function patchKeyboardGuard() {
     const _origAdd = Document.prototype.addEventListener;
     const _origRemove = Document.prototype.removeEventListener;
-    // WeakMap：原始 handler → 包装后的 handler，用于 removeEventListener 配对
     const _guardMap = new WeakMap();
 
-    // 判断焦点是否落在可编辑元素内
     function _isEditableTarget(tgt) {
         if (!tgt) return false;
         const tag = tgt.tagName;
@@ -25,16 +15,11 @@
 
     Document.prototype.addEventListener = function(type, handler, options) {
         if ((type === 'keydown' || type === 'keyup') && typeof handler === 'function') {
-            // 避免重复包装
             if (_guardMap.has(handler)) {
                 return _origAdd.call(this, type, _guardMap.get(handler), options);
             }
             const guarded = function(e) {
-                // 保护 1：焦点在输入框/富文本时，不触发插件单键快捷键
                 if (_isEditableTarget(e.target)) return;
-                // 保护 2：有 Ctrl / Meta / Alt 修饰键时，不触发单字符快捷键
-                //         防止 Ctrl+V → V、Ctrl+C → C、Alt+F → F 等冲突。
-                //         但若同时按住 Shift（如 Ctrl+Shift+X），视为用户主动组合键，予以放行。
                 if ((e.ctrlKey || e.metaKey || e.altKey) && !e.shiftKey &&
                     (e.key.length === 1 || e.key === ' ' || e.key === 'Spacebar')) return;
                 handler.call(this, e);
@@ -54,7 +39,6 @@
 })();
 
 (function () {
-    // 【极致优化】：轻量级 LRU 缓存，防止 Pixiv/Twitter 瀑布流狂刷导致的内存溢出 (OOM)
     const LRUCache = {
         set: (mapName, key, value, maxSize = 30) => {
             window[mapName] = window[mapName] || new Map();
@@ -69,44 +53,26 @@
         }
     };
 
-    // 模拟原生环境下的 DOM 工具函数
     const tools = {
         getLargestImgSrc: function (container) {
             if (!container || !container.querySelectorAll) return '';
             const imgs = Array.from(container.querySelectorAll('img, [style*="background"]'));
-
-            let maxArea = 0;
-            let bestSrc = '';
+            let maxArea = 0, bestSrc = '';
             for (const el of imgs) {
                 const area = el.clientWidth * el.clientHeight;
-                // 【Bug修复】原为 >=，导致等面积时错误覆盖已有结果；改为严格 >
                 if (area <= maxArea) continue;
-
                 let src = el.src || '';
                 if (!src) {
                     const match = el.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
                     if (match) src = match[1];
                 }
-                // 跳过 data URI（无法下载为文件）和空字符串
-                if (src && !src.startsWith('data:')) {
-                    maxArea = area;
-                    bestSrc = src;
-                }
+                if (src && !src.startsWith('data:')) { maxArea = area; bestSrc = src; }
             }
             return bestSrc;
         },
-        getBackgroundImgSrc: function (el) {
-            if (!el) return '';
-            const style = window.getComputedStyle(el);
-            const match = style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
-            return match ? match[1] : '';
-        },
         detectImage: async function (primarySrc, fallbackSrc) {
-            // 【Bug修复】原来使用无限增长的普通对象，在 Pixiv/Pinterest 瀑布流下会 OOM
-            // 改为复用已有的 LRUCache 机制，最多缓存 60 条探测结果
             const cached = LRUCache.get('__mix01DetectCache', primarySrc);
             if (cached !== undefined) return cached;
-
             return new Promise((resolve) => {
                 const img = new Image();
                 const fallback = fallbackSrc || primarySrc;
@@ -115,7 +81,7 @@
                     if (settled) return;
                     settled = true;
                     clearTimeout(timeoutId);
-                    img.src = ''; // 中止加载，释放网络资源
+                    img.src = ''; 
                     LRUCache.set('__mix01DetectCache', primarySrc, url, 60);
                     resolve(url);
                 };
@@ -150,20 +116,15 @@
                     }
                 },
                 {
-                    // 【优化特性】：吸收了 Pixiv 动图/多图 API 的逆向能力 + LRU API 缓存
                     selectors: 'canvas, video',
                     processor: async (trigger, src) => {
                         let illustId = null;
                         let pageIndex = 0;
                         const activeSrc = src || trigger.src || '';
-                        
-                        // 1. 优先从 src 提取，防止相关推荐串号
                         const m1 = activeSrc.match(/\/(\d+)_/);
                         if (m1) illustId = m1[1];
                         const pm = activeSrc.match(/_p(\d+)/);
                         if (pm) pageIndex = parseInt(pm[1], 10);
-
-                        // 2. DOM 与 URL 兜底提取
                         if (!illustId && trigger) {
                             const parentA = trigger.closest('a');
                             if (parentA && parentA.href) illustId = parentA.href.match(/artworks\/(\d+)/)?.[1];
@@ -173,14 +134,11 @@
                         if (illustId) {
                             try {
                                 let pagesData = LRUCache.get('__mix01PixivApiCache', illustId);
-                                
                                 if (!pagesData) {
                                     const res = await fetch(`/ajax/illust/${illustId}/pages`).then(r => r.json());
                                     pagesData = res?.body;
-                                    // 最大缓存30个作品数据，防止刷太久导致内存爆炸
                                     if (pagesData) LRUCache.set('__mix01PixivApiCache', illustId, pagesData, 30); 
                                 }
-
                                 if (pagesData) {
                                     if (pagesData[pageIndex]?.urls?.original) return pagesData[pageIndex].urls.original;
                                     if (pagesData[0]?.urls?.original) return pagesData[0].urls.original;
@@ -188,6 +146,71 @@
                             } catch(e) {}
                         }
                         return src;
+                    }
+                }
+            ]
+        },
+        '(?:(?:.+\\.)?twitter|x)\\.com': {
+            srcMatching: [
+                { srcRegExp: '(\\w+\\.twimg\\.com/(?:(?:[^/]+/)?default_)?profile_images/.+)_\\w+(?=@IMG@)(@IMG@)', processor: '$1$2' },
+                { srcRegExp: '(\\w+\\.twimg\\.com/media/.+?)(?:@IMG@:\\w+)?(.+[?&]name=)[^&]+(.*)', processor: '$1$2orig$3' },
+                { srcRegExp: '(\\w+\\.twimg\\.com/.+\\?format=.*&name=).+', processor: '$1orig' },
+                {
+                    selectors: 'video',
+                    processor: async (trigger) => {
+                        let statusId = null;
+                        const urlMatch = window.location.pathname.match(/\/status\/(\d+)/);
+                        if (urlMatch) {
+                            statusId = urlMatch[1];
+                        } else {
+                            const statusLink = trigger.closest('article')?.querySelector('a[href*="/status/"]');
+                            if (statusLink) statusId = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
+                        }
+                        if (!statusId) return trigger.src;
+
+                        const cachedUrl = LRUCache.get('__mix01TwVideoCache', statusId);
+                        if (cachedUrl) return cachedUrl;
+
+                        // 🚀 P2: 彻底脱离 Content Script 读取 Cookie 暴露风险，改由 background 代理
+                        try {
+                            const response = await new Promise(resolve => {
+                                chrome.runtime.sendMessage({ action: "fetchTwitterGraphQL", statusId: statusId }, resolve);
+                            });
+
+                            if (!response || !response.success || !response.data) return trigger.src;
+
+                            const json = response.data;
+                            const tweetResult = json.data?.tweetResult?.result;
+                            if (!tweetResult) return trigger.src;
+                            const tweet = tweetResult.tweet || tweetResult;
+                            
+                            let legacy = tweet.legacy;
+                            if (!legacy?.extended_entities?.media && tweet.quoted_status_result?.result?.legacy?.extended_entities?.media) {
+                                legacy = tweet.quoted_status_result.result.legacy;
+                            }
+                            
+                            const medias = legacy?.extended_entities?.media;
+                            if (!medias || !Array.isArray(medias)) return trigger.src;
+
+                            let maxBitrate = -1;
+                            let videoUrl = null;
+                            medias.forEach(media => {
+                                if (media.type === 'video' || media.type === 'animated_gif') {
+                                    if (media.video_info && media.video_info.variants) {
+                                        media.video_info.variants.forEach(v => {
+                                            if (v.content_type === 'video/mp4' && (v.bitrate || 0) > maxBitrate) {
+                                                maxBitrate = v.bitrate || 0;
+                                                videoUrl = v.url;
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                            
+                            const finalUrl = videoUrl || trigger.src;
+                            LRUCache.set('__mix01TwVideoCache', statusId, finalUrl, 30);
+                            return finalUrl;
+                        } catch (e) { return trigger.src; }
                     }
                 }
             ]
@@ -244,92 +267,6 @@
                     }
                 },
                 { srcRegExp: '(//static\\d*\\.e621\\.net/data/)(?:crop|preview|sample)/(.+)(@IMG@)', processor: '$1$2$3' }
-            ]
-        },
-        '(?:(?:.+\\.)?twitter|x)\\.com': {
-            srcMatching: [
-                { srcRegExp: '(\\w+\\.twimg\\.com/(?:(?:[^/]+/)?default_)?profile_images/.+)_\\w+(?=@IMG@)(@IMG@)', processor: '$1$2' },
-                { srcRegExp: '(\\w+\\.twimg\\.com/media/.+?)(?:@IMG@:\\w+)?(.+[?&]name=)[^&]+(.*)', processor: '$1$2orig$3' },
-                { srcRegExp: '(\\w+\\.twimg\\.com/.+\\?format=.*&name=).+', processor: '$1orig' },
-                {
-                    // 【全新特性】：带 LRU 缓存与 Fast-path 拦截的 GraphQL 逆向引擎
-                    selectors: 'video',
-                    processor: async (trigger) => {
-                        let statusId = null;
-                        
-                        // 【优化1】：Fast-path，优先检查顶层 URL（详情页直出）
-                        const urlMatch = window.location.pathname.match(/\/status\/(\d+)/);
-                        if (urlMatch) {
-                            statusId = urlMatch[1];
-                        } else {
-                            const statusLink = trigger.closest('article')?.querySelector('a[href*="/status/"]');
-                            if (statusLink) statusId = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
-                        }
-                        
-                        if (!statusId) return trigger.src;
-
-                        // 【优化2】：O(1) 缓存拦截，防止频繁请求触发风控
-                        const cachedUrl = LRUCache.get('__mix01TwVideoCache', statusId);
-                        if (cachedUrl) return cachedUrl;
-
-                        // 【优化3】：将耗时的 Cookie 序列化推迟到缓存未命中之后执行
-                        const cookies = {};
-                        document.cookie.split(';').filter(n => n.indexOf('=') > 0).forEach(n => {
-                            n.replace(/^([^=]+)=(.+)$/, (match, name, value) => { cookies[name.trim()] = value.trim(); });
-                        });
-                        if (!cookies.ct0) return trigger.src;
-
-                        const baseUrl = `https://${window.location.hostname}/i/api/graphql/2ICDjqPd81tulZcYrtpTuQ/TweetResultByRestId`;
-                        const variables = { 'tweetId': statusId, 'with_rux_injections': false, 'includePromotedContent': true, 'withCommunity': true, 'withQuickPromoteEligibilityTweetFields': true, 'withBirdwatchNotes': true, 'withVoice': true, 'withV2Timeline': true };
-                        const features = { 'articles_preview_enabled': true, 'c9s_tweet_anatomy_moderator_badge_enabled': true, 'communities_web_enable_tweet_community_results_fetch': false, 'creator_subscriptions_quote_tweet_preview_enabled': false, 'creator_subscriptions_tweet_preview_api_enabled': false, 'freedom_of_speech_not_reach_fetch_enabled': true, 'graphql_is_translatable_rweb_tweet_is_translatable_enabled': true, 'longform_notetweets_consumption_enabled': false, 'longform_notetweets_inline_media_enabled': true, 'longform_notetweets_rich_text_read_enabled': false, 'premium_content_api_read_enabled': false, 'profile_label_improvements_pcf_label_in_post_enabled': true, 'responsive_web_edit_tweet_api_enabled': false, 'responsive_web_enhance_cards_enabled': false, 'responsive_web_graphql_exclude_directive_enabled': false, 'responsive_web_graphql_skip_user_profile_image_extensions_enabled': false, 'responsive_web_graphql_timeline_navigation_enabled': false, 'responsive_web_grok_analysis_button_from_backend': false, 'responsive_web_grok_analyze_button_fetch_trends_enabled': false, 'responsive_web_grok_analyze_post_followups_enabled': false, 'responsive_web_grok_image_annotation_enabled': false, 'responsive_web_grok_share_attachment_enabled': false, 'responsive_web_grok_show_grok_translated_post': false, 'responsive_web_jetfuel_frame': false, 'responsive_web_media_download_video_enabled': false, 'responsive_web_twitter_article_tweet_consumption_enabled': true, 'rweb_tipjar_consumption_enabled': true, 'rweb_video_screen_enabled': false, 'standardized_nudges_misinfo': true, 'tweet_awards_web_tipping_enabled': false, 'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': true, 'tweetypie_unmention_optimization_enabled': false, 'verified_phone_label_enabled': false, 'view_counts_everywhere_api_enabled': true };
-
-                        const url = encodeURI(`${baseUrl}?variables=${JSON.stringify(variables)}&features=${JSON.stringify(features)}`);
-                        const headers = {
-                            'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
-                            'x-twitter-active-user': 'yes',
-                            'x-twitter-client-language': cookies.lang || 'en',
-                            'x-csrf-token': cookies.ct0
-                        };
-                        if (cookies.ct0.length === 32 && cookies.gt) headers['x-guest-token'] = cookies.gt;
-
-                        try {
-                            const response = await fetch(url, { headers: headers });
-                            const json = await response.json();
-                            const tweetResult = json.data?.tweetResult?.result;
-                            if (!tweetResult) return trigger.src;
-                            const tweet = tweetResult.tweet || tweetResult;
-                            
-                            let legacy = tweet.legacy;
-                            if (!legacy?.extended_entities?.media && tweet.quoted_status_result?.result?.legacy?.extended_entities?.media) {
-                                legacy = tweet.quoted_status_result.result.legacy;
-                            }
-                            
-                            const medias = legacy?.extended_entities?.media;
-                            if (!medias || !Array.isArray(medias)) return trigger.src;
-
-                            let maxBitrate = -1;
-                            let videoUrl = null;
-                            medias.forEach(media => {
-                                if (media.type === 'video' || media.type === 'animated_gif') {
-                                    if (media.video_info && media.video_info.variants) {
-                                        media.video_info.variants.forEach(v => {
-                                            if (v.content_type === 'video/mp4' && (v.bitrate || 0) > maxBitrate) {
-                                                maxBitrate = v.bitrate || 0;
-                                                videoUrl = v.url;
-                                            }
-                                        });
-                                    }
-                                }
-                            });
-                            
-                            const finalUrl = videoUrl || trigger.src;
-                            // 写入缓存，最大保留30个视频直链
-                            LRUCache.set('__mix01TwVideoCache', statusId, finalUrl, 30);
-                            return finalUrl;
-                            
-                        } catch (e) { return trigger.src; }
-                    }
-                }
             ]
         },
         '(?:.+\\.)?weibo\\.com': {
@@ -565,13 +502,11 @@
         },
         'vdownload\\.hembed\\.com': {
             srcMatching: [
-                // 对于hembed，保持原URL，包括secure参数
                 { srcRegExp: '.*', processor: '$&' }
             ]
         },
         'hanime1\\.me': {
             srcMatching: [
-                // 对于hanime1.me，保持原URL，包括secure参数
                 { srcRegExp: '.*', processor: '$&' }
             ]
         },
@@ -635,14 +570,9 @@
                         if (result) return result;
                     } else if (typeof rule.processor === 'string' && srcRegExpObj) {
                         const replaced = originalSrc.replace(srcRegExpObj, rule.processor);
-                        // 【Bug修复】processor 为空字符串('')时是有意清除参数，应返回替换结果；
-                        // 但若结果与原始相同说明规则未匹配，继续向下找
                         if (replaced !== originalSrc || rule.processor === '') return replaced;
                     }
                 } else if (srcRegExpObj) {
-                    // 【Bug修复】原版 RegExp['$&'] 是非标准用法，等价于 srcRegExpObj 上次 test()
-                    // 留下的 lastMatch，在异步代码中极易被其他 test() 覆盖导致返回错误值。
-                    // 改为直接返回整个匹配到的部分（即原 src 匹配的子串）。
                     const m = srcRegExpObj.exec(originalSrc);
                     if (m) return m[0];
                 }
