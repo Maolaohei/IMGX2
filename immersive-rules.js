@@ -15,9 +15,6 @@
         '(?:(?:.+\\.)?twitter|x)\\.com': {
             getContainer: (media) => media.closest('article') || document.body,
             getGalleryImages: () => {
-                if (!window.__mix01AdCache) window.__mix01AdCache = new WeakSet();
-                if (!window.__mix01NonAdCache) window.__mix01NonAdCache = new WeakSet();
-                
                 const allMedia = Array.from(document.querySelectorAll('img, video'));
                 const validMedia = [];
                 const viewportHeight = window.innerHeight;
@@ -26,32 +23,35 @@
 
                 for (let i = 0; i < allMedia.length; i++) {
                     const media = allMedia[i];
-                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') continue;
+                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-video-xyz') continue;
 
                     const rect = media.getBoundingClientRect();
                     if (rect.top < topBound || rect.bottom > bottomBound) continue;
-
-                    // 【优化 1】：完全剔除 getComputedStyle，仅靠尺寸进行 O(1) 过滤隐藏元素
                     if (rect.width <= 50 || rect.height <= 50) continue;
                     
                     const article = media.closest('article');
                     if (article) {
-                        if (window.__mix01AdCache.has(article)) continue;
-                        if (window.__mix01NonAdCache.has(article)) {
+                        // 🚀 性能飞跃：采用 DOM 专属 Dataset 标志阻断，彻底干掉重卷时的重复文本匹配开销
+                        if (article.dataset.mixAdStatus === 'ad') continue;
+                        if (article.dataset.mixAdStatus === 'clean') {
                             validMedia.push(media);
                             continue;
                         }
-                        const isAd = Array.from(article.querySelectorAll('span')).some(span => /^(广告|赞助|Ad|Promoted)$/i.test(span.textContent.trim()));
+                        
+                        const isAd = Array.from(article.querySelectorAll('span')).some(span => 
+                            /^(广告|赞助|Ad|Promoted)$/i.test(span.textContent.trim())
+                        );
+                        
                         if (isAd) { 
-                            window.__mix01AdCache.add(article); 
+                            article.dataset.mixAdStatus = 'ad'; 
                             continue; 
                         } else { 
-                            window.__mix01NonAdCache.add(article); 
+                            article.dataset.mixAdStatus = 'clean'; 
                             validMedia.push(media);
-                            continue;
                         }
+                    } else {
+                        validMedia.push(media);
                     }
-                    validMedia.push(media);
                 }
                 return validMedia;
             },
@@ -74,11 +74,11 @@
                 return null;
             },
             follow: async (container, media) => {
-                let author = ""; 
+                let author = "";
                 const userNameEl = container.querySelector('[data-testid="User-Name"]');
-                if (userNameEl) { 
-                    const match = userNameEl.textContent.match(/@[\w_]+/); 
-                    if (match) author = match[0]; 
+                if (userNameEl) {
+                    const match = userNameEl.textContent.match(/@[\w_]+/);
+                    if (match) author = match[0];
                 }
 
                 // 1. 个人主页场景
@@ -87,15 +87,15 @@
                     const btnUnfollow = profileScope.querySelector('[data-testid$="-unfollow"]');
                     const btnFollow = profileScope.querySelector('[data-testid$="-follow"]');
                     if (btnUnfollow) {
-                        tools.forceClick(btnUnfollow); 
+                        tools.forceClick(btnUnfollow);
                         await new Promise(r => setTimeout(r, 150));
                         const confirm = document.querySelector('[data-testid="confirmationSheetConfirm"]');
                         if (confirm) tools.forceClick(confirm);
-                        if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = false; 
+                        if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = false;
                         return false;
                     } else if (btnFollow) {
                         tools.forceClick(btnFollow);
-                        if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = true; 
+                        if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = true;
                         return true;
                     }
                 }
@@ -109,11 +109,11 @@
                 }
 
                 // 3. 信息流场景：通过右上角“三个点”菜单关注 (修复两连击 Bug)
-                const caret = container.querySelector('[data-testid="caret"]'); 
+                const caret = container.querySelector('[data-testid="caret"]');
                 if (!caret) return null;
-                
-                tools.forceClick(caret); 
-                
+
+                tools.forceClick(caret);
+
                 // 【核心修复】：动态轮询等待菜单出现，最多等待 600ms (12 * 50ms)
                 let menu = null;
                 for (let i = 0; i < 12; i++) {
@@ -139,13 +139,13 @@
                     else if (/Follow|关注/i.test(text)) { targetBtn = item; willFollow = true; break; }
                 }
 
-                if (!targetBtn) { 
+                if (!targetBtn) {
                     tools.forceClick(document.body); // 没找到关注按钮，关掉菜单
-                    return null; 
+                    return null;
                 }
-                
+
                 tools.forceClick(targetBtn);
-                
+
                 // 处理取消关注的二次确认弹窗
                 if (!willFollow) {
                     await new Promise(r => setTimeout(r, 200));
@@ -154,14 +154,14 @@
                         tools.forceClick(confirmBtn);
                     } else {
                         const dialog = document.querySelector('[role="dialog"], [data-testid="mask"]');
-                        if (dialog) { 
-                            const btns = Array.from(dialog.querySelectorAll('[role="button"]')); 
-                            const confirmTarget = btns.find(b => /Unfollow|取消关注|确认/i.test(b.textContent)); 
-                            if (confirmTarget) tools.forceClick(confirmTarget); 
+                        if (dialog) {
+                            const btns = Array.from(dialog.querySelectorAll('[role="button"]'));
+                            const confirmTarget = btns.find(b => /Unfollow|取消关注|确认/i.test(b.textContent));
+                            if (confirmTarget) tools.forceClick(confirmTarget);
                         }
                     }
                 }
-                
+
                 if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = willFollow;
                 return willFollow;
             },
@@ -178,7 +178,7 @@
                 return null;
             }
         },
-       '(?:.+\\.)?pixiv\\.net': {
+        '(?:.+\\.)?pixiv\\.net': {
             getContainer: (media) => document.body,
 
             // 【性能优化】illustId → userId 的 API 查询结果缓存，避免同一张图触发 getStates+like+follow
@@ -279,16 +279,16 @@
                 let isLiked = false;
                 if (btns.likeBtn) {
                     isLiked = btns.likeBtn.innerHTML.includes('rgb(255, 64, 96)') ||
-                              btns.likeBtn.innerHTML.includes('#FF4060') ||
-                              btns.likeBtn.getAttribute('aria-pressed') === 'true';
+                        btns.likeBtn.innerHTML.includes('#FF4060') ||
+                        btns.likeBtn.getAttribute('aria-pressed') === 'true';
                 }
 
                 let isFollowed = false;
                 if (btns.followBtn) {
                     isFollowed = /已关注|Following/i.test(btns.followBtn.textContent) ||
-                                 btns.followBtn.dataset.clickAction === 'unfollow' ||
-                                 btns.followBtn.getAttribute('aria-pressed') === 'true' ||
-                                 btns.followBtn.dataset.variant === 'Secondary';
+                        btns.followBtn.dataset.clickAction === 'unfollow' ||
+                        btns.followBtn.getAttribute('aria-pressed') === 'true' ||
+                        btns.followBtn.dataset.variant === 'Secondary';
                 }
 
                 return { isLiked, isFollowed, authorName: btns.authorName };
@@ -326,7 +326,7 @@
                                     btn.setAttribute('aria-pressed', 'true');
                                 }
                                 return true;
-                            } catch (e) {}
+                            } catch (e) { }
                         }
                         if (btn) { tools.forceClick(btn); return true; }
                     } else {
@@ -370,7 +370,7 @@
                                     btn.setAttribute('aria-pressed', 'true');
                                 }
                                 return true;
-                            } catch (e) {}
+                            } catch (e) { }
                         }
                         if (btn) { tools.forceClick(btn); return true; }
                     } else {
@@ -384,7 +384,7 @@
                                     btn.setAttribute('aria-pressed', 'false');
                                 }
                                 return false;
-                            } catch (e) {}
+                            } catch (e) { }
                         }
                         if (btn) { tools.forceClick(btn); return false; }
                     }
@@ -405,7 +405,7 @@
                     } else if (res && !res.error && res.body && res.body.length > 0) {
                         return res.body[0].urls.original; // 兜底返回第一张
                     }
-                } catch (e) {}
+                } catch (e) { }
                 return null;
             }
         },
@@ -413,7 +413,7 @@
         // 全局兜底规则：针对未适配页面的沉浸模式
         // ==========================================
         '.*': {
-            isFallback: true, 
+            isFallback: true,
             getContainer: (media) => media.parentElement || document.body,
             getGalleryImages: () => {
                 const allMedia = Array.from(document.querySelectorAll('img, video'));
@@ -425,10 +425,10 @@
                 for (let i = 0; i < allMedia.length; i++) {
                     const media = allMedia[i];
                     if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') continue;
-                    
+
                     const rect = media.getBoundingClientRect();
                     if (rect.top < topBound || rect.bottom > bottomBound) continue;
-                    
+
                     // 【优化 1】：完全剔除 getComputedStyle
                     if (rect.width > 80 && rect.height > 80) {
                         validMedia.push(media);
@@ -436,7 +436,7 @@
                 }
                 return validMedia;
             },
-            getStates: () => ({ isLiked: null, isFollowed: null, authorName: '' }), 
+            getStates: () => ({ isLiked: null, isFollowed: null, authorName: '' }),
             like: async () => null,
             follow: async () => null,
             downloadVideo: async (container, media) => {

@@ -1,34 +1,24 @@
-// options.js - Mix01 引擎配置控制器 v3.2
-// 新增：站点管理、放大镜过滤、新标签页打开原图
-
+// options.js - Mix01 引擎配置控制器 v3.3 Complete
 document.addEventListener('DOMContentLoaded', () => {
 
-    // ── 默认配置（所有可直接绑定 input/select/checkbox 的字段）──
     const defaultConfigs = {
         loadHD: 'true', breakoutView: false, showStatus: true, smallImageOptimization: true,
-        disableVideoDefaultView: true, zoomLevel: 2.0, isImmersive: false, mode: 'partial',
+        disableVideoDefaultView: true, zoom: 2.0, isImmersive: false, mode: 'partial',
         preloadCount: 5, wheelZoomEnabled: false,
-        // ✨ 新增：放大镜过滤
         minZoomSize: 0, triggerDelay: 0, excludeSelectors: '',
-        // 按键
         keyMode: 'v', keyRotate: 'r', keyMirror: 'm', keyZoomIn: '=', keyZoomOut: '-',
         keyImmersive: 'ctrl+f12', keyLike: 'l', keyFollow: 'f',
         keyPlayVideo: 'space', keyDownloadVideo: 'd',
         keyDouble: 's', keyTriple: 'q',
-        keyOpenInTab: 'o',  // ✨ 新增
+        keyOpenInTab: 'o',  
         base64Domains: '',
-        // 外观
         bgType: 'dark', customBgValue: '', fontTheme: 'dark',
         bgOffsetX: 0, bgOffsetY: 0, bgZoom: 1.0, panelBlur: 20
     };
 
-    // 需要特殊处理的外观字段，不纳入通用 ids
     const advancedKeys = ['bgType', 'customBgValue', 'fontTheme', 'bgOffsetX', 'bgOffsetY', 'bgZoom', 'panelBlur'];
-    // excludeSelectors 是 textarea，也需特殊处理
     const textareaKeys = ['excludeSelectors'];
-
     const ids = Object.keys(defaultConfigs).filter(key => !advancedKeys.includes(key) && !textareaKeys.includes(key));
-
     const el = (id) => document.getElementById(id);
 
     const elements = {
@@ -40,23 +30,77 @@ document.addEventListener('DOMContentLoaded', () => {
         btnWhite: el('setBgWhite'), btnDark: el('setBgDark'), btnCustom: el('setBgCustom'),
         customContainer: el('customBgContainer'), customInput: el('customBgUrl'),
         localBgBtn: el('localBgBtn'), localBgUpload: el('localBgUpload'),
-        fontThemeSelect: el('fontTheme'),
-        editBgBtn: el('editBgBtn'), saveBgPosBtn: el('saveBgPosBtn'),
-        bgImg: el('mix01-bg-img'),
-        panelBlurInput: el('panelBlur'), panelBlurVal: el('panelBlurVal'),
-        // ✨ 站点管理
-        currentSiteHostname: el('currentSiteHostname'),
-        currentSiteBadge: el('currentSiteBadge'),
-        siteToggleBtn: el('siteToggleBtn'),
-        disabledSitesList: el('disabledSitesList'),
-        manualSiteInput: el('manualSiteInput'),
-        manualSiteAddBtn: el('manualSiteAddBtn'),
+        fontThemeSelect: el('fontTheme'), editBgBtn: el('editBgBtn'), saveBgPosBtn: el('saveBgPosBtn'),
+        bgImg: el('mix01-bg-img'), panelBlurInput: el('panelBlur'), panelBlurVal: el('panelBlurVal'),
+        currentSiteHostname: el('currentSiteHostname'), currentSiteBadge: el('currentSiteBadge'),
+        siteToggleBtn: el('siteToggleBtn'), disabledSitesList: el('disabledSitesList'),
+        manualSiteInput: el('manualSiteInput'), manualSiteAddBtn: el('manualSiteAddBtn'),
         siteModesList: el('siteModesList'),
     };
 
     let currentBgOffsetX = 0, currentBgOffsetY = 0, currentBgZoom = 1.0;
+    let disabledSites = {};  
+    let cachedCurrentTabHostname = ''; // 🚀 静态数据缓存
 
-    // ── Canvas 主色提取 ──
+    const initCurrentTabHost = () => {
+        return new Promise((resolve) => {
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                try { cachedCurrentTabHostname = new URL(tabs[0]?.url || '').hostname; } catch (e) { cachedCurrentTabHostname = ''; }
+                if (elements.currentSiteHostname) {
+                    elements.currentSiteHostname.textContent = cachedCurrentTabHostname || '（无法获取当前页面）';
+                }
+                resolve(cachedCurrentTabHostname);
+            });
+        });
+    };
+
+    const refreshCurrentSiteUI = () => {
+        const host = cachedCurrentTabHostname;
+        if (!host) return;
+        const isEnabled = !disabledSites[host];
+        if (elements.currentSiteBadge) {
+            elements.currentSiteBadge.textContent = isEnabled ? '● 已启用' : '● 已禁用';
+            elements.currentSiteBadge.className = `site-status-badge ${isEnabled ? 'enabled' : 'disabled'}`;
+        }
+        if (elements.siteToggleBtn) {
+            elements.siteToggleBtn.textContent = isEnabled ? '🚫 在此站点禁用引擎' : '✅ 在此站点启用引擎';
+            elements.siteToggleBtn.className = isEnabled ? 'site-toggle-btn to-disable' : 'site-toggle-btn to-enable';
+            elements.siteToggleBtn.onclick = () => {
+                if (disabledSites[host]) delete disabledSites[host];
+                else disabledSites[host] = true;
+                chrome.storage.local.set({ disabledSites }, () => {
+                    renderDisabledSites();
+                    refreshCurrentSiteUI();
+                });
+            };
+        }
+    };
+
+    const renderDisabledSites = () => {
+        if (!elements.disabledSitesList) return;
+        const hosts = Object.keys(disabledSites).filter(h => disabledSites[h]);
+        if (hosts.length === 0) {
+            elements.disabledSitesList.innerHTML = '<div class="sites-empty">暂无禁用站点 —— 引擎在所有站点均处于激活状态</div>';
+            return;
+        }
+        elements.disabledSitesList.innerHTML = hosts.map(host => `
+            <div class="disabled-site-item">
+                <span class="site-name">${escapeHTML(host)}</span>
+                <button class="remove-btn" data-host="${escapeHTML(host)}" title="重新启用">✕</button>
+            </div>
+        `).join('');
+        elements.disabledSitesList.querySelectorAll('.remove-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const host = btn.dataset.host;
+                delete disabledSites[host];
+                chrome.storage.local.set({ disabledSites }, () => {
+                    renderDisabledSites();
+                    refreshCurrentSiteUI();
+                });
+            });
+        });
+    };
+
     const rgbToHsl = (r, g, b) => {
         r /= 255; g /= 255; b /= 255;
         let max = Math.max(r, g, b), min = Math.min(r, g, b);
@@ -122,7 +166,6 @@ document.addEventListener('DOMContentLoaded', () => {
         img.src = imgSrc;
     };
 
-    // ── 主题应用 ──
     const applyTheme = (bgType, customVal, fontTheme, bgX, bgY, bgZ) => {
         if (!elements.bgImg) return;
         currentBgOffsetX = bgX; currentBgOffsetY = bgY; currentBgZoom = bgZ;
@@ -158,6 +201,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (elements.fontThemeSelect) elements.fontThemeSelect.value = fontTheme;
         extractAndInjectDominantColor(targetImgSrc, fontTheme);
     };
+
     const saveAndApplyTheme = (bgType, customVal, fontTheme) => {
         chrome.storage.local.set({ bgType, customBgValue: customVal, fontTheme }, () => {
             applyTheme(bgType, customVal, fontTheme, currentBgOffsetX, currentBgOffsetY, currentBgZoom);
@@ -210,7 +254,6 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
-    // ── 背景拖拽引擎 ──
     let isEditingBg = false, isDragging = false;
     let startMouseX, startMouseY, startBgX, startBgY;
     if (elements.editBgBtn) elements.editBgBtn.onclick = () => { document.body.classList.add('bg-edit-mode'); if (elements.bgImg) elements.bgImg.style.transition = 'none'; isEditingBg = true; };
@@ -221,7 +264,6 @@ document.addEventListener('DOMContentLoaded', () => {
     document.addEventListener('mouseup', () => { isDragging = false; });
     document.addEventListener('mouseleave', () => { isDragging = false; });
 
-    // ── Tab 切换 ──
     document.querySelector('.tabs').addEventListener('click', (e) => {
         if (e.target.classList.contains('tab-btn')) {
             document.querySelectorAll('.tab-btn, .tab-content').forEach(el => el.classList.remove('active'));
@@ -243,7 +285,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const escapeHTML = (str) => { const div = document.createElement('div'); div.textContent = str; return div.innerHTML; };
 
-    // ── 历史记录 ──
     const renderHistory = () => {
         if (!elements.historyList) return;
         chrome.storage.local.get(['mix01_download_history'], ({ mix01_download_history }) => {
@@ -266,96 +307,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
-    // ══════════════════════════════════════════════════
-    // ✨ 站点管理逻辑
-    // ══════════════════════════════════════════════════
-
-    let disabledSites = {};  // 内存中的副本
-
-    const renderDisabledSites = () => {
-        if (!elements.disabledSitesList) return;
-        const hosts = Object.keys(disabledSites).filter(h => disabledSites[h]);
-        if (hosts.length === 0) {
-            elements.disabledSitesList.innerHTML = '<div class="sites-empty">暂无禁用站点 —— 引擎在所有站点均处于激活状态</div>';
-            return;
-        }
-        elements.disabledSitesList.innerHTML = hosts.map(host => `
-            <div class="disabled-site-item">
-                <span class="site-name">${escapeHTML(host)}</span>
-                <button class="remove-btn" data-host="${escapeHTML(host)}" title="重新启用">✕</button>
-            </div>
-        `).join('');
-        elements.disabledSitesList.querySelectorAll('.remove-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const host = btn.dataset.host;
-                delete disabledSites[host];
-                chrome.storage.local.set({ disabledSites }, () => {
-                    renderDisabledSites();
-                    refreshCurrentSiteUI();
-                });
-            });
-        });
-    };
-
-    const refreshCurrentSiteUI = () => {
-        // 获取当前激活的 tab 的 hostname
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            let host = '';
-            try { host = new URL(tabs[0]?.url || '').hostname; } catch (e) {}
-            if (!host) {
-                if (elements.currentSiteHostname) elements.currentSiteHostname.textContent = '（无法获取当前页面）';
-                return;
-            }
-            if (elements.currentSiteHostname) elements.currentSiteHostname.textContent = host;
-            const isEnabled = !disabledSites[host];
-            if (elements.currentSiteBadge) {
-                elements.currentSiteBadge.textContent = isEnabled ? '● 已启用' : '● 已禁用';
-                elements.currentSiteBadge.className = `site-status-badge ${isEnabled ? 'enabled' : 'disabled'}`;
-            }
-            if (elements.siteToggleBtn) {
-                if (isEnabled) {
-                    elements.siteToggleBtn.textContent = '🚫 在此站点禁用引擎';
-                    elements.siteToggleBtn.className = 'site-toggle-btn to-disable';
-                } else {
-                    elements.siteToggleBtn.textContent = '✅ 在此站点启用引擎';
-                    elements.siteToggleBtn.className = 'site-toggle-btn to-enable';
-                }
-                // 绑定点击（每次刷新都重新绑定，避免旧闭包的 host 过期）
-                elements.siteToggleBtn.onclick = () => {
-                    if (disabledSites[host]) {
-                        delete disabledSites[host];
-                    } else {
-                        disabledSites[host] = true;
-                    }
-                    chrome.storage.local.set({ disabledSites }, () => {
-                        renderDisabledSites();
-                        refreshCurrentSiteUI();
-                    });
-                };
-            }
-        });
-    };
-
-    // 手动添加禁用域名
-    if (elements.manualSiteAddBtn && elements.manualSiteInput) {
-        elements.manualSiteAddBtn.addEventListener('click', () => {
-            let host = elements.manualSiteInput.value.trim().toLowerCase();
-            if (!host) return;
-            // 容错：允许用户输入完整 URL；解析失败则放弃
-            try { host = new URL(host.includes('://') ? host : 'https://' + host).hostname; } catch (e) { return; }
-            disabledSites[host] = true;
-            chrome.storage.local.set({ disabledSites }, () => {
-                elements.manualSiteInput.value = '';
-                renderDisabledSites();
-                refreshCurrentSiteUI();
-            });
-        });
-        elements.manualSiteInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') elements.manualSiteAddBtn.click();
-        });
-    }
-
-    // 渲染各站点独立视图偏好
     const renderSiteModes = (siteModes) => {
         if (!elements.siteModesList) return;
         const entries = Object.entries(siteModes || {});
@@ -372,63 +323,60 @@ document.addEventListener('DOMContentLoaded', () => {
         `).join('');
     };
 
-    // ══════════════════════════════════════════════════
-    // 初始化：读取全部配置
-    // ══════════════════════════════════════════════════
-    chrome.storage.local.get(
-        [...ids, ...textareaKeys, 'bgType', 'customBgValue', 'fontTheme', 'bgOffsetX', 'bgOffsetY', 'bgZoom', 'panelBlur', 'hasAgreed', 'disabledSites', 'siteModes'],
-        (res) => {
-            // 协议状态
-            if (elements.overlay && elements.agreedStatus) {
-                if (!res.hasAgreed) elements.overlay.style.display = 'flex';
-                else elements.agreedStatus.style.display = 'block';
+    async function initAll() {
+        await initCurrentTabHost(); 
+
+        chrome.storage.local.get(
+            [...ids, ...textareaKeys, 'bgType', 'customBgValue', 'fontTheme', 'bgOffsetX', 'bgOffsetY', 'bgZoom', 'panelBlur', 'hasAgreed', 'disabledSites', 'siteModes'],
+            (res) => {
+                if (elements.overlay && elements.agreedStatus) {
+                    if (!res.hasAgreed) elements.overlay.style.display = 'flex';
+                    else elements.agreedStatus.style.display = 'block';
+                }
+
+                const blurVal = res.panelBlur !== undefined ? res.panelBlur : defaultConfigs.panelBlur;
+                document.documentElement.style.setProperty('--panel-blur', `${blurVal}px`);
+                if (elements.panelBlurInput) elements.panelBlurInput.value = blurVal;
+                if (elements.panelBlurVal) elements.panelBlurVal.innerText = `${blurVal}px`;
+
+                applyTheme(
+                    res.bgType || defaultConfigs.bgType,
+                    res.customBgValue !== undefined ? res.customBgValue : defaultConfigs.customBgValue,
+                    res.fontTheme || defaultConfigs.fontTheme,
+                    res.bgOffsetX !== undefined ? res.bgOffsetX : defaultConfigs.bgOffsetX,
+                    res.bgOffsetY !== undefined ? res.bgOffsetY : defaultConfigs.bgOffsetY,
+                    res.bgZoom !== undefined ? res.bgZoom : defaultConfigs.bgZoom
+                );
+
+                ids.forEach(id => {
+                    const val = res[id] !== undefined ? res[id] : defaultConfigs[id];
+                    // 🚀 对齐映射转换，消灭字符串灾难
+                    const targetId = id === 'zoom' ? 'zoomLevel' : id;
+                    const inputEl = document.getElementById(targetId);
+                    if (!inputEl) return;
+                    if (inputEl.type === 'checkbox') inputEl.checked = val;
+                    else inputEl.value = val;
+                });
+
+                textareaKeys.forEach(id => {
+                    const val = res[id] !== undefined ? res[id] : (defaultConfigs[id] || '');
+                    const inputEl = document.getElementById(id);
+                    if (inputEl) inputEl.value = val;
+                });
+
+                updateViewModeUI();
+
+                disabledSites = res.disabledSites || {};
+                renderDisabledSites();
+                refreshCurrentSiteUI(); 
+                renderSiteModes(res.siteModes || {});
             }
+        );
+    }
 
-            // 模糊度
-            const blurVal = res.panelBlur !== undefined ? res.panelBlur : defaultConfigs.panelBlur;
-            document.documentElement.style.setProperty('--panel-blur', `${blurVal}px`);
-            if (elements.panelBlurInput) elements.panelBlurInput.value = blurVal;
-            if (elements.panelBlurVal) elements.panelBlurVal.innerText = `${blurVal}px`;
-
-            // 主题
-            applyTheme(
-                res.bgType || defaultConfigs.bgType,
-                res.customBgValue !== undefined ? res.customBgValue : defaultConfigs.customBgValue,
-                res.fontTheme || defaultConfigs.fontTheme,
-                res.bgOffsetX !== undefined ? res.bgOffsetX : defaultConfigs.bgOffsetX,
-                res.bgOffsetY !== undefined ? res.bgOffsetY : defaultConfigs.bgOffsetY,
-                res.bgZoom !== undefined ? res.bgZoom : defaultConfigs.bgZoom
-            );
-
-            // 通用字段绑定
-            ids.forEach(id => {
-                const val = res[id] !== undefined ? res[id] : defaultConfigs[id];
-                const inputEl = document.getElementById(id);
-                if (!inputEl) return;
-                if (inputEl.type === 'checkbox') inputEl.checked = val;
-                else inputEl.value = val;
-            });
-
-            // Textarea 字段
-            textareaKeys.forEach(id => {
-                const val = res[id] !== undefined ? res[id] : (defaultConfigs[id] || '');
-                const inputEl = document.getElementById(id);
-                if (inputEl) inputEl.value = val;
-            });
-
-            updateViewModeUI();
-
-            // ✨ 站点管理
-            disabledSites = res.disabledSites || {};
-            renderDisabledSites();
-            refreshCurrentSiteUI();
-            renderSiteModes(res.siteModes || {});
-        }
-    );
-
+    initAll();
     renderHistory();
 
-    // ── 协议按钮 ──
     if (elements.agreeBtn) {
         elements.agreeBtn.addEventListener('click', () => {
             chrome.storage.local.set({ hasAgreed: true }, () => {
@@ -438,12 +386,12 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ── 保存按钮 ──
     if (elements.saveBtn) {
         elements.saveBtn.addEventListener('click', () => {
             const data = {};
             ids.forEach(id => {
-                const inputEl = document.getElementById(id);
+                const targetId = id === 'zoom' ? 'zoomLevel' : id;
+                const inputEl = document.getElementById(targetId);
                 if (!inputEl) return;
                 if (inputEl.type === 'checkbox') {
                     data[id] = inputEl.checked;
@@ -451,11 +399,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     let val = inputEl.value.trim();
                     if (val === '') val = defaultConfigs[id];
                     if (inputEl.type === 'text' && id !== 'base64Domains') val = val.toLowerCase();
-                    if (inputEl.type === 'number') val = parseFloat(val);
+                    if (inputEl.type === 'number' || id === 'zoom') val = parseFloat(val);
                     data[id] = val;
                 }
             });
-            // Textarea 字段单独处理（保留大小写，不强制 lowercase）
             textareaKeys.forEach(id => {
                 const inputEl = document.getElementById(id);
                 if (inputEl) data[id] = inputEl.value.trim();
@@ -473,7 +420,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ── 重置按钮 ──
     if (elements.resetBtn) {
         elements.resetBtn.addEventListener('click', () => {
             if (confirm('确定要恢复引擎到初始状态吗？（站点管理数据将保留）')) {
@@ -482,7 +428,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ── 清空历史 ──
     if (elements.clearHistoryBtn) {
         elements.clearHistoryBtn.addEventListener('click', () => {
             if (confirm('将清除所有媒体提取记录，确认执行？')) {

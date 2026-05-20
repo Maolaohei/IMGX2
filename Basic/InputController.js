@@ -1,6 +1,4 @@
 // Basic/InputController.js
-
-// 🚀 Optimization 5: 高频对象池，消灭 GC 内存回收卡顿
 class Mix01ImagePool {
     constructor() { this.pool = []; }
     acquire() { return this.pool.pop() || new Image(); }
@@ -38,11 +36,12 @@ window.Mix01InputController = class InputController {
             isRenderingLock: false,
             lastRenderSignature: null,
             _galleryCache: null, _galleryCacheDirty: true,
+            currentMode: 'partial', currentRotate: 0, currentMirror: 1,
             
-            currentMode: 'partial', currentRotate: 0, currentMirror: 1
+            // 🚀 优化 1：防异步慢速图片覆盖的会话 Token 锁
+            renderRequestId: 0
         };
 
-        // 🚀 Optimization 1: 物理插值状态机
         this.physics = {
             targetZoom: 2.0, currentZoom: 2.0,
             targetPanX: 0, currentPanX: 0,
@@ -59,24 +58,23 @@ window.Mix01InputController = class InputController {
         this._cursorHideTimer = null; 
         this._lastDetectTime = 0;
         this._lastRectTime = 0;
+        this._physicsFrameId = null; // 精确切断弹性大循环
         this._drag = { active: false, startX: 0, startY: 0, origLeft: 0, origTop: 0 };
         this._pan = { active: false, moved: false, startX: 0, startY: 0, origPanX: 0, origPanY: 0 };
 
-        // 🚀 Optimization 3: IntersectionObserver 空间树，彻底干掉 elementsFromPoint
+        // 🚀 优化 2：高精度鼠标物理矢量运动状态机（速度、坐标分量差分）
+        this._mouseVector = { lastX: 0, lastY: 0, dx: 0, dy: 0, speed: 0, timestamp: 0 };
+
+        // 🚀 优化 3：IntersectionObserver 空间树 + 全局 MutationObserver 被动扫描，彻底斩断 1.5 秒的轮询开销
         this.visibleMediaElements = new Set();
         this.mediaIO = new IntersectionObserver((entries) => {
             for (let e of entries) {
                 if (e.isIntersecting) this.visibleMediaElements.add(e.target);
                 else this.visibleMediaElements.delete(e.target);
             }
-        }, { rootMargin: '200px' });
+        }, { rootMargin: '300px' });
         
-        setInterval(() => {
-            if (!this.cfg.isSiteEnabled()) return;
-            document.querySelectorAll('img, video').forEach(el => {
-                if (!el._mix01Observed) { el._mix01Observed = true; this.mediaIO.observe(el); }
-            });
-        }, 1500);
+        this.initPassiveDOMScanner();
 
         this.mediaObserver = new MutationObserver((mutations) => {
             let newSrc = null;
@@ -100,6 +98,32 @@ window.Mix01InputController = class InputController {
         this.bindEvents();
     }
 
+    initPassiveDOMScanner() {
+        const scanAndObserve = (root) => {
+            const els = root.querySelectorAll ? root.querySelectorAll('img, video') : [];
+            els.forEach(el => {
+                if (!el._mix01Observed) { el._mix01Observed = true; this.mediaIO.observe(el); }
+            });
+        };
+        scanAndObserve(document);
+        this._globalDomObserver = new MutationObserver((mutations) => {
+            if (!this.cfg.isSiteEnabled()) return;
+            for (let m of mutations) {
+                if (m.addedNodes && m.addedNodes.length > 0) {
+                    for (let node of m.addedNodes) {
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            if (node.tagName === 'IMG' || node.tagName === 'VIDEO') {
+                                if (!node._mix01Observed) { node._mix01Observed = true; this.mediaIO.observe(node); }
+                            }
+                            scanAndObserve(node);
+                        }
+                    }
+                }
+            }
+        });
+        this._globalDomObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    }
+
     _toggleVideoPlay() {
         if (!this.state.currentMedia || this.state.currentMedia.tagName !== 'VIDEO') return;
         const v = this.state.currentMedia;
@@ -114,7 +138,6 @@ window.Mix01InputController = class InputController {
         this.render.handleImmersiveActivity(v, this.state.currentSrc, this.cfg.keys);
     }
 
-    // 🚀 Optimization 1: 物理弹性阻尼循环
     _startPhysicsLoop() {
         if (this.physics.active) return;
         this.physics.active = true;
@@ -122,6 +145,7 @@ window.Mix01InputController = class InputController {
         const loop = () => {
             if (!this.state.currentMedia || this.render.elements.viewer.style.display !== 'block' || this._drag.active) {
                 this.physics.active = false;
+                this._physicsFrameId = null;
                 return;
             }
 
@@ -130,12 +154,12 @@ window.Mix01InputController = class InputController {
             let xDiff = this.physics.targetPanX - this.physics.currentPanX;
             let yDiff = this.physics.targetPanY - this.physics.currentPanY;
 
-            // 精度到达阈值，终止动画
             if (Math.abs(zDiff) < 0.001 && Math.abs(xDiff) < 0.5 && Math.abs(yDiff) < 0.5) {
                 this.physics.currentZoom = this.physics.targetZoom;
                 this.physics.currentPanX = this.physics.targetPanX;
                 this.physics.currentPanY = this.physics.targetPanY;
                 this.physics.active = false;
+                this._physicsFrameId = null;
                 this.updateRender(); 
                 return;
             }
@@ -145,9 +169,17 @@ window.Mix01InputController = class InputController {
             this.physics.currentPanY = lerp(this.physics.currentPanY, this.physics.targetPanY, 0.25);
 
             this.updateRender();
-            requestAnimationFrame(loop);
+            this._physicsFrameId = requestAnimationFrame(loop);
         };
-        requestAnimationFrame(loop);
+        this._physicsFrameId = requestAnimationFrame(loop);
+    }
+
+    _killPhysicsLoop() {
+        if (this._physicsFrameId) {
+            cancelAnimationFrame(this._physicsFrameId);
+            this._physicsFrameId = null;
+        }
+        this.physics.active = false;
     }
 
     _clampTargetPan() {
@@ -169,6 +201,18 @@ window.Mix01InputController = class InputController {
     bindEvents() {
         document.addEventListener('mousemove', (e) => {
             window.lastMouseX = e.clientX; window.lastMouseY = e.clientY;
+            
+            const now = performance.now();
+            const dt = now - this._mouseVector.timestamp;
+            if (dt > 10) {
+                this._mouseVector.dx = e.clientX - this._mouseVector.lastX;
+                this._mouseVector.dy = e.clientY - this._mouseVector.lastY;
+                this._mouseVector.speed = Math.sqrt(this._mouseVector.dx ** 2 + this._mouseVector.dy ** 2) / dt;
+                this._mouseVector.lastX = e.clientX;
+                this._mouseVector.lastY = e.clientY;
+                this._mouseVector.timestamp = now;
+            }
+
             if (!this.state.isTicking) {
                 window.requestAnimationFrame(() => {
                     this.handleMouseMove(e);
@@ -238,7 +282,6 @@ window.Mix01InputController = class InputController {
             }
         });
 
-        this.render.elements.canvas.addEventListener('click', (e) => { e.stopPropagation(); this._toggleVideoPlay(); });
         if (this.render.elements.videoClone) {
             this.render.elements.videoClone.addEventListener('click', (e) => { e.stopPropagation(); this._toggleVideoPlay(); });
         }
@@ -317,7 +360,6 @@ window.Mix01InputController = class InputController {
                 if (this._pan.moved) {
                     this.physics.targetPanX = this._pan.origPanX + dx;
                     this.physics.targetPanY = this._pan.origPanY + dy;
-                    // 拖拽时瞬间跟随，保持黏手感
                     this.physics.currentPanX = this.physics.targetPanX;
                     this.physics.currentPanY = this.physics.targetPanY;
                     this.updateRender(e);
@@ -339,7 +381,6 @@ window.Mix01InputController = class InputController {
             if (this._pan.active) {
                 this._pan.active = false;
                 if (this.state.currentMedia && this.cfg.state.isImmersive) {
-                    // 🚀 Optimization 1: 拖拽松手，触发边缘回弹 (Rubber Band)
                     this._clampTargetPan();
                     this._startPhysicsLoop();
                 }
@@ -351,7 +392,6 @@ window.Mix01InputController = class InputController {
         }, { capture: true });
     }
 
-    // 🚀 Optimization 3: O(N) 纯数学空间碰撞，告别 elementsFromPoint 的强制重排性能地狱
     getMediaUnderCursor(clientX, clientY, target) {
         if (target && (target.tagName === 'IMG' || target.tagName === 'VIDEO') && (target.src || target.tagName === 'VIDEO')) {
             this.state.lastTarget = target; this.state.lastFoundMedia = target; return target;
@@ -421,6 +461,9 @@ window.Mix01InputController = class InputController {
                 }
             }
             this.updateRender(e);
+            
+            // 🚀 触发智能化预加载判断
+            if (this._mouseVector.speed > 0.1) this.triggerPreload();
         }
     }
 
@@ -459,6 +502,9 @@ window.Mix01InputController = class InputController {
 
     async upgradeToHDQuietly(target, src) {
         if (this.cfg.state.loadHD !== 'true') return;
+        
+        const savedSessionId = this.state.renderRequestId;
+
         try {
             if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
                 const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, src);
@@ -467,7 +513,7 @@ window.Mix01InputController = class InputController {
                     window.__mix01HdUrlMap = window.__mix01HdUrlMap || {};
                     window.__mix01HdUrlMap[src] = hdUrl;
 
-                    if (this.state.currentSrc !== src) return; 
+                    if (this.state.renderRequestId !== savedSessionId || this.state.currentSrc !== src) return; 
                     if (this.render.elements.img.src === hdUrl) return;
 
                     this.state.currentHdUrl = hdUrl;
@@ -476,6 +522,9 @@ window.Mix01InputController = class InputController {
                     this.render.hdState.progress = 0;
                     if (this.render.hdState.progressTimer) clearInterval(this.render.hdState.progressTimer);
                     this.render.hdState.progressTimer = setInterval(() => {
+                        if (this.state.renderRequestId !== savedSessionId) {
+                            clearInterval(this.render.hdState.progressTimer); return;
+                        }
                         if (this.render.hdState.progress < 95) {
                             this.render.hdState.progress += Math.floor(Math.random() * 8) + 2;
                             if (this.render.hdState.progress > 95) this.render.hdState.progress = 95;
@@ -484,14 +533,54 @@ window.Mix01InputController = class InputController {
                     }, 150);
                     this.updateRender(); 
 
-                    // 🚀 Optimization 5: 使用池化 Image 对象，消灭卡顿
-                    const tempImg = this.imgPool.acquire();
-                    tempImg.onload = () => {
-                        if (tempImg.naturalWidth <= 10 && tempImg.naturalHeight <= 10) {
-                            tempImg.onerror(); return;
+                    // 🚀 优化 4：多线程异步解算位图，避免主线程解码超大图产生微卡顿（Jank）
+                    try {
+                        const response = await fetch(hdUrl, { mode: 'cors' });
+                        const blob = await response.blob();
+                        
+                        if (this.state.renderRequestId !== savedSessionId) return;
+
+                        // 调用 V8 核心多线程解码并行管道
+                        const bitmap = await createImageBitmap(blob);
+                        
+                        if (this.state.renderRequestId !== savedSessionId) {
+                            bitmap.close(); return;
                         }
 
-                        if (this.state.currentSrc === src) { 
+                        if (bitmap.width <= 10 && bitmap.height <= 10) {
+                            bitmap.close(); throw new Error("Bad bitmap size");
+                        }
+
+                        if (this.render.hdState.progressTimer) {
+                            clearInterval(this.render.hdState.progressTimer);
+                            this.render.hdState.progressTimer = null;
+                        }
+                        this.render.hdState.progress = 100;
+                        this.render.hdState.isLoading = false;
+
+                        // 注入渲染器高速直接绘制
+                        this.render.drawDecodedBitmap(bitmap, hdUrl);
+
+                        if (!this.cfg.state.isImmersive && this.state.currentMode === 'partial' && this.state.isSmallOptimized && !this.state.isZoomManuallyChanged) {
+                            const nw = bitmap.width, nh = bitmap.height;
+                            if (nw > 350 || nh > 350) {
+                                this.state.customLensWidth = Math.min(nw, window.innerWidth * 0.9);
+                                this.state.customLensHeight = Math.min(nh, window.innerHeight * 0.9);
+                                this.physics.targetZoom = nw / (this.state.cachedRect.width || 1);
+                                this._killPhysicsLoop();
+                                this._startPhysicsLoop();
+                            }
+                        }
+                        this.updateRender();
+                    } catch (bitmapErr) {
+                        // CORS 降级回退池化处理
+                        if (this.state.renderRequestId !== savedSessionId) return;
+                        
+                        const tempImg = this.imgPool.acquire();
+                        tempImg.onload = () => {
+                            if (this.state.renderRequestId !== savedSessionId) { this.imgPool.release(tempImg); return; }
+                            if (tempImg.naturalWidth <= 10 && tempImg.naturalHeight <= 10) { tempImg.onerror(); return; }
+
                             if (this.render.hdState.progressTimer) {
                                 clearInterval(this.render.hdState.progressTimer);
                                 this.render.hdState.progressTimer = null;
@@ -499,35 +588,22 @@ window.Mix01InputController = class InputController {
                             this.render.hdState.progress = 100;
                             this.render.hdState.isLoading = false; 
                             this.render.elements.img.src = hdUrl; 
-                            
-                            if (!this.cfg.state.isImmersive && this.state.currentMode === 'partial' && this.state.isSmallOptimized && !this.state.isZoomManuallyChanged) {
-                                const nw = tempImg.naturalWidth, nh = tempImg.naturalHeight;
-                                if (nw > 350 || nh > 350) {
-                                    this.state.customLensWidth = Math.min(nw, window.innerWidth * 0.9);
-                                    this.state.customLensHeight = Math.min(nh, window.innerHeight * 0.9);
-                                    this.physics.targetZoom = nw / (this.state.cachedRect.width || 1);
-                                    this._startPhysicsLoop();
-                                }
-                            }
-                            this.updateRender(); 
-                        }
-                        this.imgPool.release(tempImg);
-                    };
-                    
-                    tempImg.onerror = () => {
-                        if (this.state.currentSrc === src) {
+                            this.updateRender();
+                            this.imgPool.release(tempImg);
+                        };
+                        tempImg.onerror = () => {
+                            if (this.state.renderRequestId !== savedSessionId) { this.imgPool.release(tempImg); return; }
                             if (this.render.hdState.progressTimer) {
                                 clearInterval(this.render.hdState.progressTimer);
                                 this.render.hdState.progressTimer = null;
                             }
                             this.render.hdState.isLoading = false;
-                            this.updateRender(); 
-                        }
-                        this.render.hdState.badUrls.add(hdUrl); 
-                        this.imgPool.release(tempImg);
-                    };
-
-                    tempImg.src = hdUrl;
+                            this.render.hdState.badUrls.add(hdUrl);
+                            this.updateRender();
+                            this.imgPool.release(tempImg);
+                        };
+                        tempImg.src = hdUrl;
+                    }
                 }
             }
         } catch (error) { console.warn('Mix01 Engine 解析失败:', error); }
@@ -538,6 +614,8 @@ window.Mix01InputController = class InputController {
         if (target.tagName === 'VIDEO' && this.cfg.state.disableVideoDefaultView && !this.cfg.state.isImmersive) return;
 
         this.hideViewer();
+        
+        this.state.renderRequestId++;
         
         window.lastHoveredMedia = target ? new WeakRef(target) : null;
         window.lastHoveredSrc = target.src || 'video';
@@ -594,9 +672,6 @@ window.Mix01InputController = class InputController {
             return;
         }
 
-        if (this.render.elements.canvas) this.render.setStyle(this.render.elements.canvas, 'display', 'none');
-        if (this.render.elements.videoClone) this.render.setStyle(this.render.elements.videoClone, 'display', 'none');
-        
         this.render.setStyle(this.render.elements.progressContainer, 'display', 'none');
         this.render.setStyle(this.render.elements.img, 'display', 'block');
         this.render.setStyle(this.render.elements.img, 'max-width', 'none'); 
@@ -618,11 +693,10 @@ window.Mix01InputController = class InputController {
 
         this.render.elements.img.src = initialSrc;
         
-        // 此处的 initialSrc 是低分辨率图，快速解码保留
         this.render.elements.img.decode().then(() => {
-            this.render.setStyle(this.render.elements.img, 'opacity', '1');
+            if (this.state.currentSrc === target.src) this.render.setStyle(this.render.elements.img, 'opacity', '1');
         }).catch(() => {
-            this.render.setStyle(this.render.elements.img, 'opacity', '1');
+            if (this.state.currentSrc === target.src) this.render.setStyle(this.render.elements.img, 'opacity', '1');
         });
 
         if (this.cfg.state.smallImageOptimization) {
@@ -677,7 +751,6 @@ window.Mix01InputController = class InputController {
         const roundedZoom = Math.round(this.physics.currentZoom * 1000);
         const mediaSrc = this.state.currentSrc || '';
         
-        // 包含物理引擎状态的终极渲染签名
         const renderSignature = `${mediaSrc}|${roundedX}|${roundedY}|${roundedZoom}|${this.state.currentMode}|${this.state.currentRotate}|${this.state.currentMirror}|${this.physics.currentPanX.toFixed(2)}|${this.physics.currentPanY.toFixed(2)}|${this.cfg.state.isImmersive}`;
 
         if (this.state.lastRenderSignature === renderSignature) {
@@ -716,18 +789,13 @@ window.Mix01InputController = class InputController {
     }
 
     hideViewer() {
+        this._killPhysicsLoop(); 
         this.render.hide();
         clearTimeout(this._cursorHideTimer);
         this.mediaObserver.disconnect();
-        if (this._resizeTimer) {
-            clearTimeout(this._resizeTimer);
-            this._resizeTimer = null;
-        }
-        if (this.render.hdState.progressTimer) {
-            clearInterval(this.render.hdState.progressTimer);
-            this.render.hdState.progressTimer = null;
-        }
-        this.physics.active = false;
+        if (this._resizeTimer) { clearTimeout(this._resizeTimer); this._resizeTimer = null; }
+        if (this.render.hdState.progressTimer) { clearInterval(this.render.hdState.progressTimer); this.render.hdState.progressTimer = null; }
+        
         this.state.currentMedia = null;
         this.state.currentSrc = null;
         this.state.currentHdUrl = null; 
@@ -831,7 +899,7 @@ window.Mix01InputController = class InputController {
             result = adapter.getGalleryImages();
         } else {
             result = Array.from(document.querySelectorAll('img, video')).filter(media => {
-                if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') return false;
+                if (media.id === 'zoom-img-xyz' || media.id === 'zoom-video-xyz') return false;
                 const rect = media.getBoundingClientRect();
                 return rect.width > 50 && rect.height > 50; 
             });
@@ -950,8 +1018,9 @@ window.Mix01InputController = class InputController {
         }
     }
 
+    // 🚀 优化 5：结合物理向量滑动的预测型预加载控制
     triggerPreload() {
-        if (!this.cfg.state.isImmersive || this.cfg.state.preloadCount <= 0 || !this.state.currentMedia) return;
+        if (this.cfg.state.preloadCount <= 0 || !this.state.currentMedia) return;
 
         if (this._preloadTimer) clearTimeout(this._preloadTimer);
 
@@ -964,19 +1033,30 @@ window.Mix01InputController = class InputController {
             }
             if (currentIndex === -1) return;
 
-            // 🚀 Optimization 2: 抢占式预加载 (中止遗留废弃任务，节约带宽)
-            for (let img of this.activePreloads) {
-                this.imgPool.release(img);
-            }
+            for (let img of this.activePreloads) this.imgPool.release(img);
             this.activePreloads.clear();
 
-            for (let i = 1; i <= this.cfg.state.preloadCount; i++) {
-                const targetIndex = currentIndex + i;
-                if (targetIndex >= galleryImages.length) break;
+            // 依据鼠标最新移动的方向，决定向前还是向后加载
+            let direction = 1; 
+            if (!this.cfg.state.isImmersive) {
+                if (this._mouseVector.dy < -2) direction = -1; // 向上划，判定翻阅前文
+            }
+
+            let loadedCount = 0;
+            const scanTarget = this.cfg.state.preloadCount;
+
+            for (let i = 1; i <= scanTarget * 2; i++) {
+                if (loadedCount >= scanTarget) break;
+
+                const offset = i * direction;
+                const targetIndex = currentIndex + offset;
+                
+                if (targetIndex < 0 || targetIndex >= galleryImages.length) continue;
 
                 const media = galleryImages[targetIndex];
                 if (media.tagName === 'IMG') {
                     const src = media.src;
+                    loadedCount++;
                     
                     (async () => {
                         let targetUrl = src;
@@ -984,7 +1064,7 @@ window.Mix01InputController = class InputController {
                             try { targetUrl = await window.Mix01RuleEngine.getHighResUrl(media, src); } catch (e) {}
                         }
 
-                        if (targetUrl && !this.preloadedUrls.has(targetUrl) && !this.render.hdState.badUrls.has(targetUrl)) {
+                        if (targetUrl && !this.preloadedUrls.has(targetUrl) && !this.render.badUrls?.has(targetUrl)) {
                             this.preloadedUrls.add(targetUrl);
                             this.preloadedUrlsQueue.push(targetUrl);
 
@@ -993,19 +1073,21 @@ window.Mix01InputController = class InputController {
                                 this.preloadedUrls.delete(oldest);
                             }
                             
-                            const preloaderImg = this.imgPool.acquire();
-                            this.activePreloads.add(preloaderImg);
+                            try {
+                                const preloaderImg = this.imgPool.acquire();
+                                this.activePreloads.add(preloaderImg);
 
-                            preloaderImg.onload = preloaderImg.onerror = () => {
-                                this.activePreloads.delete(preloaderImg);
-                                this.imgPool.release(preloaderImg);
-                            };
-                            preloaderImg.src = targetUrl;
+                                preloaderImg.onload = preloaderImg.onerror = () => {
+                                    this.activePreloads.delete(preloaderImg);
+                                    this.imgPool.release(preloaderImg);
+                                };
+                                preloaderImg.src = targetUrl;
+                            } catch (e) {}
                         }
                     })();
                 }
             }
-        }, 150); 
+        }, 120); 
     }
 
     handleKeyDown(e) {
@@ -1092,30 +1174,30 @@ window.Mix01InputController = class InputController {
 
         if (k === this.cfg.keys.rotate) { 
             this.state.currentRotate = (this.state.currentRotate + 90) % 360; 
-            up = true; this._clampTargetPan(); this._startPhysicsLoop();
+            up = true; this._clampTargetPan(); this._killPhysicsLoop(); this._startPhysicsLoop();
         } 
         else if (k === this.cfg.keys.mirror) { 
             this.state.currentMirror *= -1; 
-            up = true; this._startPhysicsLoop();
+            up = true; this._killPhysicsLoop(); this._startPhysicsLoop();
         } 
         else if (k === this.cfg.keys.mode) { 
             if (this.cfg.state.isImmersive) {
                 this.render.showToast(`⚠️ 请双击背景或按 ${(this.cfg.keys.immersive || 'Esc').toUpperCase()} 退出沉浸模式`);
             } else {
                 this.state.currentMode = modeList[(modeList.indexOf(this.state.currentMode) + 1) % modeList.length]; 
-                up = true; this._startPhysicsLoop();
+                up = true; this._killPhysicsLoop(); this._startPhysicsLoop();
                 this.render.showToast(modeNames[this.state.currentMode]); 
             }
         }
         else if (k === this.cfg.keys.zoomIn || k === '+') { 
             this.physics.targetZoom += 0.5; this.state.isZoomManuallyChanged = true; 
             this.render.showToast(`${this.physics.targetZoom.toFixed(1)}x`); up = true; 
-            this._clampTargetPan(); this._startPhysicsLoop();
+            this._clampTargetPan(); this._killPhysicsLoop(); this._startPhysicsLoop();
         } 
         else if (k === this.cfg.keys.zoomOut || k === '-') { 
             this.physics.targetZoom = Math.max(0.5, this.physics.targetZoom - 0.5); this.state.isZoomManuallyChanged = true; 
             this.render.showToast(`${this.physics.targetZoom.toFixed(1)}x`); up = true; 
-            this._clampTargetPan(); this._startPhysicsLoop();
+            this._clampTargetPan(); this._killPhysicsLoop(); this._startPhysicsLoop();
         }
         
         else if (e.key === 'Escape') {

@@ -40,12 +40,14 @@ window.Mix01ConfigManager = class ConfigManager {
         if (!res) return;
 
         Object.keys(this.state).forEach(k => {
-            if (res[k] !== undefined) {
-                const isNum = ['zoom', 'preloadCount', 'minZoomSize', 'triggerDelay'].includes(k);
-                this.state[k] = isNum ? Number(res[k]) : res[k];
-            }
-        });
-
+        if (res[k] !== undefined) {
+            // 兼容映射：如果后台传过来的是 zoomLevel 同样接受
+            const isNum = ['zoom', 'preloadCount', 'minZoomSize', 'triggerDelay'].includes(k);
+            this.state[k] = isNum ? Number(res[k]) : res[k];
+        }
+    });
+        // 垫片：如果 options 写入的是 zoomLevel，转换为内部 state.zoom
+        if (res.zoomLevel !== undefined) this.state.zoom = Number(res.zoomLevel);
         // 【核心修复】：彻底分离全局视图与站点独立视图
         if (res.mode !== undefined) this.globalMode = res.mode;
         if (res.siteModes !== undefined) this.siteModes = res.siteModes;

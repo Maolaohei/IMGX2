@@ -1,4 +1,4 @@
-// background.js - Mix01 终极自愈下载引擎 (终极优化版)
+// background.js - Mix01 终极自愈下载引擎 (终极性能保活版)
 chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.removeAll(() => {
         chrome.contextMenus.create({ id: "saveOriginalImgMix01", title: "保存原图 (Mix01)", contexts: ["image"] });
@@ -15,20 +15,37 @@ chrome.runtime.onInstalled.addListener(() => {
     }
 });
 
-// 🚀 P0: 纯无状态化 (Stateless) 与 Promise 队列
-let _historyQueue = Promise.resolve();
+// 🚀 优化 1：原子锁状态机与轻量缓冲区，彻底斩断常驻 Promise 闭包链，规避 SW 积压内存泄漏
+let _isHistoryWriting = false;
+const _historyBuffer = [];
+
+async function processHistoryFlush() {
+    if (_isHistoryWriting || _historyBuffer.length === 0) return;
+    _isHistoryWriting = true;
+
+    try {
+        const batchItems = _historyBuffer.splice(0, _historyBuffer.length);
+        const res = await chrome.storage.local.get(['mix01_download_history']);
+        let cache = res.mix01_download_history || [];
+        
+        cache = [...batchItems, ...cache];
+        if (cache.length > 50) cache = cache.slice(0, 50);
+        
+        await chrome.storage.local.set({ mix01_download_history: cache });
+    } catch (err) {
+        console.error('Mix01 History Save Error:', err);
+    } finally {
+        _isHistoryWriting = false;
+        if (_historyBuffer.length > 0) processHistoryFlush();
+    }
+}
 
 function saveToHistory(filename, statusMsg) {
     const timeStr = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     const newItem = { time: timeStr, filename: filename, status: statusMsg };
-
-    _historyQueue = _historyQueue.then(async () => {
-        const res = await chrome.storage.local.get(['mix01_download_history']);
-        const cache = res.mix01_download_history || [];
-        cache.unshift(newItem);
-        if (cache.length > 50) cache.pop();
-        await chrome.storage.local.set({ mix01_download_history: cache });
-    }).catch(err => console.error('Mix01 History Save Error:', err));
+    
+    _historyBuffer.unshift(newItem);
+    processHistoryFlush();
 }
 
 let _compiledBase64Domains = null;
@@ -49,7 +66,6 @@ function isBase64Domain(url, userDomainsStr) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    // 🚀 P2: 后端代发 Twitter API，彻底避开前台 Content Script 读取 Cookie 导致的风控和跨域拦截
     if (request.action === "fetchTwitterGraphQL") {
         (async () => {
             try {
@@ -85,7 +101,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
-    // 🚀 P2: 代理请求图片转化为 Base64 回传，完美绕过某些网站对 navigator.clipboard 的严格 CSP 限制
     if (request.action === "fetchImageAsBase64") {
         fetch(request.url, { headers: { 'Referer': request.pageUrl } })
             .then(res => res.blob())
@@ -174,16 +189,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
                 const urlObj = new URL(finalUrl);
                 
-                // 🔧 FIX: 增强文件名提取逻辑，剥离路径中的脏参数和小尾巴
+                // 🚀 优化 2：强力清洗 CDN 脏参数和小尾巴（剥离 :orig, :large, @2x 等参数）
                 let lastSegment = decodeURIComponent(urlObj.pathname.split('/').pop() || '');
-                lastSegment = lastSegment.split(':')[0]; // 去除 :orig 或 :large
-                lastSegment = lastSegment.split('@')[0]; // 去除 @2x 等缩放标记
-                lastSegment = lastSegment.split('&')[0]; // 去除夹带的 &xxx 错误参数
-                lastSegment = lastSegment.split('?')[0]; // 防御性去除问号后的字符
+                lastSegment = lastSegment.split(':')[0]; 
+                lastSegment = lastSegment.split('@')[0]; 
+                lastSegment = lastSegment.split('&')[0]; 
+                lastSegment = lastSegment.split('?')[0]; 
 
                 let filename = "media", ext = "";
                 
-                // 🔧 FIX: 利用 Content-Type 作为格式的终极保底
                 const _mimeToExt = { 'jpeg': 'jpg', 'jpg': 'jpg', 'png': 'png', 'gif': 'gif', 'webp': 'webp', 'svg+xml': 'svg', 'bmp': 'bmp', 'mp4': 'mp4', 'webm': 'webm', 'avif': 'avif', 'quicktime': 'mov', 'x-matroska': 'mkv' };
                 const _rawCt = (res.headers.get('content-type') || 'image/jpeg').split(';')[0].trim().toLowerCase();
                 const _rawSubtype = _rawCt.split('/')[1] || 'jpeg';
@@ -199,17 +213,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     filename = lastSegment || "media";
                 }
 
-                if (paramExt) {
-                    ext = "." + paramExt.toLowerCase();
-                }
+                if (paramExt) ext = "." + paramExt.toLowerCase();
 
-                // 🔧 FIX: 校验后缀名是否合法。如果不合法（比如是一串哈希），强制使用 Content-Type 推导的格式
                 if (!/^\.(jpg|jpeg|png|gif|webp|svg|bmp|mp4|webm|avif|mov|mkv)$/i.test(ext)) {
                     ext = _resolvedExt;
                 }
                 if (!filename || filename === "") filename = "media";
 
-                // 尝试从 Content-Disposition 请求头获取标准文件名 (最高优先级)
                 let cd = res.headers.get('content-disposition');
                 if (cd) {
                     let match = cd.match(/filename="?([^"]+)"?/);
@@ -218,28 +228,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         let cdDot = cdName.lastIndexOf('.');
                         if (cdDot !== -1) {
                             filename = cdName.substring(0, cdDot);
-                            ext = cdName.substring(cdDot).toLowerCase();
+                            ext = cdDot !== -1 ? cdName.substring(cdDot).toLowerCase() : ext;
                         } else {
                             filename = cdName;
                         }
                     }
                 }
 
-                // 最终清洗并组装下载路径
                 filename = filename.replace(/[\\/:*?"<>|]/g, "_");
                 const finalDownloadName = `IMG_Download/${filename}${ext}`;
                 const contentType = _rawCt; 
                 
                 if (useBase64) {
                     const contentLength = res.headers.get('content-length');
-                    const sizeLimit = 20 * 1024 * 1024; // 20MB
+                    const sizeLimit = 20 * 1024 * 1024; // 20MB 熔断安全阀门
 
                     if (contentLength && parseInt(contentLength) > sizeLimit) {
                         chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
                             saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (大文件直下)" : "✅ 成功 (大文件直下)");
                         });
                     } else {
-                        // 🚀 P0: 引入流式阻断。防止没有 Content-Length 的恶意大文件撑爆内存
+                        // 🚀 优化 3：流式阻断防御机制，防止没有 Content-Length 的异常大流榨干 MV3 内存
                         const reader = res.body.getReader();
                         let receivedLength = 0;
                         let chunks = [];
@@ -251,7 +260,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                             receivedLength += value.length;
                             
                             if (receivedLength > sizeLimit) {
-                                reader.cancel('File too large'); // 立刻掐断流
+                                reader.cancel('File too large'); 
                                 aborted = true;
                                 break;
                             }
@@ -260,13 +269,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
                         if (aborted) {
                             chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
-                                saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (大流回退)" : "✅ 成功 (大流回退)");
+                                saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (流超载回退)" : "✅ 成功 (流超载回退)");
                             });
                         } else {
                             const blob = new Blob(chunks, { type: contentType });
                             const blobUrl = URL.createObjectURL(blob);
                             chrome.downloads.download({ url: blobUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, (downloadId) => {
-                                // 🚀 P0: 利用原生下载事件回调，精准释放内存 GC，杜绝 MV3 休眠导致的泄漏
                                 if (downloadId !== undefined) {
                                     const listener = (delta) => {
                                         if (delta.id === downloadId && delta.state) {
