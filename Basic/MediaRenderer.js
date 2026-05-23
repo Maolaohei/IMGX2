@@ -322,84 +322,90 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.stopVideoRender();
     }
 
-    startVideoRender(videoEl) {
-        this.videoState.isRunning = true;
-        this.videoState.original = { paused: videoEl.paused, muted: videoEl.muted };
-        this.videoState.lastNw = 0;
-        this.videoState.lastNh = 0;
-        this.currentVideoEl = videoEl;
-        this._lastProgressPct = null;
+// Basic/MediaRenderer.js - 修改 startVideoRender
+startVideoRender(videoEl) {
+    this.videoState.isRunning = true;
+    this.videoState.original = { paused: videoEl.paused, muted: videoEl.muted };
+    this.videoState.lastNw = 0;
+    this.videoState.lastNh = 0;
+    this.currentVideoEl = videoEl;
+    this._lastProgressPct = null;
 
-        this.setStyles(this.elements.img,              { display: 'none' });
-        this.setStyles(this.elements.videoClone,       { display: 'block' });
-        this.setStyles(this.elements.progressContainer,{ display: 'block' });
+    this.setStyles(this.elements.img,              { display: 'none' });
+    this.setStyles(this.elements.videoClone,       { display: 'block' });
+    this.setStyles(this.elements.progressContainer,{ display: 'block' });
 
-        const vc = this.elements.videoClone;
-        vc.muted = true;
-        
-        try {
-            if (videoEl.captureStream) {
-                const stream = videoEl.captureStream();
-                if (stream.active) vc.srcObject = stream;
-                else throw new Error("Stream inactive");
-            } else if (videoEl.mozCaptureStream) {
-                vc.srcObject = videoEl.mozCaptureStream();
-            } else {
-                throw new Error("No captureStream");
-            }
-        } catch (e) {
-            vc.srcObject = null;
-            if (vc.src !== videoEl.src) {
-                vc.src = videoEl.src;
-                vc.currentTime = videoEl.currentTime;
-            }
-        }
+    // 🚀 核心改进 1：静音网页中的原始视频节点，防止沉浸播放时产生令人烦躁的双重声音/回音
+    videoEl.muted = true;
 
-        if (videoEl.readyState === 0) {
-            this.setStyle(this.elements.spinner, 'display', 'block');
-            videoEl.addEventListener('canplay', () => {
-                this.setStyle(this.elements.spinner, 'display', 'none');
-                if (!window.__mix01State.userPaused && this.videoState.isRunning) vc.play().catch(() => {});
-            }, { once: true });
+    const vc = this.elements.videoClone;
+    
+    // 🚀 核心改进 2：在沉浸模式下恢复声音，确保默认播放有声视频
+    vc.muted = false;
+    vc.volume = 1.0;
+    
+    try {
+        if (videoEl.captureStream) {
+            const stream = videoEl.captureStream();
+            if (stream.active) vc.srcObject = stream;
+            else throw new Error("Stream inactive");
+        } else if (videoEl.mozCaptureStream) {
+            vc.srcObject = videoEl.mozCaptureStream();
         } else {
-            if (!window.__mix01State.userPaused) vc.play().catch(() => {});
+            throw new Error("No captureStream");
+        }
+    } catch (e) {
+        vc.srcObject = null;
+        if (vc.src !== videoEl.src) {
+            vc.src = videoEl.src;
+            vc.currentTime = videoEl.currentTime;
+        }
+    }
+
+    if (videoEl.readyState === 0) {
+        this.setStyle(this.elements.spinner, 'display', 'block');
+        videoEl.addEventListener('canplay', () => {
+            this.setStyle(this.elements.spinner, 'display', 'none');
+            if (!window.__mix01State.userPaused && this.videoState.isRunning) vc.play().catch(() => {});
+        }, { once: true });
+    } else {
+        if (!window.__mix01State.userPaused) vc.play().catch(() => {});
+    }
+
+    const updateFrame = () => {
+        if (!this.videoState.isRunning) return;
+
+        if (vc.srcObject && !vc.srcObject.active && !videoEl.ended) {
+            try { vc.srcObject = videoEl.captureStream(); } catch(e){}
         }
 
-        const updateFrame = () => {
-            if (!this.videoState.isRunning) return;
+        if (videoEl.paused && videoEl.readyState >= 3 && !window.__mix01State.userPaused) {
+            if (!videoEl.ended) videoEl.play().catch(() => {});
+        }
+        if (vc.paused && !window.__mix01State.userPaused && vc.readyState >= 3) {
+            if (!videoEl.ended) vc.play().catch(() => {});
+        }
 
-            if (vc.srcObject && !vc.srcObject.active && !videoEl.ended) {
-                try { vc.srcObject = videoEl.captureStream(); } catch(e){}
+        if (videoEl.duration > 0) {
+            const pct = ((videoEl.currentTime / videoEl.duration) * 100).toFixed(2) + '%';
+            if (pct !== this._lastProgressPct) {
+                this.elements.progressBar.style.setProperty('width', pct, 'important');
+                this._lastProgressPct = pct;
             }
+        }
 
-            if (videoEl.paused && videoEl.readyState >= 3 && !window.__mix01State.userPaused) {
-                if (!videoEl.ended) videoEl.play().catch(() => {});
-            }
-            if (vc.paused && !window.__mix01State.userPaused && vc.readyState >= 3) {
-                if (!videoEl.ended) vc.play().catch(() => {});
-            }
-
-            if (videoEl.duration > 0) {
-                const pct = ((videoEl.currentTime / videoEl.duration) * 100).toFixed(2) + '%';
-                if (pct !== this._lastProgressPct) {
-                    this.elements.progressBar.style.setProperty('width', pct, 'important');
-                    this._lastProgressPct = pct;
-                }
-            }
-
-            if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
-                this.videoState.lastNw = videoEl.videoWidth;
-                this.videoState.lastNh = videoEl.videoHeight;
-            }
-
-            if (videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
-            else requestAnimationFrame(updateFrame);
-        };
+        if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+            this.videoState.lastNw = videoEl.videoWidth;
+            this.videoState.lastNh = videoEl.videoHeight;
+        }
 
         if (videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
         else requestAnimationFrame(updateFrame);
-    }
+    };
 
+    if (videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
+    else requestAnimationFrame(updateFrame);
+}
     stopVideoRender() {
         this.videoState.isRunning = false;
         this._lastProgressPct = null;

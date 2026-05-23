@@ -96,45 +96,63 @@ window.Mix01InputController = class InputController {
         this.bindEvents();
     }
 
-    initPassiveDOMScanner() {
-        const scanAndObserve = (root) => {
-            const els = root.querySelectorAll ? root.querySelectorAll('img, video') : [];
-            els.forEach(el => {
-                if (!el._mix01Observed) { el._mix01Observed = true; this.mediaIO.observe(el); }
-                
-                // 🚀 核心改进：当媒体节点首次在 timeline 载入时，同步提取并永久绑定其 Status ID
-                // 即使后续由于 React 虚拟列表重卷导致其最近的 article 容器被销毁，其绑定的 _mixStatusId 依然存在
-                if (!el._mixStatusId) {
-                    const article = el.closest('article');
-                    if (article) {
-                        const statusLink = article.querySelector('a[href*="/status/"]');
-                        if (statusLink) {
-                            const id = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
-                            if (id) el._mixStatusId = id;
-                        }
-                    }
-                }
-            });
-        };
-        scanAndObserve(document);
-        this._globalDomObserver = new MutationObserver((mutations) => {
-            if (!this.cfg.isSiteEnabled()) return;
-            for (let m of mutations) {
-                if (m.addedNodes && m.addedNodes.length > 0) {
-                    for (let node of m.addedNodes) {
-                        if (node.nodeType === Node.ELEMENT_NODE) {
-                            if (node.tagName === 'IMG' || node.tagName === 'VIDEO') {
-                                if (!node._mix01Observed) { node._mix01Observed = true; this.mediaIO.observe(node); }
-                            }
-                            scanAndObserve(node);
-                        }
+// Basic/InputController.js - 修改 initPassiveDOMScanner
+initPassiveDOMScanner() {
+    const scanAndObserve = (root) => {
+        const els = root.querySelectorAll ? root.querySelectorAll('img, video') : [];
+        els.forEach(el => {
+            if (!el._mix01Observed) { el._mix01Observed = true; this.mediaIO.observe(el); }
+            
+            if (!el._mixStatusId) {
+                const article = el.closest('article');
+                if (article) {
+                    const statusLink = article.querySelector('a[href*="/status/"]');
+                    if (statusLink) {
+                        const id = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
+                        if (id) el._mixStatusId = id;
                     }
                 }
             }
         });
-        this._globalDomObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
-    }
+    };
+    scanAndObserve(document);
+    this._globalDomObserver = new MutationObserver((mutations) => {
+        if (!this.cfg.isSiteEnabled()) return;
+        for (let m of mutations) {
+            if (m.addedNodes && m.addedNodes.length > 0) {
+                for (let node of m.addedNodes) {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        const isImgOrVideo = node.tagName === 'IMG' || node.tagName === 'VIDEO';
+                        if (isImgOrVideo) {
+                            if (!node._mix01Observed) { 
+                                node._mix01Observed = true; 
+                                this.mediaIO.observe(node); 
+                            }
+                        }
 
+                        // 🚀 核心改进：解决 X 视频延迟挂载导致沉浸模式不显示的问题
+                        // 检测到 React 动态挂载了新视频，且该视频与当前浏览的占位图属于同一条推文
+                        if (node.tagName === 'VIDEO' && this.state.currentMedia) {
+                            const currentArt = this.state.currentMedia.closest('article');
+                            const newArt = node.closest('article');
+                            if (currentArt && currentArt === newArt) {
+                                // 继承和转移已有的 Status ID 属性
+                                if (this.state.currentMedia._mixStatusId) {
+                                    node._mixStatusId = this.state.currentMedia._mixStatusId;
+                                }
+                                // 静默热重载过渡至视频渲染
+                                this.triggerZoom(node);
+                            }
+                        }
+
+                        scanAndObserve(node);
+                    }
+                }
+            }
+        }
+    });
+    this._globalDomObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+}
     _toggleVideoPlay() {
         if (!this.state.currentMedia || this.state.currentMedia.tagName !== 'VIDEO') return;
         const v = this.state.currentMedia;

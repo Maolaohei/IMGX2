@@ -1,3 +1,4 @@
+// Basic/Utils.js
 window.Mix01Utils = {
     getImmersiveAdapter() {
         return window.Mix01ImmersiveEngine?.getAdapter(window.location.hostname) || null;
@@ -38,28 +39,38 @@ window.Mix01Utils = {
     async downloadMedia(url, renderer, isVideo = false) {
         if (!url) return;
 
+        renderer.showToast(isVideo ? "⏳ 正在提交视频下载任务..." : "⏳ 正在提交图片下载任务...");
+        
+        // 🚀 核心改进：由于已部署 rules.json 重写 Referer，优先将任务交还给后台 Service Worker
+        // 这样可以确保文件完美地保存到您所期望的 "IMG_Download/" 文件夹内
+        try {
+            chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: url }, () => {
+                if (chrome.runtime.lastError) {
+                    console.warn("后台暂不可用，正在自动降级本地兜底通道...");
+                    this._downloadLocallyFallback(url, renderer, isVideo);
+                } else {
+                    renderer.showToast("✅ 已保存至 IMG_Download 文件夹内！");
+                }
+            });
+        } catch (e) {
+            console.warn("扩展上下文已断开，正在自动激活本地兜底通道...");
+            this._downloadLocallyFallback(url, renderer, isVideo);
+        }
+    },
+
+    // 🚀 本地兜底下载通道：仅在后台 Service Worker 被强制休眠或环境失效时启动
+    async _downloadLocallyFallback(url, renderer, isVideo) {
         if (renderer._currentBlob && !isVideo) {
-            renderer.showToast("✅ 正在本地保存最高清原图...");
             this._saveBlobLocally(renderer._currentBlob, url);
             return;
         }
-
-        renderer.showToast(isVideo ? "⏳ 正在拉取高清视频源..." : "⏳ 正在拉取高清大图...");
         try {
             const response = await fetch(url, { mode: 'cors' });
             if (!response.ok) throw new Error("HTTP " + response.status);
             const blob = await response.blob();
             this._saveBlobLocally(blob, url);
-            renderer.showToast("✅ 下载完成！");
         } catch (err) {
-            console.warn("网页域 fetch 失败，尝试降级为后台传输下载:", err);
-            chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: url }, () => {
-                if (chrome.runtime.lastError) {
-                    renderer.showToast("❌ 下载失败，环境已断开，请刷新页面");
-                } else {
-                    renderer.showToast("✅ 已交付后台加速下载...");
-                }
-            });
+            renderer.showToast("❌ 降级下载失败，请尝试刷新当前页面");
         }
     },
 
