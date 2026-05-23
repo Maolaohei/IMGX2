@@ -1,4 +1,3 @@
-// Basic/MediaRenderer.js
 window.Mix01MediaRenderer = class MediaRenderer {
     constructor(configManager) {
         this.cfg = configManager;
@@ -9,9 +8,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.hdState = { isLoading: false, badUrls: new Set(), progress: 0, progressTimer: null };
         this.immersiveState = { lastMedia: null, lastSrc: null, lastHudSignature: null };
         this._hdUrlCache = new Map();
-
-        // 为多线程图像准备的 Blob 作用域内存池
         this._activeBlobUrls = new Set();
+        this._lastActiveSessionId = 0; 
+        this._currentBlob = null; 
 
         this.initDOM();
         this.setupMessageListener();
@@ -31,7 +30,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.elements.img              = create('img',    'zoom-img-xyz');
         this.elements.img.alt          = ''; 
 
-        // 🚀 优化：完全剪裁移除了未曾使用的 Canvas 组件，直接使用 videoClone 流。
+        this.elements.imgBuffer        = create('img',    'zoom-img-buffer-xyz');
+        this.elements.imgBuffer.alt    = '';
+
         this.elements.videoClone       = create('video',  'zoom-video-xyz');  
         this.elements.videoClone.muted = true;
         this.elements.videoClone.playsInline = true;
@@ -70,9 +71,20 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 width: 100vw !important;
                 height: 100vh !important;
             }
-            #zoom-img-xyz, #zoom-video-xyz {
+            #zoom-img-xyz, #zoom-img-buffer-xyz, #zoom-video-xyz {
                 will-change: transform, opacity !important;
                 color: transparent !important; 
+                position: absolute !important;
+                left: 0;
+                top: 0;
+            }
+            #zoom-img-xyz {
+                z-index: 2 !important;
+                transition: opacity 0.12s ease-in-out !important;
+            }
+            #zoom-img-buffer-xyz {
+                z-index: 1 !important;
+                transition: opacity 0.12s ease-in-out !important;
             }
             .img-zoom-toast-xyz      { z-index: 2147483647 !important; }
             #img-zoom-pro-immersive-hint { z-index: 2147483647 !important; }
@@ -84,8 +96,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         `;
         document.head.appendChild(styleBlock);
 
-        this.elements.img.style.setProperty('transition', 'opacity 0.2s ease', 'important');
-
         Object.assign(this.elements.hint.style, {
             position: 'absolute', bottom: '40px', left: '50%', transform: 'translateX(-50%)',
             color: 'rgba(255,255,255,0.9)', background: 'rgba(20,20,20,0.8)', padding: '12px 28px',
@@ -96,7 +106,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
         const appendAll = () => {
             if (!document.body) { setTimeout(appendAll, 100); return; }
-            ['img', 'videoClone', 'spinner', 'progressContainer', 'status', 'notice', 'hint'].forEach(k => {
+            ['img', 'imgBuffer', 'videoClone', 'spinner', 'progressContainer', 'status', 'notice', 'hint'].forEach(k => {
                 this.elements.viewer.appendChild(this.elements[k]);
             });
             document.body.appendChild(this.elements.viewer);
@@ -128,32 +138,47 @@ window.Mix01MediaRenderer = class MediaRenderer {
         if (this.elements.counter)  this.elements.counter.style.setProperty('z-index',  '2147483647', 'important');
     }
 
-    // 🚀 优化：多线程解码图像专用直接绘制上屏通道
-    drawDecodedBitmap(bitmap, hdUrl) {
-        const canvas = document.createElement('canvas');
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(bitmap, 0, 0);
-        
-        canvas.toBlob((blob) => {
-            if (!blob) { bitmap.close(); return; }
-            const newBlobUrl = URL.createObjectURL(blob);
-            
-            this.clearBlobCache();
-            this._activeBlobUrls.add(newBlobUrl);
+    renderHDImage(blob, hdUrl, targetSessionId) {
+        if (targetSessionId && targetSessionId !== this._lastActiveSessionId) {
+            return;
+        }
 
-            this.elements.img.src = newBlobUrl;
+        this._currentBlob = blob; 
+        const newBlobUrl = URL.createObjectURL(blob);
+        this._activeBlobUrls.add(newBlobUrl);
+
+        if (this.elements.img.src && this.elements.img.style.opacity === '1') {
+            this.elements.imgBuffer.src = this.elements.img.src;
+            this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
+        }
+
+        this.setStyle(this.elements.img, 'opacity', '0');
+        this.elements.img.src = newBlobUrl;
+
+        this.elements.img.decode().then(() => {
+            if (targetSessionId && targetSessionId !== this._lastActiveSessionId) return;
             this.setStyle(this.elements.img, 'opacity', '1');
-            bitmap.close(); 
-        }, 'image/png');
+            this.setStyle(this.elements.imgBuffer, 'opacity', '0');
+            setTimeout(() => {
+                if (this.elements.img.style.opacity === '1') {
+                    this.setStyle(this.elements.imgBuffer, 'display', 'none');
+                }
+            }, 150);
+        }).catch(() => {
+            if (targetSessionId && targetSessionId !== this._lastActiveSessionId) return;
+            this.setStyle(this.elements.img, 'opacity', '1');
+            this.setStyle(this.elements.imgBuffer, 'opacity', '0');
+        });
     }
 
     clearBlobCache() {
-        for (let url of this._activeBlobUrls) {
-            URL.revokeObjectURL(url);
+        if (this._activeBlobUrls && this._activeBlobUrls.size > 0) {
+            for (let url of this._activeBlobUrls) { 
+                URL.revokeObjectURL(url); 
+            }
+            this._activeBlobUrls.clear();
         }
-        this._activeBlobUrls.clear();
+        this._currentBlob = null;
     }
 
     setupMessageListener() {
@@ -182,7 +207,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 }
                 if (targetUrl && targetUrl !== src) {
                     this._hdUrlCache.set(src, targetUrl);
-                    (window.__mix01HdUrlMap || (window.__mix01HdUrlMap = {}))[src] = targetUrl;
+                    (window.__mix01State.hdUrlMap || (window.__mix01State.hdUrlMap = {}))[src] = targetUrl;
                 }
                 actionFn(targetUrl);
             };
@@ -192,7 +217,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
             } else if (request.action === 'copyHDUrl') {
                 getUrlAndProcess(url => { window.Mix01Utils.copyImageToClipboard(url, this); sendResponse({ status: 'ok' }); }); return true;
             } else if (request.action === 'saveHDUrl') {
-                getUrlAndProcess(url => { window.Mix01Utils.downloadImage(url, this); sendResponse({ status: 'ok' }); }); return true;
+                getUrlAndProcess(url => { window.Mix01Utils.downloadMedia(url, this, false); sendResponse({ status: 'ok' }); }); return true;
             }
         });
     }
@@ -236,29 +261,38 @@ window.Mix01MediaRenderer = class MediaRenderer {
             this.setStyle(this.elements.status, 'display', 'none');
             return;
         }
-        this.setStyle(this.elements.status, 'display', 'block');
-
+        
         const nw = isVideo ? 0 : (this.elements.img.naturalWidth || 0);
         const nh = isVideo ? 0 : (this.elements.img.naturalHeight || 0);
         const dimStr = (nw > 0 && nh > 0) ? ` · ${nw}×${nh}` : '';
+        
+        let targetText = '';
+        let targetBgColor = '';
+        let targetClass = '';
 
         if (isVideo) {
             const w = this.videoState.lastNw || 0;
             const h = this.videoState.lastNh || 0;
-            const vDim = (w > 0 && h > 0) ? ` · ${w}×${h}` : '';
-            this.elements.status.textContent = `🎥 视频${vDim}`;
-            this.setClass(this.elements.status, 'status-hd');
-            this.setStyle(this.elements.status, 'background-color', '#1da1f2');
+            targetText = `🎥 视频${(w > 0 && h > 0) ? ` · ${w}×${h}` : ''}`;
+            targetClass = 'status-hd';
+            targetBgColor = '#1da1f2';
         } else if (type === 'hd') {
             const loading = this.hdState.isLoading;
-            this.setClass(this.elements.status, loading ? 'status-hd is-loading' : 'status-hd');
-            this.elements.status.textContent = loading ? `⏳ 高清缓冲中 ${this.hdState.progress || 0}%` : `高清${dimStr}`;
-            this.setStyle(this.elements.status, 'background-color', '');
+            targetText = loading ? `⏳ 高清缓冲中 ${this.hdState.progress || 0}%` : `高清${dimStr}`;
+            targetClass = loading ? 'status-hd is-loading' : 'status-hd';
         } else {
-            this.setClass(this.elements.status, 'status-original');
-            this.elements.status.textContent = `原图${dimStr}`;
-            this.setStyle(this.elements.status, 'background-color', '');
+            targetText = `原图${dimStr}`;
+            targetClass = 'status-original';
         }
+
+        const currentSignature = `${targetText}|${targetClass}|${targetBgColor}`;
+        if (this._lastStatusSignature === currentSignature) return;
+        this._lastStatusSignature = currentSignature;
+
+        this.setStyle(this.elements.status, 'display', 'block');
+        this.elements.status.textContent = targetText;
+        this.setClass(this.elements.status, targetClass);
+        this.setStyle(this.elements.status, 'background-color', targetBgColor);
     }
 
     _syncNoticeVisibility() {
@@ -270,6 +304,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
     hide() {
         this.setStyles(this.elements.viewer, { display: 'none', cursor: 'default', 'pointer-events': 'none' });
         this.setStyles(this.elements.img,    { display: 'none', cursor: 'default' });
+        
+        this.setStyles(this.elements.imgBuffer, { display: 'none', opacity: '0' });
+        this.elements.imgBuffer.src = '';
+
         this.setStyles(this.elements.videoClone, { display: 'none' }); 
         this.setStyles(this.elements.spinner, { display: 'none' });
         this.setStyles(this.elements.progressContainer, { display: 'none' });
@@ -321,10 +359,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
             this.setStyle(this.elements.spinner, 'display', 'block');
             videoEl.addEventListener('canplay', () => {
                 this.setStyle(this.elements.spinner, 'display', 'none');
-                if (!window.__mix01UserPaused && this.videoState.isRunning) vc.play().catch(() => {});
+                if (!window.__mix01State.userPaused && this.videoState.isRunning) vc.play().catch(() => {});
             }, { once: true });
         } else {
-            if (!window.__mix01UserPaused) vc.play().catch(() => {});
+            if (!window.__mix01State.userPaused) vc.play().catch(() => {});
         }
 
         const updateFrame = () => {
@@ -334,10 +372,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 try { vc.srcObject = videoEl.captureStream(); } catch(e){}
             }
 
-            if (videoEl.paused && videoEl.readyState >= 3 && !window.__mix01UserPaused) {
+            if (videoEl.paused && videoEl.readyState >= 3 && !window.__mix01State.userPaused) {
                 if (!videoEl.ended) videoEl.play().catch(() => {});
             }
-            if (vc.paused && !window.__mix01UserPaused && vc.readyState >= 3) {
+            if (vc.paused && !window.__mix01State.userPaused && vc.readyState >= 3) {
                 if (!videoEl.ended) vc.play().catch(() => {});
             }
 
@@ -368,8 +406,16 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
         if (this.elements.videoClone) {
             this.elements.videoClone.pause();
+            
+            if (this.elements.videoClone.srcObject) {
+                const stream = this.elements.videoClone.srcObject;
+                if (stream.getTracks) {
+                    stream.getTracks().forEach(track => track.stop());
+                }
+            }
             this.elements.videoClone.srcObject = null;
-            this.elements.videoClone.src = '';
+            this.elements.videoClone.removeAttribute('src'); 
+            this.elements.videoClone.load();
         }
 
         if (this.currentVideoEl && this.videoState.original) {
@@ -381,12 +427,32 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.currentVideoEl = null;
     }
 
-    updateLayout(activeMedia, rect, activeZoom, xP, yP, isSmallOptimized, customLensWidth, customLensHeight, isZoomManuallyChanged, currentHoveredSrc, _sw, _sh, panOffsetX, panOffsetY, mode, rotate, mirror) {
+    updateLayout(activeMedia, rect, activeZoom, xP, yP, isSmallOptimized, customLensWidth, customLensHeight, isZoomManuallyChanged, currentHoveredSrc, _sw, _sh, panOffsetX, panOffsetY, mode, rotate, mirror, incomingSessionId) {
+        if (incomingSessionId) {
+            this._lastActiveSessionId = incomingSessionId; 
+        }
+
         const sW = window.innerWidth, sH = window.innerHeight;
         const isVideo = activeMedia === this.elements.videoClone;
 
-        const nw = isVideo ? (this.videoState.lastNw || activeMedia.videoWidth || rect.width || 1) : (activeMedia.naturalWidth || rect.width || 1);
-        const nh = isVideo ? (this.videoState.lastNh || activeMedia.videoHeight || rect.height || 1) : (activeMedia.naturalHeight || rect.height || 1);
+        let nw = 1, nh = 1;
+        if (isVideo) {
+            nw = this.videoState.lastNw || activeMedia.videoWidth || rect.width || 1;
+            nh = this.videoState.lastNh || activeMedia.videoHeight || rect.height || 1;
+        } else {
+            const isSrcConsistent = currentHoveredSrc && (
+                activeMedia.src === currentHoveredSrc || 
+                this._activeBlobUrls.has(activeMedia.src)
+            );
+
+            if (activeMedia.complete && activeMedia.naturalWidth > 0 && isSrcConsistent) {
+                nw = activeMedia.naturalWidth;
+                nh = activeMedia.naturalHeight;
+            } else {
+                nw = rect.width || 1;
+                nh = rect.height || 1;
+            }
+        }
         
         this._syncNoticeVisibility();
         this.setClass(this.elements.viewer, this.cfg.state.isImmersive ? 'mode-immersive' : `mode-${mode}`);
@@ -426,6 +492,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
             vH = isRotated ? cDW : cDH;
 
             this.setStyles(activeMedia, { position: 'absolute', width: `${cDW}px`, height: `${cDH}px`, margin: '0px', left: '0px', top: '0px' });
+            if (!isVideo) {
+                this.setStyles(this.elements.imgBuffer, { position: 'absolute', width: `${cDW}px`, height: `${cDH}px`, margin: '0px', left: '0px', top: '0px' });
+            }
 
             let visualOffsetX = (sW - vW) / 2;
             let visualOffsetY = (sH - vH) / 2;
@@ -441,7 +510,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
             let offsetX = visualOffsetX + vW / 2 - cDW / 2;
             let offsetY = visualOffsetY + vH / 2 - cDH / 2;
 
-            this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`);
+            const matrixTransform = `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`;
+            this.setStyle(activeMedia, 'transform', matrixTransform);
+            if (!isVideo) this.setStyle(this.elements.imgBuffer, 'transform', matrixTransform);
         }
         else if (mode === 'partial') {
             this.setStyles(this.elements.viewer, { display: 'block', position: 'fixed', overflow: 'hidden', left: '0px', top: '0px' });
@@ -454,6 +525,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 vH = isRotated ? cDW : cDH;
 
                 this.setStyles(activeMedia, { width: cDW + 'px', height: cDH + 'px', position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
+                if (!isVideo) {
+                    this.setStyles(this.elements.imgBuffer, { width: cDW + 'px', height: cDH + 'px', position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
+                }
 
                 let lensW, lensH;
                 if (isSmallOptimized && customLensWidth && customLensHeight) {
@@ -495,7 +569,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 let offsetX = visualOffsetX + vW / 2 - cDW / 2;
                 let offsetY = visualOffsetY + vH / 2 - cDH / 2;
 
-                this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`);
+                const matrixTransform = `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`;
+                this.setStyle(activeMedia, 'transform', matrixTransform);
+                if (!isVideo) this.setStyle(this.elements.imgBuffer, 'transform', matrixTransform);
             }
         } else {
             this.setStyles(this.elements.viewer, {
@@ -504,6 +580,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
             });
             this._enforceTopLayer();
             this.setStyles(activeMedia, { position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
+            if (!isVideo) {
+                this.setStyles(this.elements.imgBuffer, { position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
+            }
 
             let tW = rect.width * activeZoom, tH = rect.height * activeZoom;
             cDW = tW; cDH = tH;
@@ -529,14 +608,19 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 
                 if (this.cfg.state.hasAgreed) {
                     this.setStyles(activeMedia, { width: `${cDW}px`, height: `${cDH}px` });
+                    if (!isVideo) this.setStyles(this.elements.imgBuffer, { width: `${cDW}px`, height: `${cDH}px` });
+
                     let offsetX = vW / 2 - cDW / 2;
                     let offsetY = vH / 2 - cDH / 2;
-                    this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`);
+                    const matrixTransform = `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`;
+                    this.setStyle(activeMedia, 'transform', matrixTransform);
+                    if (!isVideo) this.setStyle(this.elements.imgBuffer, 'transform', matrixTransform);
                 }
             } else {
                 const lensW = Math.min(vW, maxVW), lensH = Math.min(vH, maxVH);
                 this.setStyles(this.elements.viewer, { width: `${lensW}px`, height: `${lensH}px` });
                 this.setStyles(activeMedia, { width: `${cDW}px`, height: `${cDH}px` });
+                if (!isVideo) this.setStyles(this.elements.imgBuffer, { width: `${cDW}px`, height: `${cDH}px` });
 
                 let visualOffsetX = (vW > lensW) ? -(vW - lensW) * vxP : 0;
                 let visualOffsetY = (vH > lensH) ? -(vH - lensH) * vyP : 0;
@@ -544,7 +628,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 let offsetX = visualOffsetX + vW / 2 - cDW / 2;
                 let offsetY = visualOffsetY + vH / 2 - cDH / 2;
                 
-                this.setStyle(activeMedia, 'transform', `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`);
+                const matrixTransform = `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`;
+                this.setStyle(activeMedia, 'transform', matrixTransform);
+                if (!isVideo) this.setStyle(this.elements.imgBuffer, 'transform', matrixTransform);
             }
 
             let vX, vY;

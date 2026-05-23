@@ -1,0 +1,30 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Referer", "operation": "set", "value": "https://www.pixiv.net/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "||pximg.net",
+      "resourceTypes": ["xmlhttprequest", "image", "other", "sub_frame"]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Referer", "operation": "set", "value": "https://x.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "||twimg.com",
+      "resourceTypes": ["xmlhttprequest", "image", "media", "other", "sub_frame"]
+    }
+  }
+]

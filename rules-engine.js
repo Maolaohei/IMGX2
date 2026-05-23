@@ -1,43 +1,4 @@
 // rules-engine.js
-(function patchKeyboardGuard() {
-    const _origAdd = Document.prototype.addEventListener;
-    const _origRemove = Document.prototype.removeEventListener;
-    const _guardMap = new WeakMap();
-
-    function _isEditableTarget(tgt) {
-        if (!tgt) return false;
-        const tag = tgt.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-        if (tgt.isContentEditable) return true;
-        const role = tgt.getAttribute && tgt.getAttribute('role');
-        return role === 'textbox' || role === 'combobox' || role === 'searchbox' || role === 'spinbutton';
-    }
-
-    Document.prototype.addEventListener = function(type, handler, options) {
-        if ((type === 'keydown' || type === 'keyup') && typeof handler === 'function') {
-            if (_guardMap.has(handler)) {
-                return _origAdd.call(this, type, _guardMap.get(handler), options);
-            }
-            const guarded = function(e) {
-                if (_isEditableTarget(e.target)) return;
-                if ((e.ctrlKey || e.metaKey || e.altKey) && !e.shiftKey &&
-                    (e.key.length === 1 || e.key === ' ' || e.key === 'Spacebar')) return;
-                handler.call(this, e);
-            };
-            _guardMap.set(handler, guarded);
-            return _origAdd.call(this, type, guarded, options);
-        }
-        return _origAdd.call(this, type, handler, options);
-    };
-
-    Document.prototype.removeEventListener = function(type, handler, options) {
-        if ((type === 'keydown' || type === 'keyup') && _guardMap.has(handler)) {
-            return _origRemove.call(this, type, _guardMap.get(handler), options);
-        }
-        return _origRemove.call(this, type, handler, options);
-    };
-})();
-
 (function () {
     const LRUCache = {
         set: (mapName, key, value, maxSize = 30) => {
@@ -91,6 +52,109 @@
                 img.src = primarySrc;
             });
         }
+    };
+
+    const getTwitterVideoUrlDirectly = async (statusId) => {
+        const host = window.location.hostname;
+        const base_url = `https://${host}/i/api/graphql/2ICDjqPd81tulZcYrtpTuQ/TweetResultByRestId`;
+        
+        const variables = {
+            'tweetId': statusId,
+            'with_rux_injections': false,
+            'includePromotedContent': true,
+            'withCommunity': true,
+            'withQuickPromoteEligibilityTweetFields': true,
+            'withBirdwatchNotes': true,
+            'withVoice': true,
+            'withV2Timeline': true
+        };
+        const features = {
+            'articles_preview_enabled': true,
+            'c9s_tweet_anatomy_moderator_badge_enabled': true,
+            'communities_web_enable_tweet_community_results_fetch': false,
+            'creator_subscriptions_quote_tweet_preview_enabled': false,
+            'creator_subscriptions_tweet_preview_api_enabled': false,
+            'freedom_of_speech_not_reach_fetch_enabled': true,
+            'graphql_is_translatable_rweb_tweet_is_translatable_enabled': true,
+            'longform_notetweets_consumption_enabled': false,
+            'longform_notetweets_inline_media_enabled': true,
+            'longform_notetweets_rich_text_read_enabled': false,
+            'premium_content_api_read_enabled': false,
+            'profile_label_improvements_pcf_label_in_post_enabled': true,
+            'responsive_web_edit_tweet_api_enabled': false,
+            'responsive_web_enhance_cards_enabled': false,
+            'responsive_web_graphql_exclude_directive_enabled': false,
+            'responsive_web_graphql_skip_user_profile_image_extensions_enabled': false,
+            'responsive_web_graphql_timeline_navigation_enabled': false,
+            'responsive_web_grok_analysis_button_from_backend': false,
+            'responsive_web_grok_analyze_button_fetch_trends_enabled': false,
+            'responsive_web_grok_analyze_post_followups_enabled': false,
+            'responsive_web_grok_image_annotation_enabled': false,
+            'responsive_web_grok_share_attachment_enabled': false,
+            'responsive_web_grok_show_grok_translated_post': false,
+            'responsive_web_jetfuel_frame': false,
+            'responsive_web_media_download_video_enabled': false,
+            'responsive_web_twitter_article_tweet_consumption_enabled': true,
+            'rweb_tipjar_consumption_enabled': true,
+            'rweb_video_screen_enabled': false,
+            'standardized_nudges_misinfo': true,
+            'tweet_awards_web_tipping_enabled': false,
+            'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': true,
+            'tweetypie_unmention_optimization_enabled': false,
+            'verified_phone_label_enabled': false,
+            'view_counts_everywhere_api_enabled': true
+        };
+        const url = `${base_url}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}`;
+        
+        const cookies = {};
+        document.cookie.split(';').forEach(cookie => {
+            const parts = cookie.split('=');
+            if (parts.length === 2) {
+                cookies[parts[0].trim()] = parts[1].trim();
+            }
+        });
+        const csrfToken = cookies['ct0'] || '';
+
+        const headers = {
+            'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
+            'x-twitter-active-user': 'yes',
+            'x-csrf-token': csrfToken
+        };
+        if (csrfToken.length === 32 && cookies['gt']) {
+            headers['x-guest-token'] = cookies['gt'];
+        }
+
+        const response = await fetch(url, { headers });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        
+        const json = await response.json();
+        const tweetResult = json.data?.tweetResult?.result;
+        if (!tweetResult) return null;
+        const tweet = tweetResult.tweet || tweetResult;
+        
+        let legacy = tweet.legacy;
+        if (!legacy?.extended_entities?.media && tweet.quoted_status_result?.result?.legacy?.extended_entities?.media) {
+            legacy = tweet.quoted_status_result.result.legacy;
+        }
+        
+        const medias = legacy?.extended_entities?.media;
+        if (!medias || !Array.isArray(medias)) return null;
+
+        let maxBitrate = -1;
+        let videoUrl = null;
+        medias.forEach(media => {
+            if (media.type === 'video' || media.type === 'animated_gif') {
+                if (media.video_info && media.video_info.variants) {
+                    media.video_info.variants.forEach(v => {
+                        if (v.content_type === 'video/mp4' && (v.bitrate || 0) > maxBitrate) {
+                            maxBitrate = v.bitrate || 0;
+                            videoUrl = v.url;
+                        }
+                    });
+                }
+            }
+        });
+        return videoUrl;
     };
 
     const Mix01Configs = {
@@ -153,35 +217,49 @@
         '(?:(?:.+\\.)?twitter|x)\\.com': {
             srcMatching: [
                 { srcRegExp: '(\\w+\\.twimg\\.com/(?:(?:[^/]+/)?default_)?profile_images/.+)_\\w+(?=@IMG@)(@IMG@)', processor: '$1$2' },
-                { srcRegExp: '(\\w+\\.twimg\\.com/media/.+?)(?:@IMG@:\\w+)?(.+[?&]name=)[^&]+(.*)', processor: '$1$2orig$3' },
-                { srcRegExp: '(\\w+\\.twimg\\.com/.+\\?format=.*&name=).+', processor: '$1orig' },
+                { srcRegExp: '(\\w+\\.twimg\\.com/media/[^?#:]+)\\?format=([^&]+)&name=[^&]+(.*)', processor: '$1?format=$2&name=orig$3' },
+                { srcRegExp: '(\\w+\\.twimg\\.com/media/[^?#:]+)\\?name=[^&]+&format=([^&]+)(.*)', processor: '$1?format=$2&name=orig$3' },
+                { srcRegExp: '(\\w+\\.twimg\\.com/media/[^?#:]+)\\?format=([^&]+)(?!.*[&?]name=)(.*)', processor: '$1?format=$2&name=orig$3' },
+                { srcRegExp: '(\\w+\\.twimg\\.com/media/[^?#:]+)(@IMG@)(?::(?:large|medium|small|thumb))?$', processor: '$1$2:orig' },
                 {
                     selectors: 'video',
                     processor: async (trigger) => {
-                        let statusId = null;
-                        const urlMatch = window.location.pathname.match(/\/status\/(\d+)/);
-                        if (urlMatch) {
-                            statusId = urlMatch[1];
-                        } else {
-                            const statusLink = trigger.closest('article')?.querySelector('a[href*="/status/"]');
-                            if (statusLink) statusId = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
+                        // 🚀 核心改进：优先提取被永久绑定的 _mixStatusId，防止 React 虚拟重卷导致 article 丢失
+                        let statusId = trigger._mixStatusId;
+                        if (!statusId) {
+                            const urlMatch = window.location.pathname.match(/\/status\/(\d+)/);
+                            if (urlMatch) {
+                                statusId = urlMatch[1];
+                            } else {
+                                const statusLink = trigger.closest('article')?.querySelector('a[href*="/status/"]');
+                                if (statusLink) statusId = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
+                            }
                         }
-                        if (!statusId) return trigger.src;
+                        if (!statusId) return trigger.src || '';
 
                         const cachedUrl = LRUCache.get('__mix01TwVideoCache', statusId);
                         if (cachedUrl) return cachedUrl;
 
-                        // 🚀 P2: 彻底脱离 Content Script 读取 Cookie 暴露风险，改由 background 代理
+                        try {
+                            const directUrl = await getTwitterVideoUrlDirectly(statusId);
+                            if (directUrl) {
+                                LRUCache.set('__mix01TwVideoCache', statusId, directUrl, 30);
+                                return directUrl;
+                            }
+                        } catch (directErr) {
+                            console.warn("Mix01 同源解析视频失败，准备启动后台代理备份通道:", directErr);
+                        }
+
                         try {
                             const response = await new Promise(resolve => {
                                 chrome.runtime.sendMessage({ action: "fetchTwitterGraphQL", statusId: statusId }, resolve);
                             });
 
-                            if (!response || !response.success || !response.data) return trigger.src;
+                            if (!response || !response.success || !response.data) return trigger.src || '';
 
                             const json = response.data;
                             const tweetResult = json.data?.tweetResult?.result;
-                            if (!tweetResult) return trigger.src;
+                            if (!tweetResult) return trigger.src || '';
                             const tweet = tweetResult.tweet || tweetResult;
                             
                             let legacy = tweet.legacy;
@@ -190,7 +268,7 @@
                             }
                             
                             const medias = legacy?.extended_entities?.media;
-                            if (!medias || !Array.isArray(medias)) return trigger.src;
+                            if (!medias || !Array.isArray(medias)) return trigger.src || '';
 
                             let maxBitrate = -1;
                             let videoUrl = null;
@@ -207,10 +285,12 @@
                                 }
                             });
                             
-                            const finalUrl = videoUrl || trigger.src;
-                            LRUCache.set('__mix01TwVideoCache', statusId, finalUrl, 30);
+                            const finalUrl = videoUrl || trigger.src || '';
+                            if (finalUrl) {
+                                LRUCache.set('__mix01TwVideoCache', statusId, finalUrl, 30);
+                            }
                             return finalUrl;
-                        } catch (e) { return trigger.src; }
+                        } catch (e) { return trigger.src || ''; }
                     }
                 }
             ]
@@ -247,7 +327,7 @@
                 }
             ]
         },
-        '(?:www|shop)\\.deviantart\\.com': {
+        'www\\.deviantart\\.com': {
             srcMatching: [
                 { srcRegExp: '(//a\\.deviantart\\.net/avatars-)(?:\\w+)?(/.+@IMG@).*', processor: '$1big$2' }
             ]
@@ -527,7 +607,11 @@
         configs: Mix01Configs,
 
         async getHighResUrl(triggerElement, originalSrc) {
-            if (!originalSrc || originalSrc.startsWith('data:')) return originalSrc;
+            const src = originalSrc || '';
+            // 🚀 核心改进：若 originalSrc 为空但传入了 triggerElement (如 <video>)，允许通过选择器规则向下匹配
+            if ((!src && !triggerElement) || (src && src.startsWith('data:'))) {
+                return src;
+            }
 
             const host = window.location.hostname;
 
@@ -562,23 +646,23 @@
                     srcRegExpObj = regexCacheSrcMatch[rule.srcRegExp];
                 }
 
-                if (srcRegExpObj && !srcRegExpObj.test(originalSrc)) continue;
+                if (srcRegExpObj && !srcRegExpObj.test(src)) continue;
 
                 if (rule.processor !== undefined) {
                     if (typeof rule.processor === 'function') {
-                        const result = await rule.processor(triggerElement, originalSrc, srcRegExpObj);
+                        const result = await rule.processor(triggerElement, src, srcRegExpObj);
                         if (result) return result;
                     } else if (typeof rule.processor === 'string' && srcRegExpObj) {
-                        const replaced = originalSrc.replace(srcRegExpObj, rule.processor);
-                        if (replaced !== originalSrc || rule.processor === '') return replaced;
+                        const replaced = src.replace(srcRegExpObj, rule.processor);
+                        if (replaced !== src || rule.processor === '') return replaced;
                     }
                 } else if (srcRegExpObj) {
-                    const m = srcRegExpObj.exec(originalSrc);
+                    const m = srcRegExpObj.exec(src);
                     if (m) return m[0];
                 }
             }
 
-            return originalSrc;
+            return src;
         }
     };
 })();

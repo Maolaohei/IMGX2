@@ -45,9 +45,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const initCurrentTabHost = () => {
         return new Promise((resolve) => {
             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-                try { cachedCurrentTabHostname = new URL(tabs[0]?.url || '').hostname; } catch (e) { cachedCurrentTabHostname = ''; }
+                try { 
+                    const url = new URL(tabs[0]?.url || '');
+                    // 🚀 过滤掉扩展程序自身的控制台页面协议，防止误判
+                    if (url.protocol === 'chrome-extension:') {
+                        cachedCurrentTabHostname = '';
+                    } else {
+                        cachedCurrentTabHostname = url.hostname; 
+                    }
+                } catch (e) { 
+                    cachedCurrentTabHostname = ''; 
+                }
                 if (elements.currentSiteHostname) {
-                    elements.currentSiteHostname.textContent = cachedCurrentTabHostname || '（无法获取当前页面）';
+                    elements.currentSiteHostname.textContent = cachedCurrentTabHostname || '（控制台配置页，不支持配置禁用）';
                 }
                 resolve(cachedCurrentTabHostname);
             });
@@ -56,7 +66,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const refreshCurrentSiteUI = () => {
         const host = cachedCurrentTabHostname;
-        if (!host) return;
+        if (!host) {
+            if (elements.currentSiteBadge) {
+                elements.currentSiteBadge.textContent = '● 系统页面';
+                elements.currentSiteBadge.className = 'site-status-badge disabled';
+            }
+            if (elements.siteToggleBtn) {
+                elements.siteToggleBtn.textContent = '🚫 系统内页不可禁用';
+                elements.siteToggleBtn.className = 'site-toggle-btn disabled';
+                elements.siteToggleBtn.onclick = null;
+            }
+            return;
+        }
         const isEnabled = !disabledSites[host];
         if (elements.currentSiteBadge) {
             elements.currentSiteBadge.textContent = isEnabled ? '● 已启用' : '● 已禁用';
@@ -118,6 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         return [h, s, l];
     };
+
     const hslToRgb = (h, s, l) => {
         let r, g, b;
         if (s === 0) { r = g = b = l; }
@@ -135,6 +157,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
     };
+
     const extractAndInjectDominantColor = (imgSrc, fontTheme) => {
         const fallbackColor = fontTheme === 'light' ? '#0056b3' : '#1da1f2';
         const applyColor = (hex) => {
@@ -323,6 +346,21 @@ document.addEventListener('DOMContentLoaded', () => {
         `).join('');
     };
 
+    if (elements.manualSiteAddBtn && elements.manualSiteInput) {
+        elements.manualSiteAddBtn.onclick = () => {
+            const val = elements.manualSiteInput.value.trim().toLowerCase();
+            if (!val) return;
+            if (val.includes('.') && !disabledSites[val]) {
+                disabledSites[val] = true;
+                chrome.storage.local.set({ disabledSites }, () => {
+                    elements.manualSiteInput.value = '';
+                    renderDisabledSites();
+                    refreshCurrentSiteUI();
+                });
+            }
+        };
+    }
+
     async function initAll() {
         await initCurrentTabHost(); 
 
@@ -350,7 +388,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 ids.forEach(id => {
                     const val = res[id] !== undefined ? res[id] : defaultConfigs[id];
-                    // 🚀 对齐映射转换，消灭字符串灾难
                     const targetId = id === 'zoom' ? 'zoomLevel' : id;
                     const inputEl = document.getElementById(targetId);
                     if (!inputEl) return;
