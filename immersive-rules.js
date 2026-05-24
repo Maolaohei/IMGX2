@@ -31,7 +31,7 @@
                     
                     const article = media.closest('article');
                     if (article) {
-                        // 🚀 性能飞跃：采用 DOM 专属 Dataset 标志阻断，彻底干掉重卷时的重复文本匹配开销
+                        // 🚀 性能优化：采用 Dataset 专属状态阻断，避免重绘扫描时的文本重复匹配开销
                         if (article.dataset.mixAdStatus === 'ad') continue;
                         if (article.dataset.mixAdStatus === 'clean') {
                             validMedia.push(media);
@@ -56,7 +56,7 @@
                 return validMedia;
             },
             getStates: (container) => {
-                const likeBtn = container.querySelector('[data-testid="unlike"]');
+                const likeBtn = container.querySelector('[data-testid="unlike"]') || container.querySelector('[aria-label*="已喜欢"]') || container.querySelector('[aria-label*="Unlike"]');
                 let author = "", userNameEl = container.querySelector('[data-testid="User-Name"]');
                 if (userNameEl) { const match = userNameEl.textContent.match(/@[\w_]+/); if (match) author = match[0]; }
                 let isFollowed = null, profileScope = document.querySelector('[data-testid="primaryColumn"]');
@@ -68,7 +68,8 @@
                 return { isLiked: !!likeBtn, isFollowed: isFollowed, authorName: author };
             },
             like: async (container) => {
-                const btnLike = container.querySelector('[data-testid="like"]'), btnUnlike = container.querySelector('[data-testid="unlike"]');
+                const btnLike = container.querySelector('[data-testid="like"]') || container.querySelector('[aria-label*="喜欢"]') || container.querySelector('[aria-label*="Like"]');
+                const btnUnlike = container.querySelector('[data-testid="unlike"]') || container.querySelector('[aria-label*="已喜欢"]') || container.querySelector('[aria-label*="Unlike"]');
                 if (btnUnlike) { tools.forceClick(btnUnlike); return false; }
                 if (btnLike) { tools.forceClick(btnLike); return true; }
                 return null;
@@ -84,12 +85,12 @@
                 // 1. 个人主页场景
                 const profileScope = document.querySelector('[data-testid="primaryColumn"]');
                 if (profileScope) {
-                    const btnUnfollow = profileScope.querySelector('[data-testid$="-unfollow"]');
-                    const btnFollow = profileScope.querySelector('[data-testid$="-follow"]');
+                    const btnUnfollow = profileScope.querySelector('[data-testid$="-unfollow"]') || profileScope.querySelector('[aria-label*="正在关注"]');
+                    const btnFollow = profileScope.querySelector('[data-testid$="-follow"]') || profileScope.querySelector('[aria-label*="关注"]');
                     if (btnUnfollow) {
                         tools.forceClick(btnUnfollow);
                         await new Promise(r => setTimeout(r, 150));
-                        const confirm = document.querySelector('[data-testid="confirmationSheetConfirm"]');
+                        const confirm = document.querySelector('[data-testid="confirmationSheetConfirm"]') || document.querySelector('[role="dialog"] button');
                         if (confirm) tools.forceClick(confirm);
                         if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = false;
                         return false;
@@ -101,21 +102,21 @@
                 }
 
                 // 2. 信息流场景：优先寻找推文上直接暴露的“关注”按钮
-                const directFollowBtn = container.querySelector('button[data-testid$="-follow"]');
+                const directFollowBtn = container.querySelector('button[data-testid$="-follow"]') || container.querySelector('button[aria-label*="关注"]');
                 if (directFollowBtn) {
                     tools.forceClick(directFollowBtn);
                     if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = true;
                     return true;
                 }
 
-                // 3. 弹性容错逻辑：寻找右上角“三个点”下拉按钮
-                let caret = container.querySelector('[data-testid="caret"]');
+                // 3. 🚀 容错抗老化改进：寻找右上角“三个点”下拉按钮。
+                // 引入 SVG 矢量特征兜底定位（X/Twitter 箭头常含有 M3.593 或 M12 14c 特征），抵抗官方 Class 名和 testid 的混淆变动 [1]
+                let caret = container.querySelector('[data-testid="caret"]') || container.querySelector('[aria-label*="更多"]');
                 if (!caret) {
-                    // 🚀 核心改进：当原生 ID 失效时，通过 SVG 内部下拉箭头 Path 矢量特征定位按钮
                     const potentialCarets = container.querySelectorAll('button, [role="button"]');
                     for (const btn of potentialCarets) {
                         const svg = btn.querySelector('svg');
-                        if (svg && (svg.innerHTML.includes('M3.593 12') || svg.innerHTML.includes('M12 14c'))) {
+                        if (svg && (svg.innerHTML.includes('M3.593 12') || svg.innerHTML.includes('M12 14c') || svg.innerHTML.includes('M12 8c1.1'))) {
                             caret = btn;
                             break;
                         }
@@ -125,7 +126,7 @@
 
                 tools.forceClick(caret);
 
-                // 轮询等待下拉菜单渲染完成（最多等待 600ms）
+                // 动态轮询等待下拉菜单渲染完成（最多等待 600ms）
                 let menu = null;
                 for (let i = 0; i < 12; i++) {
                     await new Promise(r => setTimeout(r, 50));
@@ -141,7 +142,7 @@
                     return null;
                 }
 
-                // 🚀 核心改进：针对多国语言（EN/ZH/JP 等）和无标 TestID 的菜单进行弹性文本匹配
+                // 多国语言弹性匹配
                 const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
                 let targetBtn = null, willFollow = true;
                 for (let item of items) {
@@ -164,7 +165,7 @@
 
                 tools.forceClick(targetBtn);
 
-                // 4. 处理“取消关注”时的二次确认弹窗
+                // 二次确认弹窗处理
                 if (!willFollow) {
                     await new Promise(r => setTimeout(r, 200));
                     const confirmBtn = document.querySelector('[data-testid="confirmationSheetConfirm"]');
@@ -174,7 +175,7 @@
                         const dialog = document.querySelector('[role="dialog"], [data-testid="mask"]');
                         if (dialog) {
                             const btns = Array.from(dialog.querySelectorAll('[role="button"]'));
-                            const confirmTarget = btns.find(b => /Unfollow|取消关注|确认/i.test(b.textContent));
+                            const confirmTarget = btns.find(b => /Unfollow|取消关注|确认|フォロ/i.test(b.textContent));
                             if (confirmTarget) tools.forceClick(confirmTarget);
                         }
                     }
@@ -199,8 +200,7 @@
         '(?:.+\\.)?pixiv\\.net': {
             getContainer: (media) => document.body,
 
-            // 【性能优化】illustId → userId 的 API 查询结果缓存，避免同一张图触发 getStates+like+follow
-            // 三次独立 fetch，改为最多查一次。键：illustId，值：userId
+            // 🚀 性能重构：本地 UserId 查询结果缓存，避免同一作品触发 getStates+like+follow 时的重复异步网络开销
             _userIdCache: Object.create(null),
 
             _getPixivContext: async (media) => {
@@ -252,7 +252,6 @@
                 const self = Mix01ImmersiveRules['(?:.+\\.)?pixiv\\.net'];
 
                 if (illustId && !userId) {
-                    // 【Bug修复】原版无缓存，getStates/like/follow 各自独立 fetch 同一个 illustId
                     if (self._userIdCache[illustId]) {
                         userId = self._userIdCache[illustId];
                     } else {
@@ -417,19 +416,16 @@
                 if (!ctx.illustId) return null;
                 try {
                     const res = await fetch(`/ajax/illust/${ctx.illustId}/pages`).then(r => r.json());
-                    // 修复：使用匹配到的 ctx.pageIndex 获取准确的图片，而不是永远取 [0]
+                    // 🚀 核心改进：在下载时精准定位 ctx.pageIndex 以获取准确的多图原图，不写死 [0]
                     if (res && !res.error && res.body && res.body.length > ctx.pageIndex) {
                         return res.body[ctx.pageIndex].urls.original;
                     } else if (res && !res.error && res.body && res.body.length > 0) {
-                        return res.body[0].urls.original; // 兜底返回第一张
+                        return res.body[0].urls.original; 
                     }
                 } catch (e) { }
                 return null;
             }
         },
-        // ==========================================
-        // 全局兜底规则：针对未适配页面的沉浸模式
-        // ==========================================
         '.*': {
             isFallback: true,
             getContainer: (media) => media.parentElement || document.body,
@@ -447,7 +443,6 @@
                     const rect = media.getBoundingClientRect();
                     if (rect.top < topBound || rect.bottom > bottomBound) continue;
 
-                    // 【优化 1】：完全剔除 getComputedStyle
                     if (rect.width > 80 && rect.height > 80) {
                         validMedia.push(media);
                     }

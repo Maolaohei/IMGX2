@@ -10,8 +10,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.immersiveState = { lastMedia: null, lastSrc: null, lastHudSignature: null };
         this._hdUrlCache = new Map();
         this._activeBlobUrls = new Set();
-        this._lastActiveSessionId = 0; 
         this._currentBlob = null; 
+        this.controller = null; // 🚀 核心改进 5：建立对等双向绑定，彻底淘汰自身的会话 ID 跟踪，杜绝漂移风险
+        this._ctxCallbacks = null; // 用于右键上下文菜单事件委托的回调登记
 
         this.initDOM();
         this.setupMessageListener();
@@ -59,12 +60,25 @@ window.Mix01MediaRenderer = class MediaRenderer {
             <div class="ctx-item ctx-item-danger" data-action="disable-site">🚫 在此网站禁用引擎</div>
             <div class="ctx-item" data-action="close">✕ 关闭预览</div>
         `;
+        
+        // 🚀 核心改进 7：全周期仅在此绑定一次 click 事件委托，防止反复 bind 引起总线摩擦和 MutationObserver 震荡
+        this.elements.ctxMenu.addEventListener('click', (e) => {
+            const item = e.target.closest('.ctx-item[data-action]');
+            if (!item) return;
+            e.stopPropagation();
+            const action = item.dataset.action;
+            if (this._ctxCallbacks && this._ctxCallbacks[action]) {
+                this._ctxCallbacks[action]();
+            }
+            this.hideContextMenu();
+        });
 
         this.elements.counter = create('div', 'mix01-gallery-counter');
 
         const styleBlock = document.createElement('style');
         styleBlock.textContent = `
-            #img-zoom-pro-viewer-xyz { z-index: 2147483647 !important; will-change: transform; }
+            /* 🚀 核心改进 3：去除静态 will-change 样式声明，与 content.css 控制逻辑完全对齐 */
+            #img-zoom-pro-viewer-xyz { z-index: 2147483647 !important; }
             #img-zoom-pro-viewer-xyz.mode-immersive {
                 transform: none !important;
                 left: 0 !important;
@@ -73,11 +87,16 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 height: 100vh !important;
             }
             #zoom-img-xyz, #zoom-img-buffer-xyz, #zoom-video-xyz {
-                will-change: transform, opacity !important;
                 color: transparent !important; 
                 position: absolute !important;
                 left: 0;
                 top: 0;
+            }
+            /* 🚀 核心改进 3：仅在 viewer 节点被追加 is-active 类（处于活跃工作状态）时启用合成层，杜绝显存长期溢出 */
+            #img-zoom-pro-viewer-xyz.is-active #zoom-img-xyz,
+            #img-zoom-pro-viewer-xyz.is-active #zoom-img-buffer-xyz,
+            #img-zoom-pro-viewer-xyz.is-active #zoom-video-xyz {
+                will-change: transform, opacity !important;
             }
             #zoom-img-xyz {
                 z-index: 2 !important;
@@ -143,7 +162,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     renderHDImage(blob, hdUrl, targetSessionId) {
-        if (targetSessionId && targetSessionId !== this._lastActiveSessionId) {
+        // 🚀 核心改进 5：彻底淘汰隔离的 _lastActiveSessionId。渲染大图前，直接读取控制器唯一的 renderRequestId 会话状态锁
+        const currentSessionId = this.controller ? this.controller.state.renderRequestId : 0;
+        if (targetSessionId && targetSessionId !== currentSessionId) {
             return;
         }
 
@@ -163,7 +184,8 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.elements.img.src = newBlobUrl;
 
         this.elements.img.decode().then(() => {
-            if (targetSessionId && targetSessionId !== this._lastActiveSessionId) return;
+            const activeId = this.controller ? this.controller.state.renderRequestId : 0;
+            if (targetSessionId && targetSessionId !== activeId) return;
             this.elements.img.classList.remove('mix01-hd-buffering');
             this.setStyle(this.elements.img, 'opacity', '1');
             this.setStyle(this.elements.imgBuffer, 'opacity', '0');
@@ -174,7 +196,8 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 }
             }, 150);
         }).catch(() => {
-            if (targetSessionId && targetSessionId !== this._lastActiveSessionId) return;
+            const activeId = this.controller ? this.controller.state.renderRequestId : 0;
+            if (targetSessionId && targetSessionId !== activeId) return;
             this.elements.img.classList.remove('mix01-hd-buffering');
             this.setStyle(this.elements.img, 'opacity', '1');
             this.setStyle(this.elements.imgBuffer, 'opacity', '0');
@@ -315,7 +338,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.setStyles(this.elements.viewer, { display: 'none', cursor: 'default', 'pointer-events': 'none' });
         this.setStyles(this.elements.img,    { display: 'none', cursor: 'default' });
         
-        // 🚀 核心改进 1：隐藏时将大图 src 设为空。彻底切断上一张图片的尺寸数据残留，确保下一次排版正确
         this.elements.img.src = '';
 
         this.setStyles(this.elements.imgBuffer, { display: 'none', opacity: '0' });
@@ -329,122 +351,116 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.clearBlobCache();
         if (this.elements.counter) this.elements.counter.style.setProperty('display', 'none', 'important');
 
+        // 🚀 核心改进 3：隐藏面板时重置清空样式类（解除 is-active 类），强制释放合成层 GPU 合成显存
+        this.setClass(this.elements.viewer, '');
+
         clearTimeout(this.hudState.cursorTimer);
         clearTimeout(this.hudState.hintTimer);
         this.hdState.isLoading = false;
         this.stopVideoRender();
     }
 
-    // Basic/MediaRenderer.js
-// 修改后的 startVideoRender 核心函数
-startVideoRender(videoEl) {
-    this.videoState.isRunning = true;
-    this.videoState.original = { paused: videoEl.paused, muted: videoEl.muted };
-    this.videoState.lastNw = 0;
-    this.videoState.lastNh = 0;
-    this.currentVideoEl = videoEl;
-    this._lastProgressPct = null;
+    startVideoRender(videoEl) {
+        this.videoState.isRunning = true;
+        this.videoState.original = { paused: videoEl.paused, muted: videoEl.muted };
+        this.videoState.lastNw = 0;
+        this.videoState.lastNh = 0;
+        this.currentVideoEl = videoEl;
+        this._lastProgressPct = null;
 
-    this.setStyles(this.elements.img,              { display: 'none' });
-    this.setStyles(this.elements.videoClone,       { display: 'block' });
-    this.setStyles(this.elements.progressContainer,{ display: 'block' });
+        this.setStyles(this.elements.img,              { display: 'none' });
+        this.setStyles(this.elements.videoClone,       { display: 'block' });
+        this.setStyles(this.elements.progressContainer,{ display: 'block' });
 
-    // 🚀 核心改进 1：静音网页中的原始视频节点，防止沉浸播放时产生令人烦躁的双重回音
-    videoEl.muted = true;
+        videoEl.muted = true;
 
-    const vc = this.elements.videoClone;
-    
-    // 🚀 核心改进 2：默认恢复声音，确保默认播放有声视频
-    vc.muted = false;
-    vc.volume = 1.0;
-    
-    try {
-        if (videoEl.captureStream) {
-            const stream = videoEl.captureStream();
-            if (stream.active) vc.srcObject = stream;
-            else throw new Error("Stream inactive");
-        } else if (videoEl.mozCaptureStream) {
-            vc.srcObject = videoEl.mozCaptureStream();
-        } else {
-            throw new Error("No captureStream");
-        }
-    } catch (e) {
-        vc.srcObject = null;
-        if (vc.src !== videoEl.src) {
-            vc.src = videoEl.src;
-            vc.currentTime = videoEl.currentTime;
-        }
-    }
-
-    // 🚀 核心改进 3：双视频源统一启动器
-    const launchPlayback = () => {
-        if (window.__mix01State.userPaused || !this.videoState.isRunning) return;
+        const vc = this.elements.videoClone;
         
-        // 1. 率先启动原始视频，确保音视频流媒体管道源源不断输出数据
-        videoEl.play().catch(() => {});
-
-        // 2. 启动展示给用户的克隆视频。若因为未交互被浏览器拦截有声自动播放，自动优雅降级为静音自动播放，确保 100% 自动播放成功
-        vc.play().catch((err) => {
-            if (err.name === 'NotAllowedError') {
-                console.warn("Mix01: 有声自动播放受阻，降级为静音自动播放机制以确保画面不静止");
-                vc.muted = true;
-                vc.play().catch(() => {});
+        vc.muted = false;
+        vc.volume = 1.0;
+        
+        try {
+            if (videoEl.captureStream) {
+                const stream = videoEl.captureStream();
+                if (stream.active) vc.srcObject = stream;
+                else throw new Error("Stream inactive");
+            } else if (videoEl.mozCaptureStream) {
+                vc.srcObject = videoEl.mozCaptureStream();
+            } else {
+                throw new Error("No captureStream");
             }
-        });
-    };
+        } catch (e) {
+            vc.srcObject = null;
+            if (vc.src !== videoEl.src) {
+                vc.src = videoEl.src;
+                vc.currentTime = videoEl.currentTime;
+            }
+        }
 
-    if (videoEl.readyState < 2) {
-        this.setStyle(this.elements.spinner, 'display', 'block');
-        
-        const onCanPlay = () => {
+        const launchPlayback = () => {
+            if (window.__mix01State.userPaused || !this.videoState.isRunning) return;
+            
+            videoEl.play().catch(() => {});
+
+            vc.play().catch((err) => {
+                if (err.name === 'NotAllowedError') {
+                    console.warn("Mix01: 有声自动播放受阻，降级为静音自动播放机制以确保画面不静止");
+                    vc.muted = true;
+                    vc.play().catch(() => {});
+                }
+            });
+        };
+
+        if (videoEl.readyState < 2) {
+            this.setStyle(this.elements.spinner, 'display', 'block');
+            
+            const onCanPlay = () => {
+                this.setStyle(this.elements.spinner, 'display', 'none');
+                launchPlayback();
+            };
+            videoEl.addEventListener('canplay', onCanPlay, { once: true });
+            videoEl.addEventListener('loadeddata', onCanPlay, { once: true });
+        } else {
             this.setStyle(this.elements.spinner, 'display', 'none');
             launchPlayback();
+        }
+
+        const updateFrame = () => {
+            if (!this.videoState.isRunning) return;
+
+            if (vc.srcObject && !vc.srcObject.active && !videoEl.ended) {
+                try { vc.srcObject = videoEl.captureStream(); } catch(e){}
+            }
+
+            if (!window.__mix01State.userPaused && !videoEl.ended) {
+                if (videoEl.paused && videoEl.readyState >= 1) {
+                    videoEl.play().catch(() => {});
+                }
+                if (vc.paused && vc.readyState >= 1) {
+                    vc.play().catch(() => {});
+                }
+            }
+
+            if (videoEl.duration > 0) {
+                const pct = ((videoEl.currentTime / videoEl.duration) * 100).toFixed(2) + '%';
+                if (pct !== this._lastProgressPct) {
+                    this.elements.progressBar.style.setProperty('width', pct, 'important');
+                    this._lastProgressPct = pct;
+                }
+            }
+
+            if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+                this.videoState.lastNw = videoEl.videoWidth;
+                this.videoState.lastNh = videoEl.videoHeight;
+            }
+
+            if (videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
+            else requestAnimationFrame(updateFrame);
         };
-        // 绑定多重就绪状态监听，确保在第一帧数据就位时即刻点火播放
-        videoEl.addEventListener('canplay', onCanPlay, { once: true });
-        videoEl.addEventListener('loadeddata', onCanPlay, { once: true });
-    } else {
-        this.setStyle(this.elements.spinner, 'display', 'none');
-        launchPlayback();
-    }
-
-    const updateFrame = () => {
-        if (!this.videoState.isRunning) return;
-
-        if (vc.srcObject && !vc.srcObject.active && !videoEl.ended) {
-            try { vc.srcObject = videoEl.captureStream(); } catch(e){}
-        }
-
-        // 🚀 核心改进 4：降低守护门槛。只要就绪状态 >= 1 且未手动暂停，持续进行双节点状态对齐
-        if (!window.__mix01State.userPaused && !videoEl.ended) {
-            if (videoEl.paused && videoEl.readyState >= 1) {
-                videoEl.play().catch(() => {});
-            }
-            if (vc.paused && vc.readyState >= 1) {
-                vc.play().catch(() => {});
-            }
-        }
-
-        if (videoEl.duration > 0) {
-            const pct = ((videoEl.currentTime / videoEl.duration) * 100).toFixed(2) + '%';
-            if (pct !== this._lastProgressPct) {
-                this.elements.progressBar.style.setProperty('width', pct, 'important');
-                this._lastProgressPct = pct;
-            }
-        }
-
-        if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
-            this.videoState.lastNw = videoEl.videoWidth;
-            this.videoState.lastNh = videoEl.videoHeight;
-        }
 
         if (videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
         else requestAnimationFrame(updateFrame);
-    };
-
-    if (videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
-    else requestAnimationFrame(updateFrame);
-}
+    }
 
     stopVideoRender() {
         this.videoState.isRunning = false;
@@ -474,8 +490,10 @@ startVideoRender(videoEl) {
     }
 
     updateLayout(activeMedia, rect, activeZoom, xP, yP, isSmallOptimized, customLensWidth, customLensHeight, isZoomManuallyChanged, currentHoveredSrc, _sw, _sh, panOffsetX, panOffsetY, mode, rotate, mirror, incomingSessionId) {
-        if (incomingSessionId) {
-            this._lastActiveSessionId = incomingSessionId; 
+        // 🚀 核心改进 5：以对等控制器的核心 renderRequestId 进行 Session 校验，彻底废弃内部自理的 _lastActiveSessionId
+        const activeRequestId = this.controller ? this.controller.state.renderRequestId : 0;
+        if (incomingSessionId && incomingSessionId !== activeRequestId) {
+            return activeZoom; 
         }
 
         const sW = window.innerWidth, sH = window.innerHeight;
@@ -486,9 +504,6 @@ startVideoRender(videoEl) {
             nw = this.videoState.lastNw || activeMedia.videoWidth || rect.width || 1;
             nh = this.videoState.lastNh || activeMedia.videoHeight || rect.height || 1;
         } else {
-            // 🚀 核心改进 2：无条件信任已加载大图的物理尺寸。
-            // 彻底废弃在切换缓存的高清原图时必定会判定失败并导致画面扭曲的 isSrcConsistent 逻辑。
-            // 仅当大图尚未开始下载（naturalWidth === 0）时，才暂时采用缩略图边界比例作为占位。
             if (activeMedia.complete && activeMedia.naturalWidth > 0) {
                 nw = activeMedia.naturalWidth;
                 nh = activeMedia.naturalHeight;
@@ -499,7 +514,10 @@ startVideoRender(videoEl) {
         }
         
         this._syncNoticeVisibility();
-        this.setClass(this.elements.viewer, this.cfg.state.isImmersive ? 'mode-immersive' : `mode-${mode}`);
+
+        // 🚀 核心改进 3：追加 .is-active 类。使得 content.css 中设计的 will-change 在查看时启动，在关闭时卸载
+        const modeClass = this.cfg.state.isImmersive ? 'mode-immersive' : `mode-${mode}`;
+        this.setClass(this.elements.viewer, `${modeClass} is-active`);
 
         const isRotated = rotate % 180 !== 0;
         let cDW = 0, cDH = 0; 
@@ -706,31 +724,21 @@ startVideoRender(videoEl) {
             disableItem.textContent = isEnabled ? '🚫 在此网站禁用引擎' : '✅ 在此网站启用引擎';
         }
 
-        const newMenu = menu.cloneNode(true);
-        menu.parentNode.replaceChild(newMenu, menu);
-        this.elements.ctxMenu = newMenu;
+        // 🚀 核心改进 7：上下文事件路由。全周期仅使用一次绑定。
+        this._ctxCallbacks = callbacks;
 
-        newMenu.querySelectorAll('.ctx-item[data-action]').forEach(item => {
-            item.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const action = item.dataset.action;
-                if (callbacks[action]) callbacks[action]();
-                this.hideContextMenu();
-            });
-        });
-
-        newMenu.style.setProperty('display', 'block', 'important');
-        const mW = newMenu.offsetWidth, mH = newMenu.offsetHeight;
+        menu.style.setProperty('display', 'block', 'important');
+        const mW = menu.offsetWidth, mH = menu.offsetHeight;
         const vW = window.innerWidth, vH = window.innerHeight;
         const finalX = (x + mW > vW) ? Math.max(0, x - mW) : x;
         const finalY = (y + mH > vH) ? Math.max(0, y - mH) : y;
-        newMenu.style.setProperty('left', `${finalX}px`, 'important');
-        newMenu.style.setProperty('top',  `${finalY}px`, 'important');
-        newMenu.style.setProperty('opacity', '0', 'important');
-        requestAnimationFrame(() => newMenu.style.setProperty('opacity', '1', 'important'));
+        menu.style.setProperty('left', `${finalX}px`, 'important');
+        menu.style.setProperty('top',  `${finalY}px`, 'important');
+        menu.style.setProperty('opacity', '0', 'important');
+        requestAnimationFrame(() => menu.style.setProperty('opacity', '1', 'important'));
 
         this._ctxOutsideHandler = (e) => {
-            if (!newMenu.contains(e.target)) this.hideContextMenu();
+            if (!menu.contains(e.target)) this.hideContextMenu();
         };
         setTimeout(() => document.addEventListener('mousedown', this._ctxOutsideHandler, { once: true }), 10);
     }
@@ -758,6 +766,8 @@ startVideoRender(videoEl) {
     async handleImmersiveActivity(currentMedia, currentSrc, keys) {
         if (!this.cfg.state.isImmersive || this.elements.viewer.style.display !== 'block') return;
 
+        this._pendingHudSrc = currentSrc;
+
         const adapter = window.Mix01Utils.getImmersiveAdapter();
         let likeText = '喜欢', likeIcon = '🤍', likeColor = '#dddddd';
         let followText = '关注', followIcon = '👤', followColor = '#dddddd';
@@ -771,6 +781,10 @@ startVideoRender(videoEl) {
                 const container = adapter.getContainer ? adapter.getContainer(currentMedia) : document.body;
                 const states = await adapter.getStates(container, currentMedia);
 
+                // 🚀 核心改进 6：解决异步切换导致的 HUD 数据漂移。
+                // 在 await 结束后验证当前 URL，如果用户在此期间切换了图片，则立即丢弃失效响应。
+                if (this._pendingHudSrc !== currentSrc) return;
+
                 if (states) {
                     if (states.isLiked)    { likeText = '已喜欢'; likeIcon = '❤️'; likeColor = '#FF4060'; }
                     if (states.isFollowed) { followText = '已关注'; followIcon = '✓'; followColor = '#1da1f2'; }
@@ -779,10 +793,11 @@ startVideoRender(videoEl) {
             }
         }
 
-        const keyMode     = (keys.keyMode          || 'V').toUpperCase();
-        const keyDownload = (keys.keyDownloadVideo  || 'D').toUpperCase();
-        const keyLike     = (keys.keyLike           || 'L').toUpperCase();
-        const keyFollow   = (keys.keyFollow         || 'F').toUpperCase();
+        // 🚀 核心改进 1：防守性降级。兼容 Config 对象的长格式与短格式键名属性
+        const keyMode     = (keys.mode          || keys.keyMode          || 'v').toUpperCase();
+        const keyDownload = (keys.downloadVideo  || keys.keyDownloadVideo  || 'd').toUpperCase();
+        const keyLike     = (keys.like           || keys.keyLike           || 'l').toUpperCase();
+        const keyFollow   = (keys.follow         || keys.keyFollow         || 'f').toUpperCase();
         const hudSignature = `${currentSrc}|${keyMode}|${keyDownload}|${keyLike}|${keyFollow}|${likeText}|${followText}|${followColor}|${authorDisplay}`;
 
         if (this.immersiveState.lastMedia === currentMedia &&
@@ -834,7 +849,8 @@ startVideoRender(videoEl) {
         ];
         hudElements.forEach(el => {
             if (el) {
-                el.style.transition = 'opacity 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) !important';
+                // 🚀 核心改进 2：解决 transition 不生效。通过 setProperty 传参以支持 'important'
+                el.style.setProperty('transition', 'opacity 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)', 'important');
                 el.style.setProperty('opacity', opacity, 'important');
                 
                 if (opacity === '0') {

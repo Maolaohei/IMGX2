@@ -1,3 +1,4 @@
+// Basic/InputController.js
 class Mix01ImagePool {
     constructor() { this.pool = []; }
     acquire() { return this.pool.pop() || new Image(); }
@@ -11,6 +12,7 @@ window.Mix01InputController = class InputController {
     constructor(configManager, renderer) {
         this.cfg = configManager;
         this.render = renderer;
+        renderer.controller = this; // 🚀 建立对等双向绑定，与渲染引擎共用单一主 Session ID 会话锁
         
         this.imgPool = new Mix01ImagePool();
         this.activePreloads = new Set();
@@ -29,17 +31,17 @@ window.Mix01InputController = class InputController {
             get lastTarget() { return this._lastTargetRef?.deref() || null; },
             set lastTarget(el) { this._lastTargetRef = el ? new WeakRef(el) : null; },
 
-                    currentSrc: null, currentHdUrl: null, cachedRect: null,
-                    isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
-                    isZoomManuallyChanged: false, keyboardSwitchTime: 0, isTicking: false,
-                    bgClickCount: 0, bgClickTimer: null,
-                    isRenderingLock: false,
-                    lastRenderSignature: null,
-                    _galleryCache: null, _galleryCacheDirty: true,
-                    currentMode: 'partial', currentRotate: 0, currentMirror: 1,
-                    lastSwitchDirection: 1, // 🚀 用于记忆流动朝向，为预加载方向定向导航
-                    renderRequestId: 0
-                };
+            currentSrc: null, currentHdUrl: null, cachedRect: null,
+            isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
+            isZoomManuallyChanged: false, keyboardSwitchTime: 0, isTicking: false,
+            bgClickCount: 0, bgClickTimer: null,
+            isRenderingLock: false,
+            lastRenderSignature: null,
+            _galleryCache: null, _galleryCacheDirty: true,
+            currentMode: 'partial', currentRotate: 0, currentMirror: 1,
+            lastSwitchDirection: 1, 
+            renderRequestId: 0
+        };
 
         this.physics = {
             targetZoom: 2.0, currentZoom: 2.0,
@@ -56,7 +58,8 @@ window.Mix01InputController = class InputController {
         this._hoverDelayTimer = null; 
         this._cursorHideTimer = null; 
         this._hudIdleTimer = null; 
-        this._cancelScrollWait = null; // 🚀 快速连续按键时的滚动自愈锁
+        this._cancelScrollWait = null; 
+        this._clickStart = null; // 🚀 全局点击起点，支持在小图模式下也能完美退出查看器
         this._lastDetectTime = 0;
         this._lastRectTime = 0;
         this._physicsFrameId = null; 
@@ -370,33 +373,34 @@ window.Mix01InputController = class InputController {
             });
         });
 
+        // 🚀 核心改进 8：合并两个独立的 mousedown 监听器，杜绝位移判断时小图 DX/DY 残留脏值并统一记录起点
         this.render.elements.viewer.addEventListener('mousedown', (e) => {
-            if (this.cfg.state.isImmersive) return;
-            if (!e.altKey) return;  
-            e.preventDefault(); e.stopPropagation();
-            const v = this.render.elements.viewer;
-            const rect = v.getBoundingClientRect();
-            this._drag.active  = true; this._drag.startX  = e.clientX; this._drag.startY  = e.clientY;
-            this._drag.origLeft = rect.left; this._drag.origTop  = rect.top;
-            v.style.setProperty('cursor', 'grabbing', 'important');
-            this.state.keyboardSwitchTime = Date.now() + 99999;
-        });
+            this._clickStart = { x: e.clientX, y: e.clientY };
 
-        this.render.elements.viewer.addEventListener('mousedown', (e) => {
-            if (!this.cfg.state.isImmersive) return;
-            if (e.target === this.render.elements.progressContainer) return;
-            const nw = this.state.currentMedia?.naturalWidth || 0;
-            const nh = this.state.currentMedia?.naturalHeight || 0;
-            const isRotated = this.state.currentRotate % 180 !== 0;
-            const vW = (isRotated ? nh : nw) * this.physics.targetZoom;
-            const vH = (isRotated ? nw : nh) * this.physics.targetZoom;
-            const sw = window.innerWidth, sh = window.innerHeight;
-            if (vW <= sw && vH <= sh) return;
-            e.preventDefault();
-            this._pan.active  = true; this._pan.moved   = false;
-            this._pan.startX  = e.clientX; this._pan.startY  = e.clientY;
-            this._pan.origPanX = this.physics.targetPanX;
-            this._pan.origPanY = this.physics.targetPanY;
+            if (this.cfg.state.isImmersive) {
+                if (e.target === this.render.elements.progressContainer) return;
+                const nw = this.state.currentMedia?.naturalWidth || 0;
+                const nh = this.state.currentMedia?.naturalHeight || 0;
+                const isRotated = this.state.currentRotate % 180 !== 0;
+                const vW = (isRotated ? nh : nw) * this.physics.targetZoom;
+                const vH = (isRotated ? nw : nh) * this.physics.targetZoom;
+                const sw = window.innerWidth, sh = window.innerHeight;
+                if (vW <= sw && vH <= sh) return;
+                e.preventDefault();
+                this._pan.active  = true; this._pan.moved   = false;
+                this._pan.startX  = e.clientX; this._pan.startY  = e.clientY;
+                this._pan.origPanX = this.physics.targetPanX;
+                this._pan.origPanY = this.physics.targetPanY;
+            } else {
+                if (!e.altKey) return;
+                e.preventDefault(); e.stopPropagation();
+                const v = this.render.elements.viewer;
+                const rect = v.getBoundingClientRect();
+                this._drag.active  = true; this._drag.startX  = e.clientX; this._drag.startY  = e.clientY;
+                this._drag.origLeft = rect.left; this._drag.origTop  = rect.top;
+                v.style.setProperty('cursor', 'grabbing', 'important');
+                this.state.keyboardSwitchTime = Date.now() + 99999;
+            }
         });
 
         document.addEventListener('mouseup', () => {
@@ -483,7 +487,6 @@ window.Mix01InputController = class InputController {
     }
 
     handleMouseMove(e) {
-        // 🚀 只要鼠标移动，就即刻唤醒并延长沉浸式控制面板的活跃期
         this.resetImmersiveHUDTimeout();
 
         if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') {
@@ -671,7 +674,7 @@ window.Mix01InputController = class InputController {
         this.state.customLensWidth = null; 
         this.state.customLensHeight = null;
         this.state.isZoomManuallyChanged = false;
-        window.__mix01State.userPaused = false; // 🚀 重置暂停状态，以便进入新节点时无条件自动播放视频
+        window.__mix01State.userPaused = false;
         
         this.state.currentMode = this.cfg.state.mode;
         this.state.currentRotate = 0;
@@ -878,9 +881,11 @@ window.Mix01InputController = class InputController {
         if (e.target !== this.render.elements.viewer) return;
 
         if (this.cfg.state.isImmersive) {
-            // 🚀 计算本次操作位移。如果发生了拖拽或平移（位移大于 5px），判定为正常的滑动交互，不作为点击背景退出处理
-            const dx = Math.abs(e.clientX - this._pan.startX);
-            const dy = Math.abs(e.clientY - this._pan.startY);
+            // ✅ Bug修复：使用在 mousedown 时统一捕捉的 _clickStart，小图状态下也能完美检测位移并关闭
+            const startX = this._clickStart ? this._clickStart.x : e.clientX;
+            const startY = this._clickStart ? this._clickStart.y : e.clientY;
+            const dx = Math.abs(e.clientX - startX);
+            const dy = Math.abs(e.clientY - startY);
             if (this._pan.active || dx > 5 || dy > 5) {
                 return;
             }
@@ -993,7 +998,7 @@ window.Mix01InputController = class InputController {
         this.render.showToast(isEnabled ? '✅ 已在此站点启用引擎' : '🚫 已在此站点禁用引擎');
     }
 
-    // 🚀 核心改进：结合 scrollend 弹性等待滚动结束，取代硬编码 1.2s 漫长死等
+    // 🚀 核心改进：结合 scrollend 弹性等待滚动结束
     waitForScrollEnd(callback) {
         if (this._cancelScrollWait) {
             this._cancelScrollWait();
@@ -1034,10 +1039,10 @@ window.Mix01InputController = class InputController {
         if (msgText) this.render.showToast(msgText);
         this.state.keyboardSwitchTime = Date.now();
         
-        // 记录最后一次切换的方向，赋能主副方向动态配额预加载
+        // 记录用户最后一次的流动方向，深度赋能双向预加载
         this.state.lastSwitchDirection = direction;
 
-        // 🚀 核心改进：滚动发生前，即刻在最上层完成高清图的加载与排版（实现瞬时呈现）
+        // 🚀 核心优化：滚动发生前，即刻在最上层完成高清图的加载与排版
         this.triggerZoom(nextImg);
 
         // 底层页面静默对齐
@@ -1179,8 +1184,7 @@ window.Mix01InputController = class InputController {
             }
             if (currentIndex === -1) return;
 
-            // 🚀 核心改进：智能双向预测预加载。优先向主流动方向预加载 N_main 张，同时向反方向预加载 N_opp 张。
-            // 在不超出用户预加载张数（N）的前提下，实现 100% 缓存覆盖，消除往回切图时的加载延迟。
+            // 🚀 核心优化：智能双向预测预加载。优先向主流动方向预加载 N_main 张，同时向反方向预加载 N_opp 张。
             const N = this.cfg.state.preloadCount;
             let mainDir = this.state.lastSwitchDirection || 1;
             if (!this.cfg.state.isImmersive && this._mouseVector.dy < -2) mainDir = -1; 
@@ -1395,7 +1399,6 @@ window.Mix01InputController = class InputController {
                     
                     window.scrollBy({ top: window.innerHeight * 1.5, behavior: 'smooth' });
                     
-                    // 🚀 核心改进：利用滚动完结监听器代替原有的固定延迟硬编码，实现即时切图
                     this.waitForScrollEnd(() => {
                         const newGallery = this.getGalleryImages();
                         
@@ -1428,7 +1431,6 @@ window.Mix01InputController = class InputController {
                     
                     window.scrollBy({ top: -window.innerHeight * 1.5, behavior: 'smooth' });
                     
-                    // 🚀 核心改进：利用滚动完结监听器代替原有的固定延迟硬编码，实现即时切图
                     this.waitForScrollEnd(() => {
                         const newGallery = this.getGalleryImages();
                         if (newGallery.length === 0) {

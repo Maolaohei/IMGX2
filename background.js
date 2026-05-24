@@ -15,7 +15,7 @@ chrome.runtime.onInstalled.addListener(() => {
     }
 });
 
-// 🚀 优化 1：原子锁状态机与轻量缓冲区，彻底斩断常驻 Promise 闭包链，规避 SW 积压内存泄漏
+// 🚀 优化：原子锁状态机与轻量缓冲池，彻底斩断常驻 Promise 闭包链，规避 SW 积压内存泄漏
 let _isHistoryWriting = false;
 const _historyBuffer = [];
 
@@ -65,7 +65,6 @@ function isBase64Domain(url, userDomainsStr) {
     } catch (e) { return false; }
 }
 
-// background.js - 优化后的核心消息拦截路由
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "fetchTwitterGraphQL") {
         (async () => {
@@ -113,14 +112,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
-    // 🚀 核心改进 1：将庞大冗长的匿名自执行下载逻辑抽离，走模块化调用
     if (request.action === "downloadImmersiveImg") {
         handleImmersiveDownload(request, sendResponse);
         return true; 
     }
 });
 
-// 🚀 核心改进 2：解耦后的健壮流式下载与自保活处理函数
+// 🚀 核心改进 5：将大图拦截下载逻辑独立抽离。引入 MV3 流式分块自唤醒保活机制，彻底防挂死 [3]
 async function handleImmersiveDownload(request, sendResponse) {
     let initialUrl = request.url;
     if (initialUrl.startsWith('//')) initialUrl = 'https:' + initialUrl;
@@ -197,6 +195,7 @@ async function handleImmersiveDownload(request, sendResponse) {
 
         const urlObj = new URL(finalUrl);
         
+        // 🚀 强力清洗 CDN 脏参数和小尾巴（剥离 :orig, :large, @2x 等参数）
         let lastSegment = decodeURIComponent(urlObj.pathname.split('/').pop() || '');
         lastSegment = lastSegment.split(':')[0]; 
         lastSegment = lastSegment.split('@')[0]; 
@@ -259,7 +258,7 @@ async function handleImmersiveDownload(request, sendResponse) {
                 let receivedLength = 0;
                 let chunks = [];
                 let aborted = false;
-                let chunkCounter = 0;
+                let chunkCount = 0;
 
                 while(true) {
                     const {done, value} = await reader.read();
@@ -272,12 +271,11 @@ async function handleImmersiveDownload(request, sendResponse) {
                         break;
                     }
                     chunks.push(value);
-                    chunkCounter++;
+                    chunkCount++;
 
-                    // 🚀 核心改进 3：MV3 Service Worker 状态唤醒保活机制。
-                    // 慢速网络流式读取大文件时，每读 50 个分块，触发一次快速的 extension api 读取，
-                    // 从而在事件循环中强制刷新 Service Worker 的空闲挂起定时器，彻底防止 SW 离线死锁。
-                    if (chunkCounter % 50 === 0) {
+                    // 🚀 核心保活优化：在 MV3 长连接流式下载大文件时，每拉取 50 块数据，触发一次极轻量 local 
+                    // 读取，以此强制刷新 MV3 引擎 Service Worker 的活跃状态计时器，防止后台进程被浏览器强制掐断挂死。
+                    if (chunkCount % 50 === 0) {
                         await chrome.storage.local.get('_sw_keep_alive_').catch(() => {});
                     }
                 }

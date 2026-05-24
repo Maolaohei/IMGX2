@@ -27,24 +27,25 @@ window.Mix01Utils = {
                 
                 const pngBlob = await new Promise(r => canvas.toBlob(r, 'image/png'));
                 
-                // 🚀 核心改进 1：在异步写入剪贴板前，强行尝试重新使窗口获取焦点
+                // 🚀 核心改进：在异步回调写入剪贴板前，强行尝试重新使当前文档和窗口获取焦点，
+                // 尽可能挽回异步延时导致的 User Gesture 失效问题
                 window.focus();
                 if (document.body) document.body.focus();
 
                 try {
-                    // 尝试主流的二进制图片写入
+                    // 1. 尝试首选的高清二进制图片写入（第一级）
                     await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
                     renderer.showToast("✅ 已成功复制原图！");
                 } catch (writeErr) {
                     console.warn("Mix01 剪贴板写入图片失败 (可能是焦点受阻)，正在启动弹性降级方案...", writeErr);
                     
                     try {
-                        // 🚀 核心改进 2：降级方案 —— 尝试将高清原图直链作为文本写入剪贴板
+                        // 2. 二级降级方案：由于权限或焦点限制无法写 Blob 时，改为写大图直链文本
                         await navigator.clipboard.writeText(url);
                         renderer.showToast("📋 复制原图失败，已降级复制原图链接");
                     } catch (textErr) {
-                        // 🚀 核心改进 3：兜底提示 —— 防止抛出 unhandled exception 崩溃，温和提示用户手动保存
-                        console.error("Mix01 剪贴板完全受阻:", textErr);
+                        // 3. 三级降级方案：如果极端安全策略下连文本写入也遭到阻断，安全捕获异常并 Toast 提示
+                        console.error("Mix01 剪贴板完全受限:", textErr);
                         renderer.showToast("❌ 复制失败，请尝试直接右键保存图片");
                     }
                 }
@@ -60,6 +61,8 @@ window.Mix01Utils = {
 
         renderer.showToast(isVideo ? "⏳ 正在提交视频下载任务..." : "⏳ 正在提交图片下载任务...");
         
+        // 🚀 核心改进：由于已部署 rules.json 重写 Referer，优先将任务交还给后台 Service Worker
+        // 这样可以确保文件完美地保存到您所期望的 "IMG_Download/" 文件夹内
         try {
             chrome.runtime.sendMessage({ action: "downloadImmersiveImg", url: url }, () => {
                 if (chrome.runtime.lastError) {
@@ -75,6 +78,7 @@ window.Mix01Utils = {
         }
     },
 
+    // 🚀 本地兜底下载通道：仅在后台 Service Worker 被强制休眠或环境失效时启动
     async _downloadLocallyFallback(url, renderer, isVideo) {
         if (renderer._currentBlob && !isVideo) {
             this._saveBlobLocally(renderer._currentBlob, url);

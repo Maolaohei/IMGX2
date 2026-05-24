@@ -47,17 +47,17 @@
     -webkit-user-select: none !important;
 
     /* 【Bug修复】will-change 不应静态声明：浏览器会为页面上所有图片永久分配独立
-       GPU 层，反而大幅增加 VRAM 占用和合成开销。改为仅在查看器激活时才注入
-       will-change（由 JS 在打开/关闭时切换 .is-active class）。
-       下方 .is-active 规则负责实际的 GPU 提升。 */
+       GPU 层，反而大幅增加 VRAM 占用和合成开销。改为仅在查看器激活时（由 JS 切换 .is-active 类时）才注入
+       will-change，以下规则负责在查看器处于激活工作态时进行精准的合成层提速。 */
     backface-visibility: hidden !important;
     transform-style: preserve-3d !important;
     contain: paint layout !important;
     transition: transform 0.15s cubic-bezier(0.1, 0.9, 0.2, 1), opacity 0.25s ease-out !important;
 }
 
-/* 仅在查看器激活（正在展示内容）时才提升 GPU 层 */
+/* 🚀 核心优化 3：仅在查看器激活（带有 .is-active）时提升合成层，避开静态 will-change 导致的显存泄露 */
 #img-zoom-pro-viewer-xyz.is-active img#zoom-img-xyz,
+#img-zoom-pro-viewer-xyz.is-active img#zoom-img-buffer-xyz,
 #img-zoom-pro-viewer-xyz.is-active canvas#zoom-canvas-xyz {
     will-change: transform, opacity !important;
 }
@@ -334,13 +334,4 @@
     z-index: 2147483647 !important;
     pointer-events: none !important;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5) !important;
-}
-
-
-/* 🚀 核心改进：渐进式模糊缓冲过渡层 */
-#zoom-img-xyz, #zoom-img-buffer-xyz {
-    transition: filter 0.3s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.12s ease-in-out !important;
-}
-.mix01-hd-buffering {
-    filter: blur(10px) saturate(140%) !important;
 }
