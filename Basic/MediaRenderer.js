@@ -1,3 +1,4 @@
+// Basic/MediaRenderer.js
 window.Mix01MediaRenderer = class MediaRenderer {
     constructor(configManager) {
         this.cfg = configManager;
@@ -80,11 +81,14 @@ window.Mix01MediaRenderer = class MediaRenderer {
             }
             #zoom-img-xyz {
                 z-index: 2 !important;
-                transition: opacity 0.12s ease-in-out !important;
+                transition: filter 0.3s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.12s ease-in-out !important;
             }
             #zoom-img-buffer-xyz {
                 z-index: 1 !important;
-                transition: opacity 0.12s ease-in-out !important;
+                transition: filter 0.3s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.12s ease-in-out !important;
+            }
+            .mix01-hd-buffering {
+                filter: blur(10px) saturate(140%) !important;
             }
             .img-zoom-toast-xyz      { z-index: 2147483647 !important; }
             #img-zoom-pro-immersive-hint { z-index: 2147483647 !important; }
@@ -147,25 +151,31 @@ window.Mix01MediaRenderer = class MediaRenderer {
         const newBlobUrl = URL.createObjectURL(blob);
         this._activeBlobUrls.add(newBlobUrl);
 
+        this.elements.imgBuffer.classList.add('mix01-hd-buffering');
+
         if (this.elements.img.src && this.elements.img.style.opacity === '1') {
             this.elements.imgBuffer.src = this.elements.img.src;
             this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
         }
 
         this.setStyle(this.elements.img, 'opacity', '0');
+        this.elements.img.classList.add('mix01-hd-buffering');
         this.elements.img.src = newBlobUrl;
 
         this.elements.img.decode().then(() => {
             if (targetSessionId && targetSessionId !== this._lastActiveSessionId) return;
+            this.elements.img.classList.remove('mix01-hd-buffering');
             this.setStyle(this.elements.img, 'opacity', '1');
             this.setStyle(this.elements.imgBuffer, 'opacity', '0');
             setTimeout(() => {
                 if (this.elements.img.style.opacity === '1') {
                     this.setStyle(this.elements.imgBuffer, 'display', 'none');
+                    this.elements.imgBuffer.classList.remove('mix01-hd-buffering');
                 }
             }, 150);
         }).catch(() => {
             if (targetSessionId && targetSessionId !== this._lastActiveSessionId) return;
+            this.elements.img.classList.remove('mix01-hd-buffering');
             this.setStyle(this.elements.img, 'opacity', '1');
             this.setStyle(this.elements.imgBuffer, 'opacity', '0');
         });
@@ -305,6 +315,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.setStyles(this.elements.viewer, { display: 'none', cursor: 'default', 'pointer-events': 'none' });
         this.setStyles(this.elements.img,    { display: 'none', cursor: 'default' });
         
+        // 🚀 核心改进 1：隐藏时将大图 src 设为空。彻底切断上一张图片的尺寸数据残留，确保下一次排版正确
+        this.elements.img.src = '';
+
         this.setStyles(this.elements.imgBuffer, { display: 'none', opacity: '0' });
         this.elements.imgBuffer.src = '';
 
@@ -322,7 +335,8 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.stopVideoRender();
     }
 
-// Basic/MediaRenderer.js - 修改 startVideoRender
+    // Basic/MediaRenderer.js
+// 修改后的 startVideoRender 核心函数
 startVideoRender(videoEl) {
     this.videoState.isRunning = true;
     this.videoState.original = { paused: videoEl.paused, muted: videoEl.muted };
@@ -335,12 +349,12 @@ startVideoRender(videoEl) {
     this.setStyles(this.elements.videoClone,       { display: 'block' });
     this.setStyles(this.elements.progressContainer,{ display: 'block' });
 
-    // 🚀 核心改进 1：静音网页中的原始视频节点，防止沉浸播放时产生令人烦躁的双重声音/回音
+    // 🚀 核心改进 1：静音网页中的原始视频节点，防止沉浸播放时产生令人烦躁的双重回音
     videoEl.muted = true;
 
     const vc = this.elements.videoClone;
     
-    // 🚀 核心改进 2：在沉浸模式下恢复声音，确保默认播放有声视频
+    // 🚀 核心改进 2：默认恢复声音，确保默认播放有声视频
     vc.muted = false;
     vc.volume = 1.0;
     
@@ -362,14 +376,36 @@ startVideoRender(videoEl) {
         }
     }
 
-    if (videoEl.readyState === 0) {
+    // 🚀 核心改进 3：双视频源统一启动器
+    const launchPlayback = () => {
+        if (window.__mix01State.userPaused || !this.videoState.isRunning) return;
+        
+        // 1. 率先启动原始视频，确保音视频流媒体管道源源不断输出数据
+        videoEl.play().catch(() => {});
+
+        // 2. 启动展示给用户的克隆视频。若因为未交互被浏览器拦截有声自动播放，自动优雅降级为静音自动播放，确保 100% 自动播放成功
+        vc.play().catch((err) => {
+            if (err.name === 'NotAllowedError') {
+                console.warn("Mix01: 有声自动播放受阻，降级为静音自动播放机制以确保画面不静止");
+                vc.muted = true;
+                vc.play().catch(() => {});
+            }
+        });
+    };
+
+    if (videoEl.readyState < 2) {
         this.setStyle(this.elements.spinner, 'display', 'block');
-        videoEl.addEventListener('canplay', () => {
+        
+        const onCanPlay = () => {
             this.setStyle(this.elements.spinner, 'display', 'none');
-            if (!window.__mix01State.userPaused && this.videoState.isRunning) vc.play().catch(() => {});
-        }, { once: true });
+            launchPlayback();
+        };
+        // 绑定多重就绪状态监听，确保在第一帧数据就位时即刻点火播放
+        videoEl.addEventListener('canplay', onCanPlay, { once: true });
+        videoEl.addEventListener('loadeddata', onCanPlay, { once: true });
     } else {
-        if (!window.__mix01State.userPaused) vc.play().catch(() => {});
+        this.setStyle(this.elements.spinner, 'display', 'none');
+        launchPlayback();
     }
 
     const updateFrame = () => {
@@ -379,11 +415,14 @@ startVideoRender(videoEl) {
             try { vc.srcObject = videoEl.captureStream(); } catch(e){}
         }
 
-        if (videoEl.paused && videoEl.readyState >= 3 && !window.__mix01State.userPaused) {
-            if (!videoEl.ended) videoEl.play().catch(() => {});
-        }
-        if (vc.paused && !window.__mix01State.userPaused && vc.readyState >= 3) {
-            if (!videoEl.ended) vc.play().catch(() => {});
+        // 🚀 核心改进 4：降低守护门槛。只要就绪状态 >= 1 且未手动暂停，持续进行双节点状态对齐
+        if (!window.__mix01State.userPaused && !videoEl.ended) {
+            if (videoEl.paused && videoEl.readyState >= 1) {
+                videoEl.play().catch(() => {});
+            }
+            if (vc.paused && vc.readyState >= 1) {
+                vc.play().catch(() => {});
+            }
         }
 
         if (videoEl.duration > 0) {
@@ -406,6 +445,7 @@ startVideoRender(videoEl) {
     if (videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
     else requestAnimationFrame(updateFrame);
 }
+
     stopVideoRender() {
         this.videoState.isRunning = false;
         this._lastProgressPct = null;
@@ -446,12 +486,10 @@ startVideoRender(videoEl) {
             nw = this.videoState.lastNw || activeMedia.videoWidth || rect.width || 1;
             nh = this.videoState.lastNh || activeMedia.videoHeight || rect.height || 1;
         } else {
-            const isSrcConsistent = currentHoveredSrc && (
-                activeMedia.src === currentHoveredSrc || 
-                this._activeBlobUrls.has(activeMedia.src)
-            );
-
-            if (activeMedia.complete && activeMedia.naturalWidth > 0 && isSrcConsistent) {
+            // 🚀 核心改进 2：无条件信任已加载大图的物理尺寸。
+            // 彻底废弃在切换缓存的高清原图时必定会判定失败并导致画面扭曲的 isSrcConsistent 逻辑。
+            // 仅当大图尚未开始下载（naturalWidth === 0）时，才暂时采用缩略图边界比例作为占位。
+            if (activeMedia.complete && activeMedia.naturalWidth > 0) {
                 nw = activeMedia.naturalWidth;
                 nh = activeMedia.naturalHeight;
             } else {
@@ -786,5 +824,29 @@ startVideoRender(videoEl) {
                 }
             }, 600);
         }, 3000);
+    }
+
+    setHUDOpacity(opacity) {
+        const hudElements = [
+            this.elements.status,
+            this.elements.counter,
+            this.elements.hint
+        ];
+        hudElements.forEach(el => {
+            if (el) {
+                el.style.transition = 'opacity 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) !important';
+                el.style.setProperty('opacity', opacity, 'important');
+                
+                if (opacity === '0') {
+                    setTimeout(() => {
+                        if (el.style.opacity === '0') {
+                            el.style.setProperty('display', 'none', 'important');
+                        }
+                    }, 400);
+                } else {
+                    el.style.setProperty('display', 'block', 'important');
+                }
+            }
+        });
     }
 };

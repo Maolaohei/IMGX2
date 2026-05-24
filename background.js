@@ -65,6 +65,7 @@ function isBase64Domain(url, userDomainsStr) {
     } catch (e) { return false; }
 }
 
+// background.js - 优化后的核心消息拦截路由
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "fetchTwitterGraphQL") {
         (async () => {
@@ -112,197 +113,208 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
+    // 🚀 核心改进 1：将庞大冗长的匿名自执行下载逻辑抽离，走模块化调用
     if (request.action === "downloadImmersiveImg") {
-        (async () => {
-            let initialUrl = request.url;
-            if (initialUrl.startsWith('//')) initialUrl = 'https:' + initialUrl;
-
-            try {
-                const config = await chrome.storage.local.get(['base64Domains']);
-                const useBase64 = isBase64Domain(initialUrl, config.base64Domains);
-
-                let res;
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 30000); 
-                try {
-                    res = await fetch(initialUrl, {
-                        method: 'GET', mode: 'cors', credentials: 'include', signal: controller.signal,
-                        headers: {
-                            'Referer': request.pageUrl || new URL(initialUrl).origin,
-                            'User-Agent': navigator.userAgent,
-                            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                            'Cache-Control': 'no-cache'
-                        }
-                    });
-                    clearTimeout(timeoutId);
-                } catch (fetchError) {
-                    clearTimeout(timeoutId);
-                    try {
-                        const noCorsController = new AbortController();
-                        const noCorsTimeoutId = setTimeout(() => noCorsController.abort(), 30000);
-                        res = await fetch(initialUrl, { method: 'GET', mode: 'no-cors', credentials: 'include', signal: noCorsController.signal });
-                        clearTimeout(noCorsTimeoutId);
-                    } catch (noCorsError) {
-                        chrome.downloads.download({ url: initialUrl, filename: `IMG_Download/${initialUrl.split('/').pop() || 'media'}`, saveAs: false }, () => {
-                            saveToHistory(initialUrl.split('/').pop() || "media", chrome.runtime.lastError ? "❌ 失败 (直接下载)" : "✅ 成功 (直接下载)");
-                        });
-                        return;
-                    }
-                }
-                
-                let finalUrl = initialUrl;
-                const isOpaque = res && res.type === 'opaque';
-
-                if (res && res.status === 404 && initialUrl.includes('pximg.net')) {
-                    const altUrls = [];
-                    if (initialUrl.includes('_ugoira0')) {
-                        const base = initialUrl.replace('_ugoira0', '_p0');
-                        altUrls.push(base, base.replace(/\.\w+$/, '.png'), base.replace(/\.\w+$/, '.jpg'));
-                    } else if (initialUrl.includes('_p0')) {
-                        const targetExt = initialUrl.endsWith('.png') ? '.jpg' : '.png';
-                        altUrls.push(initialUrl.replace(/\.\w+$/, targetExt), initialUrl.replace('_p0', '_p1'), initialUrl.replace('_p0', '_p2'));
-                    } else {
-                        const base = initialUrl.replace(/\.\w+$/, '');
-                        altUrls.push(`${base}_p0.jpg`, `${base}_p0.png`, `${base}.jpg`, `${base}.png`);
-                    }
-
-                    if (altUrls.length > 0) {
-                        try {
-                            const fetchPromises = altUrls.map(alt =>
-                                fetch(alt, { method: 'HEAD', headers: { 'Referer': request.pageUrl || 'https://www.pixiv.net/' } }).then(testRes => {
-                                    if (testRes.ok) return alt;
-                                    throw new Error('Not ok');
-                                })
-                            );
-                            finalUrl = await Promise.any(fetchPromises);
-                            res = await fetch(finalUrl, { headers: { 'Referer': request.pageUrl || 'https://www.pixiv.net/' } });
-                        } catch(e) {}
-                    }
-                }
-
-                if (!res || isOpaque || !res.ok) {
-                    chrome.downloads.download({ url: finalUrl, filename: `IMG_Download/${finalUrl.split('/').pop() || 'media'}`, saveAs: false, conflictAction: 'uniquify' }, () => {
-                        saveToHistory(finalUrl.split('/').pop() || "media", chrome.runtime.lastError ? "❌ 失败 (直接下载回退)" : "✅ 成功 (直接下载回退)");
-                    });
-                    return;
-                }
-
-                const urlObj = new URL(finalUrl);
-                
-                // 🚀 优化 2：强力清洗 CDN 脏参数和小尾巴（剥离 :orig, :large, @2x 等参数）
-                let lastSegment = decodeURIComponent(urlObj.pathname.split('/').pop() || '');
-                lastSegment = lastSegment.split(':')[0]; 
-                lastSegment = lastSegment.split('@')[0]; 
-                lastSegment = lastSegment.split('&')[0]; 
-                lastSegment = lastSegment.split('?')[0]; 
-
-                let filename = "media", ext = "";
-                
-                const _mimeToExt = { 'jpeg': 'jpg', 'jpg': 'jpg', 'png': 'png', 'gif': 'gif', 'webp': 'webp', 'svg+xml': 'svg', 'bmp': 'bmp', 'mp4': 'mp4', 'webm': 'webm', 'avif': 'avif', 'quicktime': 'mov', 'x-matroska': 'mkv' };
-                const _rawCt = (res.headers.get('content-type') || 'image/jpeg').split(';')[0].trim().toLowerCase();
-                const _rawSubtype = _rawCt.split('/')[1] || 'jpeg';
-                const _resolvedExt = '.' + (_mimeToExt[_rawSubtype] || _rawSubtype.split('+')[0] || 'jpg');
-
-                const paramExt = urlObj.searchParams.get('format') || urlObj.searchParams.get('ext');
-                
-                let dotIndex = lastSegment.lastIndexOf('.');
-                if (dotIndex !== -1) {
-                    filename = lastSegment.substring(0, dotIndex);
-                    ext = lastSegment.substring(dotIndex).toLowerCase();
-                } else {
-                    filename = lastSegment || "media";
-                }
-
-                if (paramExt) ext = "." + paramExt.toLowerCase();
-
-                if (!/^\.(jpg|jpeg|png|gif|webp|svg|bmp|mp4|webm|avif|mov|mkv)$/i.test(ext)) {
-                    ext = _resolvedExt;
-                }
-                if (!filename || filename === "") filename = "media";
-
-                let cd = res.headers.get('content-disposition');
-                if (cd) {
-                    let match = cd.match(/filename="?([^"]+)"?/);
-                    if (match) {
-                        let cdName = match[1];
-                        let cdDot = cdName.lastIndexOf('.');
-                        if (cdDot !== -1) {
-                            filename = cdName.substring(0, cdDot);
-                            ext = cdDot !== -1 ? cdName.substring(cdDot).toLowerCase() : ext;
-                        } else {
-                            filename = cdName;
-                        }
-                    }
-                }
-
-                filename = filename.replace(/[\\/:*?"<>|]/g, "_");
-                const finalDownloadName = `IMG_Download/${filename}${ext}`;
-                const contentType = _rawCt; 
-                
-                if (useBase64) {
-                    const contentLength = res.headers.get('content-length');
-                    const sizeLimit = 20 * 1024 * 1024; // 20MB 熔断安全阀门
-
-                    if (contentLength && parseInt(contentLength) > sizeLimit) {
-                        chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
-                            saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (大文件直下)" : "✅ 成功 (大文件直下)");
-                        });
-                    } else {
-                        // 🚀 优化 3：流式阻断防御机制，防止没有 Content-Length 的异常大流榨干 MV3 内存
-                        const reader = res.body.getReader();
-                        let receivedLength = 0;
-                        let chunks = [];
-                        let aborted = false;
-
-                        while(true) {
-                            const {done, value} = await reader.read();
-                            if (done) break;
-                            receivedLength += value.length;
-                            
-                            if (receivedLength > sizeLimit) {
-                                reader.cancel('File too large'); 
-                                aborted = true;
-                                break;
-                            }
-                            chunks.push(value);
-                        }
-
-                        if (aborted) {
-                            chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
-                                saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (流超载回退)" : "✅ 成功 (流超载回退)");
-                            });
-                        } else {
-                            const blob = new Blob(chunks, { type: contentType });
-                            const blobUrl = URL.createObjectURL(blob);
-                            chrome.downloads.download({ url: blobUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, (downloadId) => {
-                                if (downloadId !== undefined) {
-                                    const listener = (delta) => {
-                                        if (delta.id === downloadId && delta.state) {
-                                            if (delta.state.current === 'complete' || delta.state.current === 'interrupted') {
-                                                URL.revokeObjectURL(blobUrl);
-                                                chrome.downloads.onChanged.removeListener(listener);
-                                            }
-                                        }
-                                    };
-                                    chrome.downloads.onChanged.addListener(listener);
-                                } else {
-                                    URL.revokeObjectURL(blobUrl);
-                                }
-                                saveToHistory(finalDownloadName, (chrome.runtime.lastError || downloadId === undefined) ? "❌ 失败" : "✅ 成功 (BlobURL)");
-                            });
-                        }
-                    }
-                } else {
-                    chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
-                        saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功");
-                    });
-                }
-            } catch (err) {
-                saveToHistory(initialUrl.split('/').pop() || "media", "❌ 拦截: " + err.message);
-            } finally {
-                sendResponse({ success: true });
-            }
-        })();
+        handleImmersiveDownload(request, sendResponse);
         return true; 
     }
 });
+
+// 🚀 核心改进 2：解耦后的健壮流式下载与自保活处理函数
+async function handleImmersiveDownload(request, sendResponse) {
+    let initialUrl = request.url;
+    if (initialUrl.startsWith('//')) initialUrl = 'https:' + initialUrl;
+
+    try {
+        const config = await chrome.storage.local.get(['base64Domains']);
+        const useBase64 = isBase64Domain(initialUrl, config.base64Domains);
+
+        let res;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000); 
+        try {
+            res = await fetch(initialUrl, {
+                method: 'GET', mode: 'cors', credentials: 'include', signal: controller.signal,
+                headers: {
+                    'Referer': request.pageUrl || new URL(initialUrl).origin,
+                    'User-Agent': navigator.userAgent,
+                    'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+                    'Cache-Control': 'no-cache'
+                }
+            });
+            clearTimeout(timeoutId);
+        } catch (fetchError) {
+            clearTimeout(timeoutId);
+            try {
+                const noCorsController = new AbortController();
+                const noCorsTimeoutId = setTimeout(() => noCorsController.abort(), 30000);
+                res = await fetch(initialUrl, { method: 'GET', mode: 'no-cors', credentials: 'include', signal: noCorsController.signal });
+                clearTimeout(noCorsTimeoutId);
+            } catch (noCorsError) {
+                chrome.downloads.download({ url: initialUrl, filename: `IMG_Download/${initialUrl.split('/').pop() || 'media'}`, saveAs: false }, () => {
+                    saveToHistory(initialUrl.split('/').pop() || "media", chrome.runtime.lastError ? "❌ 失败 (直接下载)" : "✅ 成功 (直接下载)");
+                });
+                return;
+            }
+        }
+        
+        let finalUrl = initialUrl;
+        const isOpaque = res && res.type === 'opaque';
+
+        if (res && res.status === 404 && initialUrl.includes('pximg.net')) {
+            const altUrls = [];
+            if (initialUrl.includes('_ugoira0')) {
+                const base = initialUrl.replace('_ugoira0', '_p0');
+                altUrls.push(base, base.replace(/\.\w+$/, '.png'), base.replace(/\.\w+$/, '.jpg'));
+            } else if (initialUrl.includes('_p0')) {
+                const targetExt = initialUrl.endsWith('.png') ? '.jpg' : '.png';
+                altUrls.push(initialUrl.replace(/\.\w+$/, targetExt), initialUrl.replace('_p0', '_p1'), initialUrl.replace('_p0', '_p2'));
+            } else {
+                const base = initialUrl.replace(/\.\w+$/, '');
+                altUrls.push(`${base}_p0.jpg`, `${base}_p0.png`, `${base}.jpg`, `${base}.png`);
+            }
+
+            if (altUrls.length > 0) {
+                try {
+                    const fetchPromises = altUrls.map(alt =>
+                        fetch(alt, { method: 'HEAD', headers: { 'Referer': request.pageUrl || 'https://www.pixiv.net/' } }).then(testRes => {
+                            if (testRes.ok) return alt;
+                            throw new Error('Not ok');
+                        })
+                    );
+                    finalUrl = await Promise.any(fetchPromises);
+                    res = await fetch(finalUrl, { headers: { 'Referer': request.pageUrl || 'https://www.pixiv.net/' } });
+                } catch(e) {}
+            }
+        }
+
+        if (!res || isOpaque || !res.ok) {
+            chrome.downloads.download({ url: finalUrl, filename: `IMG_Download/${finalUrl.split('/').pop() || 'media'}`, saveAs: false, conflictAction: 'uniquify' }, () => {
+                saveToHistory(finalUrl.split('/').pop() || "media", chrome.runtime.lastError ? "❌ 失败 (直接下载回退)" : "✅ 成功 (直接下载回退)");
+            });
+            return;
+        }
+
+        const urlObj = new URL(finalUrl);
+        
+        let lastSegment = decodeURIComponent(urlObj.pathname.split('/').pop() || '');
+        lastSegment = lastSegment.split(':')[0]; 
+        lastSegment = lastSegment.split('@')[0]; 
+        lastSegment = lastSegment.split('&')[0]; 
+        lastSegment = lastSegment.split('?')[0]; 
+
+        let filename = "media", ext = "";
+        
+        const _mimeToExt = { 'jpeg': 'jpg', 'jpg': 'jpg', 'png': 'png', 'gif': 'gif', 'webp': 'webp', 'svg+xml': 'svg', 'bmp': 'bmp', 'mp4': 'mp4', 'webm': 'webm', 'avif': 'avif', 'quicktime': 'mov', 'x-matroska': 'mkv' };
+        const _rawCt = (res.headers.get('content-type') || 'image/jpeg').split(';')[0].trim().toLowerCase();
+        const _rawSubtype = _rawCt.split('/')[1] || 'jpeg';
+        const _resolvedExt = '.' + (_mimeToExt[_rawSubtype] || _rawSubtype.split('+')[0] || 'jpg');
+
+        const paramExt = urlObj.searchParams.get('format') || urlObj.searchParams.get('ext');
+        
+        let dotIndex = lastSegment.lastIndexOf('.');
+        if (dotIndex !== -1) {
+            filename = lastSegment.substring(0, dotIndex);
+            ext = lastSegment.substring(dotIndex).toLowerCase();
+        } else {
+            filename = lastSegment || "media";
+        }
+
+        if (paramExt) ext = "." + paramExt.toLowerCase();
+
+        if (!/^\.(jpg|jpeg|png|gif|webp|svg|bmp|mp4|webm|avif|mov|mkv)$/i.test(ext)) {
+            ext = _resolvedExt;
+        }
+        if (!filename || filename === "") filename = "media";
+
+        let cd = res.headers.get('content-disposition');
+        if (cd) {
+            let match = cd.match(/filename="?([^"]+)"?/);
+            if (match) {
+                let cdName = match[1];
+                let cdDot = cdName.lastIndexOf('.');
+                if (cdDot !== -1) {
+                    filename = cdName.substring(0, cdDot);
+                    ext = cdDot !== -1 ? cdName.substring(cdDot).toLowerCase() : ext;
+                } else {
+                    filename = cdName;
+                }
+            }
+        }
+
+        filename = filename.replace(/[\\/:*?"<>|]/g, "_");
+        const finalDownloadName = `IMG_Download/${filename}${ext}`;
+        const contentType = _rawCt; 
+        
+        if (useBase64) {
+            const contentLength = res.headers.get('content-length');
+            const sizeLimit = 20 * 1024 * 1024; // 20MB 熔断安全阀门
+
+            if (contentLength && parseInt(contentLength) > sizeLimit) {
+                chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
+                    saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (大文件直下)" : "✅ 成功 (大文件直下)");
+                });
+            } else {
+                const reader = res.body.getReader();
+                let receivedLength = 0;
+                let chunks = [];
+                let aborted = false;
+                let chunkCounter = 0;
+
+                while(true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    receivedLength += value.length;
+                    
+                    if (receivedLength > sizeLimit) {
+                        reader.cancel('File too large'); 
+                        aborted = true;
+                        break;
+                    }
+                    chunks.push(value);
+                    chunkCounter++;
+
+                    // 🚀 核心改进 3：MV3 Service Worker 状态唤醒保活机制。
+                    // 慢速网络流式读取大文件时，每读 50 个分块，触发一次快速的 extension api 读取，
+                    // 从而在事件循环中强制刷新 Service Worker 的空闲挂起定时器，彻底防止 SW 离线死锁。
+                    if (chunkCounter % 50 === 0) {
+                        await chrome.storage.local.get('_sw_keep_alive_').catch(() => {});
+                    }
+                }
+
+                if (aborted) {
+                    chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
+                        saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (流超载回退)" : "✅ 成功 (流超载回退)");
+                    });
+                } else {
+                    const blob = new Blob(chunks, { type: contentType });
+                    const blobUrl = URL.createObjectURL(blob);
+                    chrome.downloads.download({ url: blobUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, (downloadId) => {
+                        if (downloadId !== undefined) {
+                            const listener = (delta) => {
+                                if (delta.id === downloadId && delta.state) {
+                                    if (delta.state.current === 'complete' || delta.state.current === 'interrupted') {
+                                        URL.revokeObjectURL(blobUrl);
+                                        chrome.downloads.onChanged.removeListener(listener);
+                                    }
+                                }
+                            };
+                            chrome.downloads.onChanged.addListener(listener);
+                        } else {
+                            URL.revokeObjectURL(blobUrl);
+                        }
+                        saveToHistory(finalDownloadName, (chrome.runtime.lastError || downloadId === undefined) ? "❌ 失败" : "✅ 成功 (BlobURL)");
+                    });
+                }
+            }
+        } else {
+            chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
+                saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功");
+            });
+        }
+    } catch (err) {
+        saveToHistory(initialUrl.split('/').pop() || "media", "❌ 拦截: " + err.message);
+    } finally {
+        sendResponse({ success: true });
+    }
+}

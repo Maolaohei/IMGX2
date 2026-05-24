@@ -1,4 +1,3 @@
-// Basic/InputController.js
 class Mix01ImagePool {
     constructor() { this.pool = []; }
     acquire() { return this.pool.pop() || new Image(); }
@@ -30,17 +29,17 @@ window.Mix01InputController = class InputController {
             get lastTarget() { return this._lastTargetRef?.deref() || null; },
             set lastTarget(el) { this._lastTargetRef = el ? new WeakRef(el) : null; },
 
-            currentSrc: null, currentHdUrl: null, cachedRect: null,
-            isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
-            isZoomManuallyChanged: false, keyboardSwitchTime: 0, isTicking: false,
-            bgClickCount: 0, bgClickTimer: null,
-            isRenderingLock: false,
-            lastRenderSignature: null,
-            _galleryCache: null, _galleryCacheDirty: true,
-            currentMode: 'partial', currentRotate: 0, currentMirror: 1,
-            
-            renderRequestId: 0
-        };
+                    currentSrc: null, currentHdUrl: null, cachedRect: null,
+                    isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
+                    isZoomManuallyChanged: false, keyboardSwitchTime: 0, isTicking: false,
+                    bgClickCount: 0, bgClickTimer: null,
+                    isRenderingLock: false,
+                    lastRenderSignature: null,
+                    _galleryCache: null, _galleryCacheDirty: true,
+                    currentMode: 'partial', currentRotate: 0, currentMirror: 1,
+                    lastSwitchDirection: 1, // 🚀 用于记忆流动朝向，为预加载方向定向导航
+                    renderRequestId: 0
+                };
 
         this.physics = {
             targetZoom: 2.0, currentZoom: 2.0,
@@ -56,6 +55,8 @@ window.Mix01InputController = class InputController {
         this._resizeTimer = null;    
         this._hoverDelayTimer = null; 
         this._cursorHideTimer = null; 
+        this._hudIdleTimer = null; 
+        this._cancelScrollWait = null; // 🚀 快速连续按键时的滚动自愈锁
         this._lastDetectTime = 0;
         this._lastRectTime = 0;
         this._physicsFrameId = null; 
@@ -96,63 +97,59 @@ window.Mix01InputController = class InputController {
         this.bindEvents();
     }
 
-// Basic/InputController.js - 修改 initPassiveDOMScanner
-initPassiveDOMScanner() {
-    const scanAndObserve = (root) => {
-        const els = root.querySelectorAll ? root.querySelectorAll('img, video') : [];
-        els.forEach(el => {
-            if (!el._mix01Observed) { el._mix01Observed = true; this.mediaIO.observe(el); }
-            
-            if (!el._mixStatusId) {
-                const article = el.closest('article');
-                if (article) {
-                    const statusLink = article.querySelector('a[href*="/status/"]');
-                    if (statusLink) {
-                        const id = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
-                        if (id) el._mixStatusId = id;
+    initPassiveDOMScanner() {
+        const scanAndObserve = (root) => {
+            const els = root.querySelectorAll ? root.querySelectorAll('img, video') : [];
+            els.forEach(el => {
+                if (!el._mix01Observed) { el._mix01Observed = true; this.mediaIO.observe(el); }
+                
+                if (!el._mixStatusId) {
+                    const article = el.closest('article');
+                    if (article) {
+                        const statusLink = article.querySelector('a[href*="/status/"]');
+                        if (statusLink) {
+                            const id = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
+                            if (id) el._mixStatusId = id;
+                        }
+                    }
+                }
+            });
+        };
+        scanAndObserve(document);
+        this._globalDomObserver = new MutationObserver((mutations) => {
+            if (!this.cfg.isSiteEnabled()) return;
+            for (let m of mutations) {
+                if (m.addedNodes && m.addedNodes.length > 0) {
+                    for (let node of m.addedNodes) {
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            const isImgOrVideo = node.tagName === 'IMG' || node.tagName === 'VIDEO';
+                            if (isImgOrVideo) {
+                                if (!node._mix01Observed) { 
+                                    node._mix01Observed = true; 
+                                    this.mediaIO.observe(node); 
+                                }
+                            }
+
+                            if (node.tagName === 'VIDEO' && this.state.currentMedia) {
+                                const currentArt = this.state.currentMedia.closest('article');
+                                const newArt = node.closest('article');
+                                if (currentArt && currentArt === newArt) {
+                                    if (this.state.currentMedia._mixStatusId) {
+                                        node._mixStatusId = this.state.currentMedia._mixStatusId;
+                                    }
+                                    this.triggerZoom(node);
+                                }
+                            }
+
+                            scanAndObserve(node);
+                        }
                     }
                 }
             }
         });
-    };
-    scanAndObserve(document);
-    this._globalDomObserver = new MutationObserver((mutations) => {
-        if (!this.cfg.isSiteEnabled()) return;
-        for (let m of mutations) {
-            if (m.addedNodes && m.addedNodes.length > 0) {
-                for (let node of m.addedNodes) {
-                    if (node.nodeType === Node.ELEMENT_NODE) {
-                        const isImgOrVideo = node.tagName === 'IMG' || node.tagName === 'VIDEO';
-                        if (isImgOrVideo) {
-                            if (!node._mix01Observed) { 
-                                node._mix01Observed = true; 
-                                this.mediaIO.observe(node); 
-                            }
-                        }
+        this._globalDomObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    }
 
-                        // 🚀 核心改进：解决 X 视频延迟挂载导致沉浸模式不显示的问题
-                        // 检测到 React 动态挂载了新视频，且该视频与当前浏览的占位图属于同一条推文
-                        if (node.tagName === 'VIDEO' && this.state.currentMedia) {
-                            const currentArt = this.state.currentMedia.closest('article');
-                            const newArt = node.closest('article');
-                            if (currentArt && currentArt === newArt) {
-                                // 继承和转移已有的 Status ID 属性
-                                if (this.state.currentMedia._mixStatusId) {
-                                    node._mixStatusId = this.state.currentMedia._mixStatusId;
-                                }
-                                // 静默热重载过渡至视频渲染
-                                this.triggerZoom(node);
-                            }
-                        }
-
-                        scanAndObserve(node);
-                    }
-                }
-            }
-        }
-    });
-    this._globalDomObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
-}
     _toggleVideoPlay() {
         if (!this.state.currentMedia || this.state.currentMedia.tagName !== 'VIDEO') return;
         const v = this.state.currentMedia;
@@ -449,20 +446,30 @@ initPassiveDOMScanner() {
     }
 
     getMediaUnderCursor(clientX, clientY, target) {
+        // 🚀 核心改进 1：安全内存自愈。在检索前清除不可见及已从 DOM 卸载的 detached 节点，杜绝内存堆积泄露
+        for (let el of this.visibleMediaElements) {
+            if (!el.isConnected) {
+                this.visibleMediaElements.delete(el);
+            }
+        }
+
         if (target && (target.tagName === 'IMG' || target.tagName === 'VIDEO') && (target.src || target.tagName === 'VIDEO')) {
             this.state.lastTarget = target; this.state.lastFoundMedia = target; return target;
         }
         if (target && target === this.state.lastTarget && this.state.lastFoundMedia) return this.state.lastFoundMedia;
 
+        // 🚀 核心改进 2：高速无 Reflow 检索。使用 elementsFromPoint 代替对所有可见元素的全量遍历与坐标碰撞检测
+        const elementsUnderCursor = document.elementsFromPoint(clientX, clientY);
         let found = null;
         let minArea = Infinity;
 
-        for (let el of this.visibleMediaElements) {
+        for (const el of elementsUnderCursor) {
             if (el.id.includes('xyz') || el.id.includes('mix01')) continue;
-            if (!el.src && el.tagName !== 'VIDEO') continue;
 
-            const rect = el.getBoundingClientRect(); 
-            if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+            if ((el.tagName === 'IMG' || el.tagName === 'VIDEO') && this.visibleMediaElements.has(el)) {
+                if (!el.src && el.tagName !== 'VIDEO') continue;
+
+                const rect = el.getBoundingClientRect(); 
                 const area = rect.width * rect.height;
                 if (area < minArea) {
                     minArea = area;
@@ -476,6 +483,9 @@ initPassiveDOMScanner() {
     }
 
     handleMouseMove(e) {
+        // 🚀 只要鼠标移动，就即刻唤醒并延长沉浸式控制面板的活跃期
+        this.resetImmersiveHUDTimeout();
+
         if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') {
             this.render.elements.viewer.style.setProperty('cursor', 'default', 'important');
             clearTimeout(this._cursorHideTimer);
@@ -661,7 +671,7 @@ initPassiveDOMScanner() {
         this.state.customLensWidth = null; 
         this.state.customLensHeight = null;
         this.state.isZoomManuallyChanged = false;
-        window.__mix01State.userPaused = false;
+        window.__mix01State.userPaused = false; // 🚀 重置暂停状态，以便进入新节点时无条件自动播放视频
         
         this.state.currentMode = this.cfg.state.mode;
         this.state.currentRotate = 0;
@@ -835,6 +845,11 @@ initPassiveDOMScanner() {
         this._killPhysicsLoop(); 
         this.render.hide();
         clearTimeout(this._cursorHideTimer);
+        clearTimeout(this._hudIdleTimer); // 🚀 清理不活动隐藏计时器，防止产生悬空引用
+        if (this._cancelScrollWait) {
+            this._cancelScrollWait();
+            this._cancelScrollWait = null;
+        }
         this.mediaObserver.disconnect();
         if (this._resizeTimer) { clearTimeout(this._resizeTimer); this._resizeTimer = null; }
         if (this.render.hdState.progressTimer) { clearInterval(this.render.hdState.progressTimer); this.render.hdState.progressTimer = null; }
@@ -861,19 +876,29 @@ initPassiveDOMScanner() {
 
     handleBackgroundClick(e) {
         if (e.target !== this.render.elements.viewer) return;
+
         if (this.cfg.state.isImmersive) {
-            this.state.bgClickCount++;
-            if (this.state.bgClickCount === 1) {
-                this.render.showToast("⚠️ 请再点一次或双击退出");
-                this.state.bgClickTimer = setTimeout(() => { this.state.bgClickCount = 0; }, 1000); 
-            } else {
-                clearTimeout(this.state.bgClickTimer);
-                this.state.bgClickCount = 0;
-                this.exitImmersive();
+            // 🚀 计算本次操作位移。如果发生了拖拽或平移（位移大于 5px），判定为正常的滑动交互，不作为点击背景退出处理
+            const dx = Math.abs(e.clientX - this._pan.startX);
+            const dy = Math.abs(e.clientY - this._pan.startY);
+            if (this._pan.active || dx > 5 || dy > 5) {
+                return;
             }
+            this.exitImmersive();
         } else {
             this.hideViewer();
         }
+    }
+
+    resetImmersiveHUDTimeout() {
+        if (!this.cfg.state.isImmersive || this.render.elements.viewer.style.display !== 'block') return;
+
+        this.render.setHUDOpacity('1');
+
+        clearTimeout(this._hudIdleTimer);
+        this._hudIdleTimer = setTimeout(() => {
+            this.render.setHUDOpacity('0');
+        }, 2500);
     }
 
     matchCombo(e, comboStr) {
@@ -968,22 +993,67 @@ initPassiveDOMScanner() {
         this.render.showToast(isEnabled ? '✅ 已在此站点启用引擎' : '🚫 已在此站点禁用引擎');
     }
 
-    performSwitch(nextImg, msgText) {
+    // 🚀 核心改进：结合 scrollend 弹性等待滚动结束，取代硬编码 1.2s 漫长死等
+    waitForScrollEnd(callback) {
+        if (this._cancelScrollWait) {
+            this._cancelScrollWait();
+        }
+
+        let isEnded = false;
+        const cleanUp = () => {
+            window.removeEventListener('scrollend', onScrollEnd);
+            window.removeEventListener('scroll', onScrollDebounce);
+            clearTimeout(fallbackTimer);
+            clearTimeout(debounceTimer);
+            this._cancelScrollWait = null;
+        };
+
+        const onScrollEnd = () => {
+            if (isEnded) return;
+            isEnded = true;
+            cleanUp();
+            callback();
+        };
+
+        let debounceTimer;
+        const onScrollDebounce = () => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(onScrollEnd, 100); 
+        };
+
+        // 800ms 硬件安全兜底锁，防止页面无法滚动时触发死锁
+        const fallbackTimer = setTimeout(onScrollEnd, 800);
+
+        window.addEventListener('scrollend', onScrollEnd, { once: true, passive: true });
+        window.addEventListener('scroll', onScrollDebounce, { passive: true });
+
+        this._cancelScrollWait = cleanUp;
+    }
+
+    performSwitch(nextImg, direction, msgText) {
         if (msgText) this.render.showToast(msgText);
         this.state.keyboardSwitchTime = Date.now();
-        nextImg.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        
+        // 记录最后一次切换的方向，赋能主副方向动态配额预加载
+        this.state.lastSwitchDirection = direction;
+
+        // 🚀 核心改进：滚动发生前，即刻在最上层完成高清图的加载与排版（实现瞬时呈现）
         this.triggerZoom(nextImg);
 
-        setTimeout(() => {
+        // 底层页面静默对齐
+        nextImg.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+        this.waitForScrollEnd(() => {
             if (this.state.currentMedia === nextImg) {
                 const newRect = nextImg.getBoundingClientRect();
                 window.lastMouseX = newRect.left + newRect.width / 2;
                 window.lastMouseY = newRect.top + newRect.height / 2;
+                this.state.cachedRect = newRect; 
                 this.updateRender();
                 this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
                 this._updateGalleryCounter();
             }
-        }, 50);
+        });
     }
 
     async executePhantomAction(actionType) {
@@ -1109,18 +1179,27 @@ initPassiveDOMScanner() {
             }
             if (currentIndex === -1) return;
 
-            let direction = 1; 
-            if (!this.cfg.state.isImmersive && this._mouseVector.dy < -2) direction = -1; 
+            // 🚀 核心改进：智能双向预测预加载。优先向主流动方向预加载 N_main 张，同时向反方向预加载 N_opp 张。
+            // 在不超出用户预加载张数（N）的前提下，实现 100% 缓存覆盖，消除往回切图时的加载延迟。
+            const N = this.cfg.state.preloadCount;
+            let mainDir = this.state.lastSwitchDirection || 1;
+            if (!this.cfg.state.isImmersive && this._mouseVector.dy < -2) mainDir = -1; 
+
+            const oppCount = Math.floor(N * 0.3); // 反向配额占总数的 30%（向下取整）
+            const mainCount = N - oppCount;       // 主方向占其余全部，确保两者之和恒等于 N
+
+            const preloadPlan = [];
+            // 压入主路径配额
+            for (let i = 1; i <= mainCount; i++) {
+                preloadPlan.push(currentIndex + i * mainDir);
+            }
+            // 压入反路径配额
+            for (let i = 1; i <= oppCount; i++) {
+                preloadPlan.push(currentIndex + i * (-mainDir));
+            }
 
             let loadedCount = 0;
-            const scanTarget = this.cfg.state.preloadCount;
-
-            for (let i = 1; i <= scanTarget * 2; i++) {
-                if (loadedCount >= scanTarget) break;
-
-                const offset = i * direction;
-                const targetIndex = currentIndex + offset;
-                
+            for (const targetIndex of preloadPlan) {
                 if (targetIndex < 0 || targetIndex >= galleryImages.length) continue;
 
                 const media = galleryImages[targetIndex];
@@ -1161,6 +1240,9 @@ initPassiveDOMScanner() {
     handleKeyDown(e) {
         if (!this.cfg.state.hasAgreed) return;
         if (!this.cfg.isSiteEnabled()) return;
+
+        this.resetImmersiveHUDTimeout();
+
         const k = e.key.toLowerCase(); let up = false;
         const modeList = ['partial', 'full-follow'];
         const modeNames = { 'partial': '🔍 局部放大', 'full-follow': '🖼️ 整体跟随' };
@@ -1302,7 +1384,7 @@ initPassiveDOMScanner() {
 
             if (isNext) {
                 if (currentIndex < galleryImages.length - 1) {
-                    this.performSwitch(galleryImages[currentIndex + 1], "下一项 ⬇️");
+                    this.performSwitch(galleryImages[currentIndex + 1], 1, "下一项 ⬇️");
                 } else {
                     window.__mix01State.isFetchingMore = true;
                     this.render.showToast("⏳ 正在加载更多动态...");
@@ -1313,28 +1395,29 @@ initPassiveDOMScanner() {
                     
                     window.scrollBy({ top: window.innerHeight * 1.5, behavior: 'smooth' });
                     
-                    setTimeout(() => {
+                    // 🚀 核心改进：利用滚动完结监听器代替原有的固定延迟硬编码，实现即时切图
+                    this.waitForScrollEnd(() => {
                         const newGallery = this.getGalleryImages();
                         
                         let newIdx = newGallery.indexOf(this.state.currentMedia);
                         if (newIdx === -1) newIdx = newGallery.findIndex(media => (media.src||'video') === this.state.currentSrc);
                         
                         if (newIdx !== -1 && newIdx < newGallery.length - 1) {
-                            this.performSwitch(newGallery[newIdx + 1], "下一项 ⬇️");
+                            this.performSwitch(newGallery[newIdx + 1], 1, "下一项 ⬇️");
                         } else {
                             let currentLastSrc = newGallery[newGallery.length - 1]?.src || 'video';
                             if (currentLastSrc !== previousLastSrc && currentLastSrc !== this.state.currentSrc) {
-                                this.performSwitch(newGallery[0], "下一项 ⬇️");
+                                this.performSwitch(newGallery[0], 1, "下一项 ⬇️");
                             } else {
                                 this.render.showToast("🚧 到底啦！没有更多内容了");
                             }
                         }
                         window.__mix01State.isFetchingMore = false;
-                    }, 1200); 
+                    }); 
                 }
             } else {
                 if (currentIndex > 0) {
-                    this.performSwitch(galleryImages[currentIndex - 1], "⬆️ 上一项");
+                    this.performSwitch(galleryImages[currentIndex - 1], -1, "⬆️ 上一项");
                 } else {
                     window.__mix01State.isFetchingMore = true;
                     this.render.showToast("⏳ 正在向上翻阅...");
@@ -1345,7 +1428,8 @@ initPassiveDOMScanner() {
                     
                     window.scrollBy({ top: -window.innerHeight * 1.5, behavior: 'smooth' });
                     
-                    setTimeout(() => {
+                    // 🚀 核心改进：利用滚动完结监听器代替原有的固定延迟硬编码，实现即时切图
+                    this.waitForScrollEnd(() => {
                         const newGallery = this.getGalleryImages();
                         if (newGallery.length === 0) {
                             this.render.showToast("🚧 到顶啦！");
@@ -1357,17 +1441,17 @@ initPassiveDOMScanner() {
                         if (newIdx === -1) newIdx = newGallery.findIndex(media => (media.src||'video') === this.state.currentSrc);
                         
                         if (newIdx !== -1 && newIdx > 0) {
-                            this.performSwitch(newGallery[newIdx - 1], "⬆️ 上一项");
+                            this.performSwitch(newGallery[newIdx - 1], -1, "⬆️ 上一项");
                         } else {
                             let currentFirstSrc = newGallery[0].src || 'video';
                             if (currentFirstSrc !== previousFirstSrc && currentFirstSrc !== this.state.currentSrc) {
-                                this.performSwitch(newGallery[newGallery.length - 1], "⬆️ 上一项");
+                                this.performSwitch(newGallery[newGallery.length - 1], -1, "⬆️ 上一项");
                             } else {
                                 this.render.showToast("🚧 真的到顶啦！");
                             }
                         }
                         window.__mix01State.isFetchingMore = false;
-                    }, 1200);
+                    });
                 }
             }
             e.preventDefault(); 

@@ -108,45 +108,63 @@
                     return true;
                 }
 
-                // 3. 信息流场景：通过右上角“三个点”菜单关注 (修复两连击 Bug)
-                const caret = container.querySelector('[data-testid="caret"]');
+                // 3. 弹性容错逻辑：寻找右上角“三个点”下拉按钮
+                let caret = container.querySelector('[data-testid="caret"]');
+                if (!caret) {
+                    // 🚀 核心改进：当原生 ID 失效时，通过 SVG 内部下拉箭头 Path 矢量特征定位按钮
+                    const potentialCarets = container.querySelectorAll('button, [role="button"]');
+                    for (const btn of potentialCarets) {
+                        const svg = btn.querySelector('svg');
+                        if (svg && (svg.innerHTML.includes('M3.593 12') || svg.innerHTML.includes('M12 14c'))) {
+                            caret = btn;
+                            break;
+                        }
+                    }
+                }
                 if (!caret) return null;
 
                 tools.forceClick(caret);
 
-                // 【核心修复】：动态轮询等待菜单出现，最多等待 600ms (12 * 50ms)
+                // 轮询等待下拉菜单渲染完成（最多等待 600ms）
                 let menu = null;
                 for (let i = 0; i < 12; i++) {
                     await new Promise(r => setTimeout(r, 50));
                     const menus = Array.from(document.querySelectorAll('[role="menu"]'));
                     if (menus.length > 0) {
                         menu = menus[menus.length - 1];
-                        // 确保菜单里的 item 已经渲染完毕
                         if (menu.querySelector('[role="menuitem"]')) break;
                     }
                 }
 
                 if (!menu) {
-                    tools.forceClick(document.body); // 清除可能卡住的空菜单
+                    tools.forceClick(document.body); 
                     return null;
                 }
 
+                // 🚀 核心改进：针对多国语言（EN/ZH/JP 等）和无标 TestID 的菜单进行弹性文本匹配
                 const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
                 let targetBtn = null, willFollow = true;
                 for (let item of items) {
                     const text = item.textContent || '';
-                    if (/Unfollow|取消关注/i.test(text)) { targetBtn = item; willFollow = false; break; }
-                    else if (/Follow|关注/i.test(text)) { targetBtn = item; willFollow = true; break; }
+                    if (/Unfollow|取消关注|フォロー解除/i.test(text)) { 
+                        targetBtn = item; 
+                        willFollow = false; 
+                        break; 
+                    } else if (/Follow|关注|フォロー/i.test(text)) { 
+                        targetBtn = item; 
+                        willFollow = true; 
+                        break; 
+                    }
                 }
 
                 if (!targetBtn) {
-                    tools.forceClick(document.body); // 没找到关注按钮，关掉菜单
+                    tools.forceClick(document.body); 
                     return null;
                 }
 
                 tools.forceClick(targetBtn);
 
-                // 处理取消关注的二次确认弹窗
+                // 4. 处理“取消关注”时的二次确认弹窗
                 if (!willFollow) {
                     await new Promise(r => setTimeout(r, 200));
                     const confirmBtn = document.querySelector('[data-testid="confirmationSheetConfirm"]');
