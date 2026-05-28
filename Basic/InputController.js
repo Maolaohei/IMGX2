@@ -22,7 +22,7 @@ window.Mix01InputController = class InputController {
         this.cfg = configManager;
         this.render = renderer;
         renderer.controller = this; // 🚀 建立对等双向绑定，与渲染引擎共用单一主 Session ID 会话锁
-        this._hdFetchController = null; // 🚀 已清理：保存当前高清原图 Fetch 的 AbortController，防止垃圾带宽积压
+        this._hdFetchController = null; // 🚀 保存当前高清原图 Fetch 的 AbortController，防止垃圾带宽积压
         this._eventSignalController = new AbortController(); // 🚀 方案五新增：创建事件解绑专用控制器
         
         this.imgPool = new Mix01ImagePool();
@@ -51,7 +51,8 @@ window.Mix01InputController = class InputController {
             _galleryCache: null, _galleryCacheDirty: true,
             currentMode: 'partial', currentRotate: 0, currentMirror: 1,
             lastSwitchDirection: 1, 
-            renderRequestId: 0
+            renderRequestId: 0,
+            isViewerVisible: false // 🚀 零开销核心：彻底解耦 DOM 样式读取，用内存变量代替对 elements.viewer.style.display 的读取
         };
 
         this.physics = {
@@ -214,7 +215,7 @@ window.Mix01InputController = class InputController {
         this.physics.active = true;
 
         const loop = () => {
-            if (!this.state.currentMedia || this.render.elements.viewer.style.display !== 'block' || this._drag.active) {
+            if (!this.state.currentMedia || !this.state.isViewerVisible || this._drag.active) {
                 this.physics.active = false;
                 this._physicsFrameId = null;
                 return;
@@ -322,7 +323,7 @@ window.Mix01InputController = class InputController {
         }, optKey);
         
         document.addEventListener('wheel', (e) => {
-            if (this.cfg.state.wheelZoomEnabled && this.render.elements.viewer.style.display === 'block') {
+            if (this.cfg.state.wheelZoomEnabled && this.state.isViewerVisible) {
                 e.preventDefault();
                 const delta = e.deltaY > 0 ? -0.25 : 0.25;
                 this.physics.targetZoom = Math.max(0.2, this.physics.targetZoom + delta);
@@ -350,6 +351,12 @@ window.Mix01InputController = class InputController {
         document.addEventListener('touchend', (e) => {
             if (this._pan.active || this._drag.active) { convertTouchToMouse(e, 'mouseup'); }
         }, { signal: this._eventSignalController.signal, passive: true });
+
+        // 🚀 方案六：监听视口切换和浏览器失焦。一旦用户离开当前页面/切出窗口，立刻自动清理隐藏，消除幽灵残留卡死现象
+        window.addEventListener('blur', () => this.hideViewer(), { signal: this._eventSignalController.signal });
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') this.hideViewer();
+        }, { signal: this._eventSignalController.signal });
     }
 
     // 🚀 方案五新增：自毁回收函数。当发现插件更新或重载时运行，彻底解除自身的所有资源和系统关联
@@ -415,7 +422,7 @@ window.Mix01InputController = class InputController {
     handleMouseMove(e) {
         this.resetImmersiveHUDTimeout();
 
-        if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') {
+        if (this.cfg.state.isImmersive && this.state.isViewerVisible) {
             this.render.elements.viewer.style.setProperty('cursor', 'default', 'important');
             clearTimeout(this._cursorHideTimer);
             this._cursorHideTimer = setTimeout(() => {
@@ -428,7 +435,7 @@ window.Mix01InputController = class InputController {
         }
 
         if (!this.cfg.isSiteEnabled()) {
-            if (this.render.elements.viewer.style.display === 'block') this.hideViewer();
+            if (this.state.isViewerVisible) this.hideViewer();
             return;
         }
 
@@ -439,13 +446,13 @@ window.Mix01InputController = class InputController {
             media = this.getMediaUnderCursor(e.clientX, e.clientY, e.target);
             
             if (media && (media !== this.state.currentMedia || (media.src||'video') !== this.state.currentSrc)) {
-                if (Date.now() - this.state.keyboardSwitchTime < 500) return;
+                if (Date.now() - this.state.keyboardSwitchTime > 500) return;
                 if (!this.isMediaFiltered(media)) { this.triggerZoom(media); }
                 return;
             }
         }
 
-        if (this.state.currentMedia && this.render.elements.viewer.style.display === 'block' && this.state.cachedRect) {
+        if (this.state.currentMedia && this.state.isViewerVisible && this.state.cachedRect) {
             if (!this.state.currentMedia.isConnected) {
                 this.hideViewer();
                 return;
@@ -471,7 +478,7 @@ window.Mix01InputController = class InputController {
     }
 
     handleMouseOver(e) {
-        if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
+        if (this.cfg.state.isImmersive && this.state.isViewerVisible) return;
         if (!this.cfg.isSiteEnabled()) return;
 
         const t = e.target;
@@ -490,7 +497,7 @@ window.Mix01InputController = class InputController {
 
     handleMouseOut(e) {
         clearTimeout(this._hoverDelayTimer);
-        if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
+        if (this.cfg.state.isImmersive && this.state.isViewerVisible) return;
         if (e.target === this.state.currentMedia) {
             if (e.relatedTarget && this.state.currentMedia.contains(e.relatedTarget)) return;
             if (Date.now() - this.state.keyboardSwitchTime > 500) this.hideViewer();
@@ -499,7 +506,7 @@ window.Mix01InputController = class InputController {
 
     handleMouseLeave() {
         clearTimeout(this._hoverDelayTimer);
-        if (this.cfg.state.isImmersive && this.render.elements.viewer.style.display === 'block') return;
+        if (this.cfg.state.isImmersive && this.state.isViewerVisible) return;
         if (Date.now() - this.state.keyboardSwitchTime > 500) this.hideViewer();
     }
 
@@ -535,9 +542,8 @@ window.Mix01InputController = class InputController {
                     this.updateRender(); 
 
                     try {
-                        // 🚀 核心重构：彻底抛弃 JS 层的 fetch -> Blob -> createObjectURL 链路。
-                        // 直接通过浏览器 C++ 图片解码管线，将 HDUrl 直接写入 img.src，在 JS 堆中实现 0 内存分配！
-                        // 彻底解决由于 10MB+ 大图片在 V8 Heap 中瞬间创建与释放引起的 GC StW 卡顿
+                        // 🚀 核心重构：直接调用 MediaRenderer 的 renderHDImageDirect，不走 JS Heap Blob 管道
+                        // 0 JS 堆开销，完全消除大图 Blob 产生的 GC 阻塞与内存压力
                         await this.render.renderHDImageDirect(hdUrl, savedSessionId);
                         
                         if (this.state.renderRequestId !== savedSessionId) return;
@@ -548,6 +554,7 @@ window.Mix01InputController = class InputController {
                         }
                         this.render.hdState.progress = 100;
                         this.render.hdState.isLoading = false;
+                        this._hdFetchController = null;
 
                         // 记录该高清原图已完全下载并解码就绪
                         getLoadedHdUrls().add(hdUrl);
@@ -576,7 +583,7 @@ window.Mix01InputController = class InputController {
 
         const savedSessionId = ++this.state.renderRequestId;
 
-        // 🌟 核心修复：在最顶部解析高清原图地址，并进行“已就绪”自检
+        // 🌟 提前计算目标地址，防止在过滤预加载时误杀当前目标的网络流
         let initialSrc = target.src;
         let hdUrl = null;
         if (window.__mix01State.hdUrlMap && window.__mix01State.hdUrlMap[initialSrc]) {
@@ -649,6 +656,7 @@ window.Mix01InputController = class InputController {
             this.render.setStyle(this.render.elements.status, 'display', 'none');
             this.render.setStyle(this.render.elements.notice, 'display', 'block');
             this.render.setStyle(this.render.elements.viewer, 'display', 'block');
+            this.state.isViewerVisible = true; // 🚀 更新显示状态
             if (this.cfg.state.isImmersive) {
                 this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
             }
@@ -660,9 +668,10 @@ window.Mix01InputController = class InputController {
 
         if (target.tagName === 'VIDEO') {
             this.render.setStyle(this.render.elements.img, 'display', 'none');
-            this.render.startVideoRender(target); // 🌟 此处已在上一轮修正：改回了 correct 的 this.render 链式调用
+            this.render.startVideoRender(target);
             this.updateRender();
             this.render.setStyle(this.render.elements.viewer, 'display', 'block');
+            this.state.isViewerVisible = true; // 🚀 更新显示状态
             if (this.cfg.state.isImmersive) {
                 this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
                 this._updateGalleryCounter();
@@ -677,9 +686,10 @@ window.Mix01InputController = class InputController {
         this.render.setStyle(this.render.elements.img, 'max-height', 'none');
         this.render.setStyle(this.render.elements.img, 'opacity', '0');
 
-        // 🚀 核心改进 3：基于大图实际就绪情况决定行内源。如果是已就绪状态，加载高清原图；如果不是，安全退回到低清源占位
+        // 🚀 基于大图实际就绪情况决定行内源
         this.state.currentHdUrl = isAlreadyDownloaded ? hdUrl : null;
         this.render.elements.img.src = initialSrc;
+        this.state.isViewerVisible = true; // 🚀 更新显示状态
         
         this.render.elements.img.decode().then(() => {
             if (this.state.renderRequestId === savedSessionId && this.state.currentSrc === target.src) {
@@ -730,12 +740,12 @@ window.Mix01InputController = class InputController {
 
         const sW = window.innerWidth;
         const sH = window.innerHeight;
-        
+
         // 🚀 核心纠偏：实时读取图片当前在视口中的物理坐标。
         // 因为我们在该方法中只读不写，而是在稍后的 updateLayout 里才写样式，这遵循了完美的 Read-then-Write 渲染流，CPU 占用为 0ms，且完美免受网页微小滚动、动态加载排版变化的位置偏移污染
         const rect = this.state.currentMedia.getBoundingClientRect();
         this.state.cachedRect = rect; // 顺便刷新缓存
-        
+
         const x = e ? e.clientX : (window.lastMouseX !== undefined ? window.lastMouseX : sW / 2);
         const y = e ? e.clientY : (window.lastMouseY !== undefined ? window.lastMouseY : sH / 2);
         
@@ -794,6 +804,7 @@ window.Mix01InputController = class InputController {
     hideViewer() {
         // 🚀 核心修复 1：关闭时强行递增 Session ID，作废当前会话所有未决的异步操作（如解码、未完成的 HD 加载等）
         this.state.renderRequestId++;
+        this.state.isViewerVisible = false; // 🚀 重置状态
 
         // 🚀 核心修复 2：立即掐断当前正在传输的高清原图网络数据流，释放通道并杜绝带宽浪费
         if (this._hdFetchController) {
@@ -828,6 +839,7 @@ window.Mix01InputController = class InputController {
 
     exitImmersive() {
         this.cfg.state.isImmersive = false;
+        this.state.isViewerVisible = false; // 🚀 重置状态
         
         // 🚀 核心修复：沉浸模式改为站点隔离隔离保存
         const host = window.location.hostname;
@@ -861,7 +873,7 @@ window.Mix01InputController = class InputController {
     }
 
     resetImmersiveHUDTimeout() {
-        if (!this.cfg.state.isImmersive || this.render.elements.viewer.style.display !== 'block') return;
+        if (!this.cfg.state.isImmersive || !this.state.isViewerVisible) return;
 
         this.render.setHUDOpacity('1');
 
@@ -1280,7 +1292,7 @@ window.Mix01InputController = class InputController {
                 
                 this.render.showToast('🌌 开启沉浸音视频图库');
 
-                if (!this.state.currentMedia || this.render.elements.viewer.style.display !== 'block') {
+                if (!this.state.currentMedia || !this.state.isViewerVisible) {
                     const galleryImages = this.getGalleryImages();
                     if (galleryImages.length > 0) {
                         const nextImg = galleryImages[0];
@@ -1298,7 +1310,7 @@ window.Mix01InputController = class InputController {
             return;
         }
 
-        if (this.render.elements.viewer.style.display !== 'block') return;
+        if (!this.state.isViewerVisible) return;
 
         if (this.cfg.state.isImmersive) {
             this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
@@ -1401,7 +1413,7 @@ window.Mix01InputController = class InputController {
         else if (k === 'arrowup' || k === 'w' || k === 'arrowdown' || k === 's') {
             if (!this.cfg.state.isImmersive || window.__mix01State.isFetchingMore) return;
 
-            // 🚀 核心优化 1：连连看高频按键节流。防止物理按键触发频率过快，导致平滑滚动动画堆积、索引错位
+            // 🚀 核心优化 1：连连看高频按节流。防止物理按键触发频率过快，导致平滑滚动动画堆积、索引错位
             const now = Date.now();
             if (now - (this._lastKeySwitchTime || 0) < 150) {
                 e.preventDefault();
@@ -1519,4 +1531,3 @@ window.Mix01InputController = class InputController {
         }
     }
 };
-
