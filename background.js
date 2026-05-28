@@ -1,8 +1,40 @@
-// background.js - Mix01 终极自愈下载引擎 (终极性能保活版)
+// background.js - Mix01 自愈下载引擎 (原生多级右键菜单 + 性能稳定保活版)
 chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.removeAll(() => {
-        chrome.contextMenus.create({ id: "saveOriginalImgMix01", title: "保存原图 (Mix01)", contexts: ["image"] });
+        // 🚀 新增：创建原生右键专属父级菜单
+        chrome.contextMenus.create({
+            id: "mix01Parent",
+            title: "🌅 Mix01 引擎助手",
+            contexts: ["image"]
+        });
+        
+        // 🚀 新增：创建 4 个对应沉浸模式功能的子级菜单
+        chrome.contextMenus.create({
+            id: "saveOriginalImgMix01",
+            parentId: "mix01Parent",
+            title: "💾 保存高清原图",
+            contexts: ["image"]
+        });
+        chrome.contextMenus.create({
+            id: "copyOriginalImgMix01",
+            parentId: "mix01Parent",
+            title: "📋 复制高清原图",
+            contexts: ["image"]
+        });
+        chrome.contextMenus.create({
+            id: "openInTabOriginalImgMix01",
+            parentId: "mix01Parent",
+            title: "↗️ 在新标签页打开原图",
+            contexts: ["image"]
+        });
+        chrome.contextMenus.create({
+            id: "copyUrlOriginalImgMix01",
+            parentId: "mix01Parent",
+            title: "🔗 复制原图链接",
+            contexts: ["image"]
+        });
     });
+
     if (chrome.declarativeNetRequest) {
         chrome.declarativeNetRequest.updateDynamicRules({
             removeRuleIds: [1],
@@ -15,7 +47,42 @@ chrome.runtime.onInstalled.addListener(() => {
     }
 });
 
-// 🚀 优化：原子锁状态机与轻量缓冲池，彻底斩断常驻 Promise 闭包链，规避 SW 积压内存泄漏
+// 🚀 监听原生右键点击，分发任务给网页前台执行
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+    if (!tab || !tab.id) return;
+    
+    const actionMap = {
+        "saveOriginalImgMix01": "saveHDUrl",
+        "copyOriginalImgMix01": "copyHDUrl",
+        "copyUrlOriginalImgMix01": "copyHDUrlText" // 复制链接
+    };
+
+    if (actionMap[info.menuItemId]) {
+        chrome.tabs.sendMessage(tab.id, { 
+            action: actionMap[info.menuItemId], 
+            clickedUrl: info.srcUrl 
+        }).catch(err => console.warn("Mix01 Context Menu dispatch failed:", err));
+    } 
+    else if (info.menuItemId === "openInTabOriginalImgMix01") {
+        // 请求前台解析出原图地址后，由后台静默开启新标签页
+        chrome.tabs.sendMessage(tab.id, { 
+            action: "getHDUrl", 
+            clickedUrl: info.srcUrl 
+        }, (response) => {
+            if (chrome.runtime.lastError) {
+                chrome.tabs.create({ url: info.srcUrl }); // 异常兜底
+                return;
+            }
+            if (response && response.url) {
+                chrome.tabs.create({ url: response.url });
+            } else {
+                chrome.tabs.create({ url: info.srcUrl });
+            }
+        });
+    }
+});
+
+// 🚀 原子锁状态机与轻量缓冲池，彻底斩断常驻 Promise 闭包链，规避 SW 积压内存泄漏
 let _isHistoryWriting = false;
 const _historyBuffer = [];
 
@@ -118,7 +185,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
-// 🚀 核心改进 5：将大图拦截下载逻辑独立抽离。引入 MV3 流式分块自唤醒保活机制，彻底防挂死 [3]
+// 🌟 沉浸式后台下载模块
 async function handleImmersiveDownload(request, sendResponse) {
     let initialUrl = request.url;
     if (initialUrl.startsWith('//')) initialUrl = 'https:' + initialUrl;
@@ -195,7 +262,6 @@ async function handleImmersiveDownload(request, sendResponse) {
 
         const urlObj = new URL(finalUrl);
         
-        // 🚀 强力清洗 CDN 脏参数和小尾巴（剥离 :orig, :large, @2x 等参数）
         let lastSegment = decodeURIComponent(urlObj.pathname.split('/').pop() || '');
         lastSegment = lastSegment.split(':')[0]; 
         lastSegment = lastSegment.split('@')[0]; 
@@ -247,7 +313,7 @@ async function handleImmersiveDownload(request, sendResponse) {
         
         if (useBase64) {
             const contentLength = res.headers.get('content-length');
-            const sizeLimit = 20 * 1024 * 1024; // 20MB 熔断安全阀门
+            const sizeLimit = 10 * 1024 * 1024; 
 
             if (contentLength && parseInt(contentLength) > sizeLimit) {
                 chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
@@ -273,8 +339,6 @@ async function handleImmersiveDownload(request, sendResponse) {
                     chunks.push(value);
                     chunkCount++;
 
-                    // 🚀 核心保活优化：在 MV3 长连接流式下载大文件时，每拉取 50 块数据，触发一次极轻量 local 
-                    // 读取，以此强制刷新 MV3 引擎 Service Worker 的活跃状态计时器，防止后台进程被浏览器强制掐断挂死。
                     if (chunkCount % 50 === 0) {
                         await chrome.storage.local.get('_sw_keep_alive_').catch(() => {});
                     }
@@ -286,23 +350,25 @@ async function handleImmersiveDownload(request, sendResponse) {
                     });
                 } else {
                     const blob = new Blob(chunks, { type: contentType });
-                    const blobUrl = URL.createObjectURL(blob);
-                    chrome.downloads.download({ url: blobUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, (downloadId) => {
-                        if (downloadId !== undefined) {
-                            const listener = (delta) => {
-                                if (delta.id === downloadId && delta.state) {
-                                    if (delta.state.current === 'complete' || delta.state.current === 'interrupted') {
-                                        URL.revokeObjectURL(blobUrl);
-                                        chrome.downloads.onChanged.removeListener(listener);
-                                    }
-                                }
-                            };
-                            chrome.downloads.onChanged.addListener(listener);
-                        } else {
-                            URL.revokeObjectURL(blobUrl);
-                        }
-                        saveToHistory(finalDownloadName, (chrome.runtime.lastError || downloadId === undefined) ? "❌ 失败" : "✅ 成功 (BlobURL)");
-                    });
+                    const fileReader = new FileReader();
+                    
+                    fileReader.onloadend = () => {
+                        const dataUrl = fileReader.result;
+                        chrome.downloads.download({ url: dataUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, (downloadId) => {
+                            if (downloadId === undefined) {
+                                chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" });
+                            }
+                            saveToHistory(finalDownloadName, (chrome.runtime.lastError || downloadId === undefined) ? "❌ 失败" : "✅ 成功 (Base64)");
+                        });
+                    };
+
+                    fileReader.onerror = () => {
+                        chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
+                            saveToHistory(finalDownloadName, "❌ 失败 (Base64转换异常回退)");
+                        });
+                    };
+
+                    fileReader.readAsDataURL(blob);
                 }
             }
         } else {

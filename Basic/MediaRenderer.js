@@ -78,7 +78,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
         const styleBlock = document.createElement('style');
         styleBlock.textContent = `
             /* 🚀 核心改进 3：去除静态 will-change 样式声明，与 content.css 控制逻辑完全对齐 */
-            #img-zoom-pro-viewer-xyz { z-index: 2147483647 !important; }
+            #img-zoom-pro-viewer-xyz { 
+                z-index: 2147483647 !important; 
+                contain: layout paint !important; 
+            }
             #img-zoom-pro-viewer-xyz.mode-immersive {
                 transform: none !important;
                 left: 0 !important;
@@ -86,6 +89,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 width: 100vw !important;
                 height: 100vh !important;
             }
+                
             #zoom-img-xyz, #zoom-img-buffer-xyz, #zoom-video-xyz {
                 color: transparent !important; 
                 position: absolute !important;
@@ -101,6 +105,12 @@ window.Mix01MediaRenderer = class MediaRenderer {
             #zoom-img-xyz {
                 z-index: 2 !important;
                 transition: filter 0.3s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.12s ease-in-out !important;
+            }
+            /* 🚀 方案二新增：利用 GPU 图像最近邻算法，防止微型小图高倍放大时发生视觉模糊 */
+            .is-small-pixelated {
+                image-rendering: -webkit-optimize-contrast !important;
+                image-rendering: -moz-crisp-edges !important;
+                image-rendering: pixelated !important;
             }
             #zoom-img-buffer-xyz {
                 z-index: 1 !important;
@@ -162,7 +172,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     renderHDImage(blob, hdUrl, targetSessionId) {
-        // 🚀 核心改进 5：彻底淘汰隔离的 _lastActiveSessionId。渲染大图前，直接读取控制器唯一的 renderRequestId 会话状态锁
         const currentSessionId = this.controller ? this.controller.state.renderRequestId : 0;
         if (targetSessionId && targetSessionId !== currentSessionId) {
             return;
@@ -174,11 +183,17 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
         this.elements.imgBuffer.classList.add('mix01-hd-buffering');
 
-        if (this.elements.img.src && this.elements.img.style.opacity === '1') {
+        // 🌟 视觉升级：确保 imgBuffer 在高清图完全渲染成功之前作为绝对画面支撑，绝不留白
+        if (this.elements.img.src && this.elements.img.style.opacity !== '0') {
             this.elements.imgBuffer.src = this.elements.img.src;
+            this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
+        } else if (this.controller && this.controller.state.currentMedia) {
+            // 兜底：如果主图此前是空的，将低清缩略图加载到 buffer 作为视觉底层，消除黑白屏瞬间
+            this.elements.imgBuffer.src = this.controller.state.currentMedia.src || '';
             this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
         }
 
+        // 隐藏主图，让其在后台解码
         this.setStyle(this.elements.img, 'opacity', '0');
         this.elements.img.classList.add('mix01-hd-buffering');
         this.elements.img.src = newBlobUrl;
@@ -186,15 +201,18 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.elements.img.decode().then(() => {
             const activeId = this.controller ? this.controller.state.renderRequestId : 0;
             if (targetSessionId && targetSessionId !== activeId) return;
+            
+            // 解码完毕后，再将主图显现，彻底防止未渲染先暴光造成的短暂空白
             this.elements.img.classList.remove('mix01-hd-buffering');
             this.setStyle(this.elements.img, 'opacity', '1');
             this.setStyle(this.elements.imgBuffer, 'opacity', '0');
+            
             setTimeout(() => {
                 if (this.elements.img.style.opacity === '1') {
                     this.setStyle(this.elements.imgBuffer, 'display', 'none');
                     this.elements.imgBuffer.classList.remove('mix01-hd-buffering');
                 }
-            }, 150);
+            }, 200); // 增加淡出平滑过渡至 200ms
         }).catch(() => {
             const activeId = this.controller ? this.controller.state.renderRequestId : 0;
             if (targetSessionId && targetSessionId !== activeId) return;
@@ -251,6 +269,14 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 getUrlAndProcess(url => { window.Mix01Utils.copyImageToClipboard(url, this); sendResponse({ status: 'ok' }); }); return true;
             } else if (request.action === 'saveHDUrl') {
                 getUrlAndProcess(url => { window.Mix01Utils.downloadMedia(url, this, false); sendResponse({ status: 'ok' }); }); return true;
+            } else if (request.action === 'copyHDUrlText') {
+                // 🚀 新增：实现原生右键“复制链接”的数据解析与写入操作，自动推送 toast 交互提示
+                getUrlAndProcess(url => { 
+                    navigator.clipboard.writeText(url).catch(() => {}); 
+                    this.showToast('🔗 原图链接已复制'); 
+                    sendResponse({ status: 'ok' }); 
+                }); 
+                return true;
             }
         });
     }
@@ -335,7 +361,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     hide() {
-        this.setStyles(this.elements.viewer, { display: 'none', cursor: 'default', 'pointer-events': 'none' });
+        this.elements.viewer.style.setProperty('display', 'none', 'important');
+
+        this.setStyles(this.elements.viewer, { cursor: 'default', 'pointer-events': 'none' });
         this.setStyles(this.elements.img,    { display: 'none', cursor: 'default' });
         
         this.elements.img.src = '';
@@ -346,18 +374,43 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.setStyles(this.elements.videoClone, { display: 'none' }); 
         this.setStyles(this.elements.spinner, { display: 'none' });
         this.setStyles(this.elements.progressContainer, { display: 'none' });
-        this.setStyle(this.elements.hint, 'opacity', '0');
+        
+        this.setStyles(this.elements.hint, { display: 'none', opacity: '0' });
+        
         this.hideContextMenu();
         this.clearBlobCache();
         if (this.elements.counter) this.elements.counter.style.setProperty('display', 'none', 'important');
 
-        // 🚀 核心改进 3：隐藏面板时重置清空样式类（解除 is-active 类），强制释放合成层 GPU 合成显存
+        // 清理沉浸模式遗留的行内属性，防止切换回普通模式后布局异常、尺寸紊乱
+        const staleProperties = ['left', 'top', 'width', 'height', 'border-radius', 'border', 'background-color', 'background-image', 'pointer-events', 'transform'];
+        staleProperties.forEach(prop => this.elements.viewer.style.removeProperty(prop));
+
         this.setClass(this.elements.viewer, '');
 
         clearTimeout(this.hudState.cursorTimer);
         clearTimeout(this.hudState.hintTimer);
         this.hdState.isLoading = false;
         this.stopVideoRender();
+
+        // 🚀 终极修复：彻底注销并清空当前容器元素的样式缓存。
+        // 由于我们在上文中使用 removeProperty 强行抹去了容器实际的行内属性，为了防止在第二次 hover 时 
+        // 缓存管理器（setStyles）产生“数值未发生变动”的误判并跳过重新赋值，我们在此处直接对该 DOM 的缓存进行物理删除，
+        // 从而迫使下一次物理 hover 触发时，引擎 100% 重新向 DOM 写入精确的高宽与定位数据。
+        this.styleCache.delete(this.elements.viewer);
+    }
+
+    // 🚀 方案五新增：自毁卸载函数
+    destroy() {
+        this.hide();
+        if (this.domGuard) this.domGuard.disconnect();
+        
+        // 彻底从页面 DOM 中安全剥离本扩展注入的所有 UI 元素，杜绝升级后多重 DOM 残留冲突
+        const els = [this.elements.viewer, this.elements.toast, this.elements.ctxMenu, this.elements.counter];
+        els.forEach(el => {
+            if (el && el.parentNode) {
+                el.parentNode.removeChild(el);
+            }
+        });
     }
 
     startVideoRender(videoEl) {
@@ -504,7 +557,8 @@ window.Mix01MediaRenderer = class MediaRenderer {
             nw = this.videoState.lastNw || activeMedia.videoWidth || rect.width || 1;
             nh = this.videoState.lastNh || activeMedia.videoHeight || rect.height || 1;
         } else {
-            if (activeMedia.complete && activeMedia.naturalWidth > 0) {
+            // 🚀 核心优化 6：彻底移除 complete 依赖。当高清图元数据加载完且 naturalWidth > 0 时便能立即提取高宽，在原图仅下载了 1%时就提早纠正镜头长宽比，消除下载完时的猛烈振荡
+            if (activeMedia.naturalWidth > 0) {
                 nw = activeMedia.naturalWidth;
                 nh = activeMedia.naturalHeight;
             } else {
@@ -515,7 +569,15 @@ window.Mix01MediaRenderer = class MediaRenderer {
         
         this._syncNoticeVisibility();
 
-        // 🚀 核心改进 3：追加 .is-active 类。使得 content.css 中设计的 will-change 在查看时启动，在关闭时卸载
+        // 🚀 核心优化 7：对微缩 Favicon/像素图挂载锐化类名
+        if (isSmallOptimized) {
+            activeMedia.classList.add('is-small-pixelated');
+            if (!isVideo) this.elements.imgBuffer.classList.add('is-small-pixelated');
+        } else {
+            activeMedia.classList.remove('is-small-pixelated');
+            if (!isVideo) this.elements.imgBuffer.classList.remove('is-small-pixelated');
+        }
+
         const modeClass = this.cfg.state.isImmersive ? 'mode-immersive' : `mode-${mode}`;
         this.setClass(this.elements.viewer, `${modeClass} is-active`);
 
@@ -822,6 +884,14 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 if (this._pendingHudSrc !== currentSrc) return;
 
                 if (states) {
+                    // 🚀 核心修复：载入时优先合并本地内存状态缓存，彻底解决沉浸状态下喜欢和关注显示不同步的 Bug
+                    if (window.__mix01State && window.__mix01State.likeMediaCache && window.__mix01State.likeMediaCache[currentSrc] !== undefined) {
+                        states.isLiked = window.__mix01State.likeMediaCache[currentSrc];
+                    }
+                    if (states.authorName && window.__mix01State && window.__mix01State.followAuthorCache && window.__mix01State.followAuthorCache[states.authorName] !== undefined) {
+                        states.isFollowed = window.__mix01State.followAuthorCache[states.authorName];
+                    }
+
                     if (states.isLiked)    { likeText = '已喜欢'; likeIcon = '❤️'; likeColor = '#FF4060'; }
                     if (states.isFollowed) { followText = '已关注'; followIcon = '✓'; followColor = '#1da1f2'; }
                     if (states.authorName) { authorDisplay = `<span class="author-tag">${states.authorName}</span> 的作品`; }
@@ -901,4 +971,19 @@ window.Mix01MediaRenderer = class MediaRenderer {
             }
         });
     }
+
+    // 🚀 方案五新增：自毁卸载函数
+    destroy() {
+        this.hide();
+        if (this.domGuard) this.domGuard.disconnect();
+        
+        // 彻底从页面 DOM 中安全剥离本扩展注入的所有 UI 元素，杜绝升级后多重 DOM 残留冲突
+        const els = [this.elements.viewer, this.elements.toast, this.elements.ctxMenu, this.elements.counter];
+        els.forEach(el => {
+            if (el && el.parentNode) {
+                el.parentNode.removeChild(el);
+            }
+        });
+    }
 };
+
