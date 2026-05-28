@@ -171,54 +171,65 @@ window.Mix01MediaRenderer = class MediaRenderer {
         if (this.elements.counter)  this.elements.counter.style.setProperty('z-index',  '2147483647', 'important');
     }
 
-    renderHDImage(blob, hdUrl, targetSessionId) {
-        const currentSessionId = this.controller ? this.controller.state.renderRequestId : 0;
-        if (targetSessionId && targetSessionId !== currentSessionId) {
-            return;
-        }
+    // 🚀 核心优化：直接基于 C++ 原生管线进行零堆内存加载，并返回 Promise 便于控制器流控制
+    renderHDImageDirect(hdUrl, targetSessionId) {
+        return new Promise((resolve, reject) => {
+            const currentSessionId = this.controller ? this.controller.state.renderRequestId : 0;
+            if (targetSessionId && targetSessionId !== currentSessionId) {
+                reject(new Error("Session expired"));
+                return;
+            }
 
-        this._currentBlob = blob; 
-        const newBlobUrl = URL.createObjectURL(blob);
-        this._activeBlobUrls.add(newBlobUrl);
+            this.elements.imgBuffer.classList.add('mix01-hd-buffering');
 
-        this.elements.imgBuffer.classList.add('mix01-hd-buffering');
+            // 确保 imgBuffer 完美覆盖画面
+            if (this.elements.img.src && this.elements.img.style.opacity !== '0.01') {
+                this.elements.imgBuffer.src = this.elements.img.src;
+                this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
+            } else if (this.controller && this.controller.state.currentMedia) {
+                this.elements.imgBuffer.src = this.controller.state.currentMedia.src || '';
+                this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
+            }
 
-        // 🌟 视觉升级：确保 imgBuffer 在高清图完全渲染成功之前作为绝对画面支撑，绝不留白
-        if (this.elements.img.src && this.elements.img.style.opacity !== '0') {
-            this.elements.imgBuffer.src = this.elements.img.src;
-            this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
-        } else if (this.controller && this.controller.state.currentMedia) {
-            // 兜底：如果主图此前是空的，将低清缩略图加载到 buffer 作为视觉底层，消除黑白屏瞬间
-            this.elements.imgBuffer.src = this.controller.state.currentMedia.src || '';
-            this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
-        }
+            // 🚀 方案一优化：设置极微弱的 opacity: 0.01 占位（而非 0）。
+            // 这会强制让浏览器底层（Blink）在多线程后台中，提前对该高清大图执行 GPU 纹理异步光栅化与显存上传（Pre-paint）。
+            // 当稍后 decode 完毕切换到 1 时，大图早已在显存中就绪，实现零丢帧过渡。
+            this.setStyle(this.elements.img, 'opacity', '0.01');
+            this.elements.img.classList.add('mix01-hd-buffering');
+            this.elements.img.src = hdUrl;
 
-        // 隐藏主图，让其在后台解码
-        this.setStyle(this.elements.img, 'opacity', '0');
-        this.elements.img.classList.add('mix01-hd-buffering');
-        this.elements.img.src = newBlobUrl;
-
-        this.elements.img.decode().then(() => {
-            const activeId = this.controller ? this.controller.state.renderRequestId : 0;
-            if (targetSessionId && targetSessionId !== activeId) return;
-            
-            // 解码完毕后，再将主图显现，彻底防止未渲染先暴光造成的短暂空白
-            this.elements.img.classList.remove('mix01-hd-buffering');
-            this.setStyle(this.elements.img, 'opacity', '1');
-            this.setStyle(this.elements.imgBuffer, 'opacity', '0');
-            
-            setTimeout(() => {
-                if (this.elements.img.style.opacity === '1') {
-                    this.setStyle(this.elements.imgBuffer, 'display', 'none');
-                    this.elements.imgBuffer.classList.remove('mix01-hd-buffering');
+            this.elements.img.decode().then(() => {
+                const activeId = this.controller ? this.controller.state.renderRequestId : 0;
+                if (targetSessionId && targetSessionId !== activeId) {
+                    reject(new Error("Session expired"));
+                    return;
                 }
-            }, 200); // 增加淡出平滑过渡至 200ms
-        }).catch(() => {
-            const activeId = this.controller ? this.controller.state.renderRequestId : 0;
-            if (targetSessionId && targetSessionId !== activeId) return;
-            this.elements.img.classList.remove('mix01-hd-buffering');
-            this.setStyle(this.elements.img, 'opacity', '1');
-            this.setStyle(this.elements.imgBuffer, 'opacity', '0');
+
+                // 🌟 高清大图彻底就绪，无缝淡入显现
+                this.elements.img.classList.remove('mix01-hd-buffering');
+                this.setStyle(this.elements.img, 'opacity', '1');
+                this.setStyle(this.elements.imgBuffer, 'opacity', '0');
+                
+                setTimeout(() => {
+                    if (this.elements.img.style.opacity === '1') {
+                        this.setStyle(this.elements.imgBuffer, 'display', 'none');
+                        this.elements.imgBuffer.classList.remove('mix01-hd-buffering');
+                    }
+                }, 200);
+                
+                resolve();
+            }).catch((err) => {
+                const activeId = this.controller ? this.controller.state.renderRequestId : 0;
+                if (targetSessionId && targetSessionId !== activeId) {
+                    reject(new Error("Session expired"));
+                    return;
+                }
+                
+                this.elements.img.classList.remove('mix01-hd-buffering');
+                this.setStyle(this.elements.img, 'opacity', '1');
+                this.setStyle(this.elements.imgBuffer, 'opacity', '0');
+                reject(err);
+            });
         });
     }
 
@@ -585,10 +596,30 @@ window.Mix01MediaRenderer = class MediaRenderer {
         let cDW = 0, cDH = 0; 
         let vW = 0, vH = 0;   
 
-        let vxP = xP, vyP = yP;
-        if (rotate === 90) { vxP = 1 - yP; vyP = xP; }
-        else if (rotate === 180) { vxP = 1 - xP; vyP = 1 - yP; }
-        else if (rotate === 270) { vxP = yP; vyP = 1 - xP; }
+        // 🚀 核心纠偏：逆向计算网页 CSS（如 object-fit: cover）裁剪掉的原图物理尺寸比例，消除比例错乱引起的大图对不准、位置偏移 Bug
+        let correctedXP = xP;
+        let correctedYP = yP;
+        
+        if (nw > 1 && nh > 1 && rect.width > 0 && rect.height > 0) {
+            const rOrig = nw / nh; // 原图比例
+            const rThumb = rect.width / rect.height; // 缩略图容器比例
+            
+            if (rOrig > rThumb) {
+                // 原图比缩略图更宽（图片左右两边被 cropped 裁剪了）
+                const factor = rThumb / rOrig;
+                correctedXP = xP * factor + 0.5 * (1 - factor);
+            } else if (rOrig < rThumb) {
+                // 原图比缩略图更高（图片上下两边被 cropped 裁剪了）
+                const factor = rOrig / rThumb;
+                correctedYP = yP * factor + 0.5 * (1 - factor);
+            }
+        }
+
+        // 将纠偏后的高精原图比例代入物理旋转和镜像公式中
+        let vxP = correctedXP, vyP = correctedYP;
+        if (rotate === 90) { vxP = 1 - correctedYP; vyP = correctedXP; }
+        else if (rotate === 180) { vxP = 1 - correctedXP; vyP = 1 - correctedYP; }
+        else if (rotate === 270) { vxP = correctedYP; vyP = 1 - correctedXP; }
         if (mirror === -1) { vxP = 1 - vxP; }
 
         if (this.cfg.state.isImmersive) {

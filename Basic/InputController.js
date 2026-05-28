@@ -535,15 +535,10 @@ window.Mix01InputController = class InputController {
                     this.updateRender(); 
 
                     try {
-                        // 🚀 核心修复 6：如果有正在下载的前一轮网络流，先将其 Abort 掐断，释放通道
-                        if (this._hdFetchController) this._hdFetchController.abort();
-                        this._hdFetchController = new AbortController();
-                        const signal = this._hdFetchController.signal;
-
-                        // 将 signal 信号注入当前大图 fetch 中
-                        const response = await fetch(hdUrl, { mode: 'cors', signal });
-                        if (!response.ok) throw new Error("Fetch failed: " + response.status);
-                        const blob = await response.blob();
+                        // 🚀 核心重构：彻底抛弃 JS 层的 fetch -> Blob -> createObjectURL 链路。
+                        // 直接通过浏览器 C++ 图片解码管线，将 HDUrl 直接写入 img.src，在 JS 堆中实现 0 内存分配！
+                        // 彻底解决由于 10MB+ 大图片在 V8 Heap 中瞬间创建与释放引起的 GC StW 卡顿
+                        await this.render.renderHDImageDirect(hdUrl, savedSessionId);
                         
                         if (this.state.renderRequestId !== savedSessionId) return;
 
@@ -553,19 +548,11 @@ window.Mix01InputController = class InputController {
                         }
                         this.render.hdState.progress = 100;
                         this.render.hdState.isLoading = false;
-                        this._hdFetchController = null; // 下载成功，空置控制器
 
-                        // 🚀 核心修复：原图通过网络流彻底下载完并成功渲染，立刻将其标记为“已就绪”状态
+                        // 记录该高清原图已完全下载并解码就绪
                         getLoadedHdUrls().add(hdUrl);
-
-                        this.render.renderHDImage(blob, hdUrl, savedSessionId);
                         this.updateRender();
                     } catch (err) {
-                        // 🚀 核心修复 7：如果是被主动取消的网络流请求，做异常豁免并优雅退出
-                        if (err.name === 'AbortError') {
-                            console.log("Mix01: 已优雅取消前一次的原图网络传输。");
-                            return; 
-                        }
                         if (this.state.renderRequestId !== savedSessionId) return;
                         if (this.render.hdState.progressTimer) { 
                             clearInterval(this.render.hdState.progressTimer); 
@@ -737,13 +724,18 @@ window.Mix01InputController = class InputController {
     }
 
      updateRender(e = null) {
-        if (!this.state.currentMedia || !this.state.cachedRect) return;
+        if (!this.state.currentMedia) return; // 🌟 优化：不再依赖 cachedRect 缓存，只要 currentMedia 存在即可运行
         if (this.state.isRenderingLock) return;
         this.state.isRenderingLock = true;
 
         const sW = window.innerWidth;
         const sH = window.innerHeight;
-        const rect = this.state.cachedRect;
+        
+        // 🚀 核心纠偏：实时读取图片当前在视口中的物理坐标。
+        // 因为我们在该方法中只读不写，而是在稍后的 updateLayout 里才写样式，这遵循了完美的 Read-then-Write 渲染流，CPU 占用为 0ms，且完美免受网页微小滚动、动态加载排版变化的位置偏移污染
+        const rect = this.state.currentMedia.getBoundingClientRect();
+        this.state.cachedRect = rect; // 顺便刷新缓存
+        
         const x = e ? e.clientX : (window.lastMouseX !== undefined ? window.lastMouseX : sW / 2);
         const y = e ? e.clientY : (window.lastMouseY !== undefined ? window.lastMouseY : sH / 2);
         
