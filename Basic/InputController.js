@@ -872,7 +872,16 @@ window.Mix01InputController = class InputController {
 
     exitImmersive() {
         this.cfg.state.isImmersive = false;
-        this.cfg.save({ isImmersive: false });
+        
+        // 🚀 核心修复：沉浸模式改为站点隔离隔离保存
+        const host = window.location.hostname;
+        if (host) {
+            this.cfg.siteImmersive[host] = false;
+            this.cfg.save({ siteImmersive: this.cfg.siteImmersive });
+        } else {
+            this.cfg.save({ isImmersive: false });
+        }
+        
         this.render.showToast('❎ 已退出沉浸图库模式');
         this.hideViewer();
     }
@@ -1262,7 +1271,16 @@ window.Mix01InputController = class InputController {
                 this.exitImmersive();
             } else {
                 this.cfg.state.isImmersive = true;
-                this.cfg.save({ isImmersive: true });
+                
+                // 🚀 核心修复：开启时也仅记录当前网站的沉浸状态偏好
+                const host = window.location.hostname;
+                if (host) {
+                    this.cfg.siteImmersive[host] = true;
+                    this.cfg.save({ siteImmersive: this.cfg.siteImmersive });
+                } else {
+                    this.cfg.save({ isImmersive: true });
+                }
+                
                 this.render.showToast('🌌 开启沉浸音视频图库');
 
                 if (!this.state.currentMedia || this.render.elements.viewer.style.display !== 'block') {
@@ -1273,8 +1291,7 @@ window.Mix01InputController = class InputController {
                         this.triggerZoom(nextImg);
                     } else {
                         this.render.showToast("⚠️ 当前页面未发现可用媒体");
-                        this.cfg.state.isImmersive = false;
-                        this.cfg.save({ isImmersive: false });
+                        this.exitImmersive(); // 🚀 统一退出的调用，防止偏好状态残留
                     }
                 } else {
                     this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
@@ -1338,7 +1355,19 @@ window.Mix01InputController = class InputController {
             if (this.cfg.state.isImmersive) {
                 this.render.showToast(`⚠️ 请双击背景或按 ${(this.cfg.keys.immersive || 'Esc').toUpperCase()} 退出沉浸模式`);
             } else {
-                this.state.currentMode = modeList[(modeList.indexOf(this.state.currentMode) + 1) % modeList.length]; 
+                const nextMode = modeList[(modeList.indexOf(this.state.currentMode) + 1) % modeList.length]; 
+                this.state.currentMode = nextMode;
+                
+                // 🚀 核心修复：将按 V 键切换的视图模式，作为站点独立偏好永久保存在 siteModes 中
+                const host = window.location.hostname;
+                if (host) {
+                    this.cfg.siteModes[host] = nextMode;
+                    this.cfg.save({ siteModes: this.cfg.siteModes });
+                } else {
+                    this.cfg.save({ mode: nextMode });
+                }
+                this.cfg.state.mode = nextMode; // 立即同步到配置管理器的内存状态中，使后续 hover 的图片直接生效
+
                 up = true; this._killPhysicsLoop(); this._startPhysicsLoop();
                 this.render.showToast(modeNames[this.state.currentMode]); 
             }

@@ -341,9 +341,29 @@ document.addEventListener('DOMContentLoaded', () => {
         elements.siteModesList.innerHTML = entries.map(([host, mode]) => `
             <div class="disabled-site-item">
                 <span class="site-name">${escapeHTML(host)}</span>
-                <span style="font-size:11px; color:var(--primary);">${modeLabels[mode] || mode}</span>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size:11px; color:var(--primary);">${modeLabels[mode] || mode}</span>
+                    <button class="remove-btn clear-site-mode-btn" data-host="${escapeHTML(host)}" title="恢复全局默认" style="background:none; border:none; color:var(--danger-color); cursor:pointer; font-size:14px; line-height:1;">✕</button>
+                </div>
             </div>
         `).join('');
+
+        // 🚀 核心修复：允许用户手动点击 ✕ 清除该站点的偏好记忆，使其退回到“默认视图模式”
+        elements.siteModesList.querySelectorAll('.clear-site-mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const host = btn.dataset.host;
+                chrome.storage.local.get(['siteModes'], (res) => {
+                    const currentModes = res.siteModes || {};
+                    delete currentModes[host];
+                    chrome.storage.local.set({ siteModes: currentModes }, () => {
+                        renderSiteModes(currentModes);
+                        if (host === cachedCurrentTabHostname) {
+                            refreshCurrentSiteUI();
+                        }
+                    });
+                });
+            });
+        });
     };
 
     if (elements.manualSiteAddBtn && elements.manualSiteInput) {

@@ -12,6 +12,7 @@ window.Mix01ConfigManager = class ConfigManager {
             triggerDelay: 0,        // ms：鼠标悬停后延迟显示放大镜（0 = 即时）
         };
         this.globalMode = 'partial';
+        this.globalImmersive = false; // 🚀 新增：保存全局默认沉浸状态
         this.keys = {
             mode: 'v', rotate: 'r', mirror: 'm', zoomIn: '=', zoomOut: '-',
             immersive: 'ctrl+f12', like: 'l', follow: 'f',
@@ -20,6 +21,7 @@ window.Mix01ConfigManager = class ConfigManager {
             openInTab: 'o',   // ✨ 新增：在新标签页打开原图
         };
         this.siteModes = {};
+        this.siteImmersive = {};      // 🚀 新增：保存各站点的沉浸状态字典
         this.disabledSites = {};    // ✨ 新增：{hostname: true} 表示该站点已关闭引擎
         this.isContextValid = () => !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
         this.initSync();
@@ -52,12 +54,19 @@ window.Mix01ConfigManager = class ConfigManager {
         if (res.mode !== undefined) this.globalMode = res.mode;
         if (res.siteModes !== undefined) this.siteModes = res.siteModes;
         if (res.disabledSites !== undefined) this.disabledSites = res.disabledSites || {};
+        
+        // 🚀 新增：彻底分离全局沉浸状态与站点独立沉浸状态
+        if (res.isImmersive !== undefined) this.globalImmersive = res.isImmersive;
+        if (res.siteImmersive !== undefined) this.siteImmersive = res.siteImmersive || {};
 
         const host = window.location.hostname;
         if (host) {
             this.state.mode = this.siteModes[host] || this.globalMode || 'partial';
+            // 🚀 新增：当前站点的沉浸状态优先读取 siteImmersive[host]，若无则回退到全局默认值
+            this.state.isImmersive = this.siteImmersive[host] !== undefined ? this.siteImmersive[host] : (this.globalImmersive || false);
         } else {
             this.state.mode = this.globalMode || 'partial';
+            this.state.isImmersive = this.globalImmersive || false;
         }
         // 兼容已移除的 full-center 模式
         if (this.state.mode === 'full-center') this.state.mode = 'full-follow';

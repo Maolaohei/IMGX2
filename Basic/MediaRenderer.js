@@ -581,8 +581,11 @@ window.Mix01MediaRenderer = class MediaRenderer {
             this._enforceTopLayer();
 
             if (this.cfg.state.hasAgreed) {
-                cDW = rect.width * activeZoom;
-                cDH = rect.height * activeZoom;
+                // 🚀 修复：计算缩略图在不失真情况下的基准缩放比例（适应 cover 裁剪）
+                const thumbScale = Math.max(rect.width / nw, rect.height / nh);
+                cDW = nw * thumbScale * activeZoom;
+                cDH = nh * thumbScale * activeZoom;
+                
                 vW = isRotated ? cDH : cDW;
                 vH = isRotated ? cDW : cDH;
 
@@ -596,8 +599,38 @@ window.Mix01MediaRenderer = class MediaRenderer {
                     lensW = isRotated ? customLensHeight : customLensWidth;
                     lensH = isRotated ? customLensWidth : customLensHeight;
                 } else {
-                    lensW = Math.min(350, Math.max(100, vW + 20));
-                    lensH = Math.min(350, Math.max(100, vH + 20));
+                    // 🚀 比例锁定算法：使放大镜盒子的尺寸比例与图片真实的宽高比例保持一致
+                    const ratio = vW / (vH || 1);
+                    
+                    // 1. 获取包含安全边距的初始放大后尺寸
+                    let targetW = vW + 20;
+                    let targetH = vH + 20;
+                    
+                    // 2. 锁定最大尺寸（350px）：如果超出最大边界，按真实比例缩小，防止退化为正方形
+                    const maxLensSize = 350;
+                    if (targetW > maxLensSize || targetH > maxLensSize) {
+                        if (ratio >= 1) {
+                            targetW = maxLensSize;
+                            targetH = targetW / ratio;
+                        } else {
+                            targetH = maxLensSize;
+                            targetW = targetH * ratio;
+                        }
+                    }
+                    
+                    // 3. 锁定最小尺寸（100px）：防止放大镜过小，同时规避极端长宽比导致单边拉伸过长
+                    const minLensSize = 100;
+                    if (targetW < minLensSize) {
+                        targetW = minLensSize;
+                        targetH = Math.min(maxLensSize, targetW / ratio);
+                    }
+                    if (targetH < minLensSize) {
+                        targetH = minLensSize;
+                        targetW = Math.min(maxLensSize, targetH * ratio);
+                    }
+                    
+                    lensW = targetW;
+                    lensH = targetH;
                 }
                 this.setStyles(this.elements.viewer, { width: lensW + 'px', height: lensH + 'px' });
 
@@ -646,8 +679,11 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 this.setStyles(this.elements.imgBuffer, { position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
             }
 
-            let tW = rect.width * activeZoom, tH = rect.height * activeZoom;
-            cDW = tW; cDH = tH;
+            // 🚀 修复：根据真实长宽比计算，防止跟随大图模式变形
+            const thumbScale = Math.max(rect.width / nw, rect.height / nh);
+            cDW = nw * thumbScale * activeZoom;
+            cDH = nh * thumbScale * activeZoom;
+            
             vW = isRotated ? cDH : cDW;
             vH = isRotated ? cDW : cDH;
 
