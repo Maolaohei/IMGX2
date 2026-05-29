@@ -1,4 +1,3 @@
-// Basic/InputController.js
 class Mix01ImagePool {
     constructor() { this.pool = []; }
     acquire() { return this.pool.pop() || new Image(); }
@@ -8,7 +7,7 @@ class Mix01ImagePool {
     }
 }
 
-// 🚀 新增：获取或初始化全局已就绪原图 URL 集合，确保在页面生命周期中跨会话持久存在
+// 获取或初始化全局已就绪原图 URL 集合，确保在页面生命周期中跨会话持久存在
 const getLoadedHdUrls = () => {
     window.__mix01State = window.__mix01State || {};
     if (!window.__mix01State.loadedHdUrls) {
@@ -21,9 +20,9 @@ window.Mix01InputController = class InputController {
     constructor(configManager, renderer) {
         this.cfg = configManager;
         this.render = renderer;
-        renderer.controller = this; // 🚀 建立对等双向绑定，与渲染引擎共用单一主 Session ID 会话锁
-        this._hdFetchController = null; // 🚀 保存当前高清原图 Fetch 的 AbortController，防止垃圾带宽积压
-        this._eventSignalController = new AbortController(); // 🚀 方案五新增：创建事件解绑专用控制器
+        renderer.controller = this; // 建立对等双向绑定，与渲染引擎共用单一主 Session ID 会话锁
+        this._hdFetchController = null; // 保存当前高清原图 Fetch 的 AbortController，防止垃圾带宽积记
+        this._eventSignalController = new AbortController(); // 创建事件解绑专用控制器
         
         this.imgPool = new Mix01ImagePool();
         this.activePreloads = new Set();
@@ -52,7 +51,7 @@ window.Mix01InputController = class InputController {
             currentMode: 'partial', currentRotate: 0, currentMirror: 1,
             lastSwitchDirection: 1, 
             renderRequestId: 0,
-            isViewerVisible: false // 🚀 零开销核心：彻底解耦 DOM 样式读取，用内存变量代替对 elements.viewer.style.display 的读取
+            isViewerVisible: false // 彻底解耦 DOM 样式读取，用内存变量代替对 elements.viewer.style.display 的读取
         };
 
         this.physics = {
@@ -61,10 +60,24 @@ window.Mix01InputController = class InputController {
             targetPanY: 0, currentPanY: 0,
             active: false
         };
+
+        // 高精多指与指针平移惯性追踪器
+        this._pointerTracker = {
+            isDragging: false,
+            startX: 0, startY: 0,
+            startPanX: 0, startPanY: 0,
+            lastX: 0, lastY: 0,
+            velocityX: 0, velocityY: 0,
+            lastTime: 0,
+            activePointers: new Map(),
+            startPinchDist: 0,
+            startPinchZoom: 1,
+            startPinchCenter: { x: 0, y: 0 }
+        };
         
         this.preloadedUrls = new Set();
         this.preloadedUrlsQueue = [];
-        this._preloadImgInstancesMap = new Map(); // 🚀 新增：保存预加载 Image 实例的强引用保护池，防止 V8 垃圾回收提前释放内存缓存 (Memory Cache)
+        this._preloadImgInstancesMap = new Map(); // 保存预加载 Image 实例的强引用保护池，防止 V8 垃圾回收提前释放内存缓存 (Memory Cache)
         this.compiledKeys = {}; 
         this._preloadTimer = null;   
         this._resizeTimer = null;    
@@ -72,7 +85,7 @@ window.Mix01InputController = class InputController {
         this._cursorHideTimer = null; 
         this._hudIdleTimer = null; 
         this._cancelScrollWait = null; 
-        this._clickStart = null; // 🚀 全局点击起点，支持在小图模式下也能完美退出查看器
+        this._clickStart = null; // 全局点击起点，支持在小图模式下也能完美退出查看器
         this._lastDetectTime = 0;
         this._lastRectTime = 0;
         this._physicsFrameId = null; 
@@ -133,7 +146,6 @@ window.Mix01InputController = class InputController {
         };
         scanAndObserve(document);
 
-        // 🌟 性能核心：建立扫描缓存延迟队列
         this._scanQueue = [];
         this._scanTimer = null;
 
@@ -143,7 +155,7 @@ window.Mix01InputController = class InputController {
             this._scanQueue = [];
 
             batch.forEach(node => {
-                if (!node.isConnected) return; // 过滤已经被卸载的历史残余节点
+                if (!node.isConnected) return; 
                 
                 scanAndObserve(node);
 
@@ -163,7 +175,6 @@ window.Mix01InputController = class InputController {
         const queueNodeForScan = (node) => {
             this._scanQueue.push(node);
             if (!this._scanTimer) {
-                // 🚀 空闲帧调度机制：优先利用 requestIdleCallback 进行防抖批处理，将 DOM 扫描延迟到空闲帧运行
                 const scheduler = window.requestIdleCallback || window.requestAnimationFrame || ((cb) => setTimeout(cb, 50));
                 scheduler(() => {
                     processScanQueue();
@@ -186,7 +197,6 @@ window.Mix01InputController = class InputController {
                                     this.mediaIO.observe(node); 
                                 }
                             }
-                            // 将扫描压力托管给延迟防抖队列
                             queueNodeForScan(node);
                         }
                     }
@@ -215,7 +225,7 @@ window.Mix01InputController = class InputController {
         this.physics.active = true;
 
         const loop = () => {
-            if (!this.state.currentMedia || !this.state.isViewerVisible || this._drag.active) {
+            if (!this.state.currentMedia || !this.state.isViewerVisible || this._pointerTracker.isDragging) {
                 this.physics.active = false;
                 this._physicsFrameId = null;
                 return;
@@ -254,7 +264,7 @@ window.Mix01InputController = class InputController {
         this.physics.active = false;
     }
 
-    _clampTargetPan() {
+    _clampTargetPan(elastic = false) {
         if (!this.state.currentMedia) return;
         const nw = this.state.currentMedia.naturalWidth || 0;
         const nh = this.state.currentMedia.naturalHeight || 0;
@@ -263,11 +273,50 @@ window.Mix01InputController = class InputController {
         const vH = (isRotated ? nw : nh) * this.physics.targetZoom;
         const sw = window.innerWidth, sh = window.innerHeight;
 
-        if (vW <= sw) this.physics.targetPanX = 0;
-        else this.physics.targetPanX = Math.max(-(vW - sw), Math.min(0, this.physics.targetPanX));
+        const minPanX = vW <= sw ? 0 : -(vW - sw);
+        const maxPanX = 0;
+        const minPanY = vH <= sh ? 0 : -(vH - sh);
+        const maxPanY = 0;
 
-        if (vH <= sh) this.physics.targetPanY = 0;
-        else this.physics.targetPanY = Math.max(-(vH - sh), Math.min(0, this.physics.targetPanY));
+        if (elastic) {
+            // 超出视口边缘时提供弹性拉力阻尼感 (Rubber-Banding)
+            const applyDamp = (val, min, max) => {
+                if (val < min) return min + (val - min) * 0.3;
+                if (val > max) return max + (val - max) * 0.3;
+                return val;
+            };
+            this.physics.targetPanX = applyDamp(this.physics.targetPanX, minPanX, maxPanX);
+            this.physics.targetPanY = applyDamp(this.physics.targetPanY, minPanY, maxPanY);
+        } else {
+            // 物理硬边界吸附
+            this.physics.targetPanX = Math.max(minPanX, Math.min(maxPanX, this.physics.targetPanX));
+            this.physics.targetPanY = Math.max(minPanY, Math.min(maxPanY, this.physics.targetPanY));
+        }
+    }
+
+    _applyKineticInertia(vx, vy) {
+        let currentVx = vx * 16; // 缩放因子对齐至 60FPS 每帧渲染跨度
+        let currentVy = vy * 16;
+        const friction = 0.92;   // 阻尼系数
+
+        const step = () => {
+            // 重新按住指针或退出时无缝切断惯性平移
+            if (this._pointerTracker.isDragging || !this.state.isViewerVisible) return;
+
+            this.physics.targetPanX += currentVx;
+            this.physics.targetPanY += currentVy;
+
+            currentVx *= friction;
+            currentVy *= friction;
+
+            this._clampTargetPan(false); // 阻尼衰减边缘吸附
+            this._startPhysicsLoop();
+
+            if (Math.abs(currentVx) > 0.05 || Math.abs(currentVy) > 0.05) {
+                requestAnimationFrame(step);
+            }
+        };
+        requestAnimationFrame(step);
     }
 
     _isEditableTarget(tgt) {
@@ -280,11 +329,162 @@ window.Mix01InputController = class InputController {
     }
 
     bindEvents() {
-        // 🚀 方案五新增：定义带有 Abort 信号的统一配置，允许后期单行代码直接取消以下全部事件绑定
         const optPassive = { signal: this._eventSignalController.signal, capture: true, passive: true };
         const optActive  = { signal: this._eventSignalController.signal, capture: true, passive: false };
         const optKey     = { signal: this._eventSignalController.signal, capture: true };
 
+        const viewer = this.render.elements.viewer;
+
+        // 🚀 指针按下：支持多指缩放与单手拖拽惯性平移，彻底避免 convertTouchToMouse 报错
+        viewer.addEventListener('pointerdown', (e) => {
+            if (!this.state.isViewerVisible) return;
+
+            this._pointerTracker.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+            // 双指手势识别准备
+            if (this._pointerTracker.activePointers.size === 2) {
+                const pts = Array.from(this._pointerTracker.activePointers.values());
+                this._pointerTracker.startPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+                this._pointerTracker.startPinchZoom = this.physics.targetZoom;
+                this._pointerTracker.startPinchCenter = {
+                    x: (pts[0].x + pts[1].x) / 2,
+                    y: (pts[0].y + pts[1].y) / 2
+                };
+                this._pointerTracker.isDragging = false;
+                return;
+            }
+
+            // 单指或鼠标左键拖拽准备
+            if (e.button === 0) {
+                e.preventDefault();
+                this._pointerTracker.isDragging = true;
+                this._pointerTracker.startX = e.clientX;
+                this._pointerTracker.startY = e.clientY;
+                this._pointerTracker.startPanX = this.physics.targetPanX;
+                this._pointerTracker.startPanY = this.physics.targetPanY;
+                this._pointerTracker.lastX = e.clientX;
+                this._pointerTracker.lastY = e.clientY;
+                this._pointerTracker.velocityX = 0;
+                this._pointerTracker.velocityY = 0;
+                this._pointerTracker.lastTime = performance.now();
+
+                viewer.setPointerCapture(e.pointerId);
+            }
+        }, { signal: this._eventSignalController.signal });
+
+        // 🚀 指针平移：计算拖拽滑行速度并兼容多指缩放 (Pinch-to-Zoom)
+        document.addEventListener('pointermove', (e) => {
+            if (!this.state.isViewerVisible) return;
+
+            if (this._pointerTracker.activePointers.has(e.pointerId)) {
+                this._pointerTracker.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            }
+
+            // 1. 处理双指 Pinch-to-Zoom 手势
+            if (this._pointerTracker.activePointers.size === 2) {
+                const pts = Array.from(this._pointerTracker.activePointers.values());
+                const currentDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+                const scaleFactor = currentDist / (this._pointerTracker.startPinchDist || 1);
+                
+                const oldZoom = this.physics.targetZoom;
+                const newZoom = Math.max(0.5, Math.min(25.0, this._pointerTracker.startPinchZoom * scaleFactor));
+                
+                if (oldZoom !== newZoom) {
+                    const centerX = this._pointerTracker.startPinchCenter.x;
+                    const centerY = this._pointerTracker.startPinchCenter.y;
+                    
+                    this.physics.targetPanX = centerX - (centerX - this.physics.targetPanX) * (newZoom / oldZoom);
+                    this.physics.targetPanY = centerY - (centerY - this.physics.targetPanY) * (newZoom / oldZoom);
+                    this.physics.targetZoom = newZoom;
+                    this.state.isZoomManuallyChanged = true;
+                    this._clampTargetPan();
+                    this._startPhysicsLoop();
+                }
+                return;
+            }
+
+            // 2. 单指或鼠标正常拖动
+            if (this._pointerTracker.isDragging) {
+                const now = performance.now();
+                const dt = now - this._pointerTracker.lastTime;
+                
+                const dx = e.clientX - this._pointerTracker.startX;
+                const dy = e.clientY - this._pointerTracker.startY;
+                
+                if (dt > 0) {
+                    this._pointerTracker.velocityX = (e.clientX - this._pointerTracker.lastX) / dt;
+                    this._pointerTracker.velocityY = (e.clientY - this._pointerTracker.lastY) / dt;
+                }
+                
+                this._pointerTracker.lastX = e.clientX;
+                this._pointerTracker.lastY = e.clientY;
+                this._pointerTracker.lastTime = now;
+                
+                this.physics.targetPanX = this._pointerTracker.startPanX + dx;
+                this.physics.targetPanY = this._pointerTracker.startPanY + dy;
+                this.state.isZoomManuallyChanged = true;
+                
+                this._clampTargetPan(true); // 物理回弹阻尼
+                this._startPhysicsLoop();
+            }
+        }, { signal: this._eventSignalController.signal });
+
+        // 🚀 指针抬起：触发动量平滑阻尼滑行动画 (Kinetic Panning)
+        const onPointerUpOrCancel = (e) => {
+            this._pointerTracker.activePointers.delete(e.pointerId);
+            
+            if (this._pointerTracker.isDragging) {
+                this._pointerTracker.isDragging = false;
+                viewer.releasePointerCapture(e.pointerId);
+                
+                const speed = Math.sqrt(this._pointerTracker.velocityX ** 2 + this._pointerTracker.velocityY ** 2);
+                if (speed > 0.15) {
+                    this._applyKineticInertia(this._pointerTracker.velocityX, this._pointerTracker.velocityY);
+                } else {
+                    this._clampTargetPan(false);
+                    this._startPhysicsLoop();
+                }
+            }
+            
+            if (this._pointerTracker.activePointers.size < 2) {
+                this._pointerTracker.startPinchDist = 0;
+            }
+        };
+        document.addEventListener('pointerup', onPointerUpOrCancel, { signal: this._eventSignalController.signal });
+        document.addEventListener('pointercancel', onPointerUpOrCancel, { signal: this._eventSignalController.signal });
+
+        // 🚀 滚轮缩放：重构为指针锚定中心缩放 (Cursor-Centric Zoom)
+        document.addEventListener('wheel', (e) => {
+            if (this.cfg.state.wheelZoomEnabled && this.state.isViewerVisible) {
+                e.preventDefault();
+                
+                const oldZoom = this.physics.targetZoom;
+                const zoomFactor = 1.25;
+                const delta = e.deltaY < 0 ? zoomFactor : 1 / zoomFactor;
+                const newZoom = Math.max(0.5, Math.min(25.0, oldZoom * delta));
+                
+                if (oldZoom !== newZoom) {
+                    const mouseX = e.clientX;
+                    const mouseY = e.clientY;
+                    
+                    // 以指针当前的物理悬停原点作为坐标缩放锚点，防止平移跑偏
+                    this.physics.targetPanX = mouseX - (mouseX - this.physics.targetPanX) * (newZoom / oldZoom);
+                    this.physics.targetPanY = mouseY - (mouseY - this.physics.targetPanY) * (newZoom / oldZoom);
+                    this.physics.targetZoom = newZoom;
+                    
+                    this.state.isZoomManuallyChanged = true;
+                    this._clampTargetPan();
+                    this._startPhysicsLoop();
+                    
+                    clearTimeout(this._wheelToastTimer);
+                    this._wheelToastTimer = setTimeout(() => {
+                        this.render.showToast(`🔍 ${this.physics.targetZoom.toFixed(1)}x`);
+                    }, 200);
+                }
+            }
+        }, { signal: this._eventSignalController.signal, passive: false });
+
+        // 页面底层的鼠标追踪（用于悬停发现和速度向量计算，保持不变）
         document.addEventListener('mousemove', (e) => {
             window.lastMouseX = e.clientX; window.lastMouseY = e.clientY;
             const now = performance.now();
@@ -321,73 +521,33 @@ window.Mix01InputController = class InputController {
             }
             this.handleKeyDown(e);
         }, optKey);
-        
-        document.addEventListener('wheel', (e) => {
-            if (this.cfg.state.wheelZoomEnabled && this.state.isViewerVisible) {
-                e.preventDefault();
-                const delta = e.deltaY > 0 ? -0.25 : 0.25;
-                this.physics.targetZoom = Math.max(0.2, this.physics.targetZoom + delta);
-                this.state.isZoomManuallyChanged = true;
-                this._clampTargetPan();
-                this._startPhysicsLoop();
-                clearTimeout(this._wheelToastTimer);
-                this._wheelToastTimer = setTimeout(() => {
-                    this.render.showToast(`🔍 ${this.physics.targetZoom.toFixed(1)}x`);
-                }, 200);
-            }
-        }, { signal: this._eventSignalController.signal, passive: false });
 
-        this.render.elements.viewer.addEventListener('touchstart', (e) => {
-            if (this.cfg.state.isImmersive) { convertTouchToMouse(e, 'mousedown'); }
-        }, { signal: this._eventSignalController.signal, passive: true });
-
-        document.addEventListener('touchmove', (e) => {
-            if (this._pan.active || this._drag.active) {
-                convertTouchToMouse(e, 'mousemove');
-                e.preventDefault(); 
-            }
-        }, { signal: this._eventSignalController.signal, passive: false });
-
-        document.addEventListener('touchend', (e) => {
-            if (this._pan.active || this._drag.active) { convertTouchToMouse(e, 'mouseup'); }
-        }, { signal: this._eventSignalController.signal, passive: true });
-
-        // 🚀 方案六：监听视口切换和浏览器失焦。一旦用户离开当前页面/切出窗口，立刻自动清理隐藏，消除幽灵残留卡死现象
         window.addEventListener('blur', () => this.hideViewer(), { signal: this._eventSignalController.signal });
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'hidden') this.hideViewer();
         }, { signal: this._eventSignalController.signal });
     }
 
-    // 🚀 方案五新增：自毁回收函数。当发现插件更新或重载时运行，彻底解除自身的所有资源和系统关联
     destroy() {
-        // 1. 利用 AbortSignal 瞬间注销全局 document/window 上的所有事件
         this._eventSignalController.abort();
 
-        // 2. 彻底断开所有的 DOM 变动与媒体观察器
         if (this._globalDomObserver) this._globalDomObserver.disconnect();
         if (this.mediaObserver) this.mediaObserver.disconnect();
         if (this.mediaIO) this.mediaIO.disconnect();
 
-        // 3. 关闭正在运行的高清大图、计时器、流
         this.hideViewer();
 
-        // 4. 清除强引用预加载缓存，允许浏览器 GC 顺利回收内存
         this.activePreloads.clear();
         this._preloadImgInstancesMap.clear();
         this.preloadedUrls.clear();
     }
 
-
     getMediaUnderCursor(clientX, clientY, target) {
-        // 🚀 核心改进 1：安全内存自愈。
         for (let el of Array.from(this.visibleMediaElements)) {
             if (!el.isConnected) {
-                // 🚀 核心优化 2：彻底回收。必须手动调用 unobserve，否则 Chrome 内部观察队列将继续留存强引用，导致离地 DOM 内存泄漏
                 this.mediaIO.unobserve(el);
                 this.visibleMediaElements.delete(el);
             }
-        
         }
 
         if (target && (target.tagName === 'IMG' || target.tagName === 'VIDEO') && (target.src || target.tagName === 'VIDEO')) {
@@ -395,7 +555,6 @@ window.Mix01InputController = class InputController {
         }
         if (target && target === this.state.lastTarget && this.state.lastFoundMedia) return this.state.lastFoundMedia;
 
-        // 🚀 核心改进 2：高速无 Reflow 检索。使用 elementsFromPoint 代替对所有可见元素的全量遍历与坐标碰撞检测
         const elementsUnderCursor = document.elementsFromPoint(clientX, clientY);
         let found = null;
         let minArea = Infinity;
@@ -542,8 +701,6 @@ window.Mix01InputController = class InputController {
                     this.updateRender(); 
 
                     try {
-                        // 🚀 核心重构：直接调用 MediaRenderer 的 renderHDImageDirect，不走 JS Heap Blob 管道
-                        // 0 JS 堆开销，完全消除大图 Blob 产生的 GC 阻塞与内存压力
                         await this.render.renderHDImageDirect(hdUrl, savedSessionId);
                         
                         if (this.state.renderRequestId !== savedSessionId) return;
@@ -556,7 +713,6 @@ window.Mix01InputController = class InputController {
                         this.render.hdState.isLoading = false;
                         this._hdFetchController = null;
 
-                        // 记录该高清原图已完全下载并解码就绪
                         getLoadedHdUrls().add(hdUrl);
                         this.updateRender();
                     } catch (err) {
@@ -578,24 +734,20 @@ window.Mix01InputController = class InputController {
         if (target === this.state.currentMedia && (target.src || 'video') === this.state.currentSrc) return;
         if (target.tagName === 'VIDEO' && this.cfg.state.disableVideoDefaultView && !this.cfg.state.isImmersive) return;
 
-        // 先执行 hideViewer 彻底终止并递增注销上一个 Session 会话锁
         this.hideViewer();
 
         const savedSessionId = ++this.state.renderRequestId;
 
-        // 🌟 提前计算目标地址，防止在过滤预加载时误杀当前目标的网络流
         let initialSrc = target.src;
         let hdUrl = null;
         if (window.__mix01State.hdUrlMap && window.__mix01State.hdUrlMap[initialSrc]) {
             hdUrl = window.__mix01State.hdUrlMap[initialSrc];
         }
 
-        // 🚀 核心自愈逻辑：检测该高清大图是否【已经完全下载成功过】（可能在之前完全看完，或后台预加载已完成）
         const loadedUrls = getLoadedHdUrls();
         let isAlreadyDownloaded = false;
         
         if (hdUrl && loadedUrls.has(hdUrl)) {
-            // 只有当大图完全下载就绪时，才允许跳过低清占位，直接秒开大图！
             initialSrc = hdUrl;
             isAlreadyDownloaded = true;
         }
@@ -605,13 +757,11 @@ window.Mix01InputController = class InputController {
         this.activePreloads.clear();
         this.render.clearBlobCache(); 
         
-        // 🚀 性能自愈修复：清理旧预载时，排除当前目标地址 (target.src) 以及可能的高清地址 (initialSrc)
-        // 这样如果目标图片正在后台被预载下载，我们不会将其掐断，而是让它继续完成，杜绝二次加载时的卡顿！
         if (this._preloadImgInstancesMap) {
             for (let [url, img] of this._preloadImgInstancesMap) {
                 if (url !== target.src && url !== initialSrc) {
                     if (img && !img.complete) {
-                        img.src = ''; // 仅掐断无关的高清下载
+                        img.src = ''; 
                     }
                 }
             }
@@ -656,7 +806,7 @@ window.Mix01InputController = class InputController {
             this.render.setStyle(this.render.elements.status, 'display', 'none');
             this.render.setStyle(this.render.elements.notice, 'display', 'block');
             this.render.setStyle(this.render.elements.viewer, 'display', 'block');
-            this.state.isViewerVisible = true; // 🚀 更新显示状态
+            this.state.isViewerVisible = true; 
             if (this.cfg.state.isImmersive) {
                 this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
             }
@@ -671,7 +821,7 @@ window.Mix01InputController = class InputController {
             this.render.startVideoRender(target);
             this.updateRender();
             this.render.setStyle(this.render.elements.viewer, 'display', 'block');
-            this.state.isViewerVisible = true; // 🚀 更新显示状态
+            this.state.isViewerVisible = true; 
             if (this.cfg.state.isImmersive) {
                 this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
                 this._updateGalleryCounter();
@@ -686,10 +836,9 @@ window.Mix01InputController = class InputController {
         this.render.setStyle(this.render.elements.img, 'max-height', 'none');
         this.render.setStyle(this.render.elements.img, 'opacity', '0');
 
-        // 🚀 基于大图实际就绪情况决定行内源
         this.state.currentHdUrl = isAlreadyDownloaded ? hdUrl : null;
         this.render.elements.img.src = initialSrc;
-        this.state.isViewerVisible = true; // 🚀 更新显示状态
+        this.state.isViewerVisible = true; 
         
         this.render.elements.img.decode().then(() => {
             if (this.state.renderRequestId === savedSessionId && this.state.currentSrc === target.src) {
@@ -733,18 +882,16 @@ window.Mix01InputController = class InputController {
         this.triggerPreload();
     }
 
-     updateRender(e = null) {
-        if (!this.state.currentMedia) return; // 🌟 优化：不再依赖 cachedRect 缓存，只要 currentMedia 存在即可运行
+    updateRender(e = null) {
+        if (!this.state.currentMedia) return; 
         if (this.state.isRenderingLock) return;
         this.state.isRenderingLock = true;
 
         const sW = window.innerWidth;
         const sH = window.innerHeight;
 
-        // 🚀 核心纠偏：实时读取图片当前在视口中的物理坐标。
-        // 因为我们在该方法中只读不写，而是在稍后的 updateLayout 里才写样式，这遵循了完美的 Read-then-Write 渲染流，CPU 占用为 0ms，且完美免受网页微小滚动、动态加载排版变化的位置偏移污染
         const rect = this.state.currentMedia.getBoundingClientRect();
-        this.state.cachedRect = rect; // 顺便刷新缓存
+        this.state.cachedRect = rect; 
 
         const x = e ? e.clientX : (window.lastMouseX !== undefined ? window.lastMouseX : sW / 2);
         const y = e ? e.clientY : (window.lastMouseY !== undefined ? window.lastMouseY : sH / 2);
@@ -776,7 +923,6 @@ window.Mix01InputController = class InputController {
 
         const currentSessionId = this.state.renderRequestId;
 
-        // 🚀 核心优化 3：剔除双重 rAF。因为外部事件已经在 requestAnimationFrame 线程中执行，此处改为同步任务派发，物理延迟缩减 50% 以上，手感彻底消除粘滞感
         try {
             const isVideo = this.state.currentMedia.tagName === 'VIDEO';
             const activeMedia = isVideo ? this.render.elements.videoClone : this.render.elements.img;
@@ -802,11 +948,9 @@ window.Mix01InputController = class InputController {
     }
 
     hideViewer() {
-        // 🚀 核心修复 1：关闭时强行递增 Session ID，作废当前会话所有未决的异步操作（如解码、未完成的 HD 加载等）
         this.state.renderRequestId++;
-        this.state.isViewerVisible = false; // 🚀 重置状态
+        this.state.isViewerVisible = false; 
 
-        // 🚀 核心修复 2：立即掐断当前正在传输的高清原图网络数据流，释放通道并杜绝带宽浪费
         if (this._hdFetchController) {
             this._hdFetchController.abort();
             this._hdFetchController = null;
@@ -815,7 +959,7 @@ window.Mix01InputController = class InputController {
         this._killPhysicsLoop(); 
         this.render.hide();
         clearTimeout(this._cursorHideTimer);
-        clearTimeout(this._hudIdleTimer); // 🚀 清理不活动隐藏计时器，防止产生悬空引用
+        clearTimeout(this._hudIdleTimer); 
         if (this._cancelScrollWait) {
             this._cancelScrollWait();
             this._cancelScrollWait = null;
@@ -839,9 +983,8 @@ window.Mix01InputController = class InputController {
 
     exitImmersive() {
         this.cfg.state.isImmersive = false;
-        this.state.isViewerVisible = false; // 🚀 重置状态
+        this.state.isViewerVisible = false; 
         
-        // 🚀 核心修复：沉浸模式改为站点隔离隔离保存
         const host = window.location.hostname;
         if (host) {
             this.cfg.siteImmersive[host] = false;
@@ -858,7 +1001,6 @@ window.Mix01InputController = class InputController {
         if (e.target !== this.render.elements.viewer) return;
 
         if (this.cfg.state.isImmersive) {
-            // ✅ Bug修复：使用在 mousedown 时统一捕捉的 _clickStart，小图状态下也能完美检测位移并关闭
             const startX = this._clickStart ? this._clickStart.x : e.clientX;
             const startY = this._clickStart ? this._clickStart.y : e.clientY;
             const dx = Math.abs(e.clientX - startX);
@@ -951,11 +1093,9 @@ window.Mix01InputController = class InputController {
             result = Array.from(document.querySelectorAll('img, video')).filter(media => {
                 if (media.id === 'zoom-img-xyz' || media.id === 'zoom-img-buffer-xyz' || media.id === 'zoom-video-xyz') return false;
                 
-                // 排除视频封面/海报图的二次堆叠
                 if (media.tagName === 'IMG') {
                     const src = media.src || '';
                     
-                    // 🚀 优化点 1：基于 URL 静态元特征判定。即使页面上的 <video> 标签尚未被 React 挂载，也直接通过 URL 进行封杀（涵盖 Twitter/X 等核心源）
                     if (
                         src.includes('tweet_video_thumb') || 
                         src.includes('ext_tw_video_thumb') || 
@@ -966,7 +1106,6 @@ window.Mix01InputController = class InputController {
                         return false; 
                     }
 
-                    // 🚀 优化点 2：基于 DOM 组件特有标签判定（如 Twitter 显式声明的视频容器组件）
                     if (
                         media.closest('[data-testid="videoPlayer"]') || 
                         media.closest('[class*="video-player"]')
@@ -974,7 +1113,6 @@ window.Mix01InputController = class InputController {
                         return false; 
                     }
 
-                    // 🚀 优化点 3：常规已初始化 DOM 的父子关系与兄弟关系判定（兜底）
                     const container = media.closest('article, [class*="video"], [class*="player"], [class*="media"], [class*="post"], [class*="card"]');
                     if (container && container.querySelector('video')) {
                         return false; 
@@ -1012,7 +1150,6 @@ window.Mix01InputController = class InputController {
         this.render.showToast(isEnabled ? '✅ 已在此站点启用引擎' : '🚫 已在此站点禁用引擎');
     }
 
-    // 🚀 核心改进：结合 scrollend 弹性等待滚动结束
     waitForScrollEnd(callback) {
         if (this._cancelScrollWait) {
             this._cancelScrollWait();
@@ -1040,7 +1177,6 @@ window.Mix01InputController = class InputController {
             debounceTimer = setTimeout(onScrollEnd, 100); 
         };
 
-        // 800ms 硬件安全兜底锁，防止页面无法滚动时触发死锁
         const fallbackTimer = setTimeout(onScrollEnd, 800);
 
         window.addEventListener('scrollend', onScrollEnd, { once: true, passive: true });
@@ -1053,13 +1189,10 @@ window.Mix01InputController = class InputController {
         if (msgText) this.render.showToast(msgText);
         this.state.keyboardSwitchTime = Date.now();
         
-        // 记录用户最后一次的流动方向，深度赋能双向预加载
         this.state.lastSwitchDirection = direction;
 
-        // 🚀 核心优化：滚动发生前，即刻在最上层完成高清图的加载与排版
         this.triggerZoom(nextImg);
 
-        // 底层页面静默对齐
         nextImg.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
         this.waitForScrollEnd(() => {
@@ -1118,7 +1251,6 @@ window.Mix01InputController = class InputController {
             if (!(isCombo && currentState.isFollowed)) {
                 const newState = await adapter.follow(container, lockedMedia);
                 if (newState !== null) {
-                    // 🚀 核心修复：补齐此处遗漏的 lockedMedia 参数，使 getStates 能顺利定位 DOM 节点并回传 authorName
                     const tempStates = adapter.getStates ? adapter.getStates(container, lockedMedia) : null;
                     if (tempStates && tempStates.authorName) {
                         window.__mix01State.followAuthorCache[tempStates.authorName] = newState;
@@ -1199,20 +1331,17 @@ window.Mix01InputController = class InputController {
             }
             if (currentIndex === -1) return;
 
-            // 🚀 核心优化：智能双向预测预加载。优先向主流动方向预加载 N_main 张，同时向反方向预加载 N_opp 张。
             const N = this.cfg.state.preloadCount;
             let mainDir = this.state.lastSwitchDirection || 1;
             if (!this.cfg.state.isImmersive && this._mouseVector.dy < -2) mainDir = -1; 
 
-            const oppCount = Math.floor(N * 0.3); // 反向配额占总数的 30%（向下取整）
-            const mainCount = N - oppCount;       // 主方向占其余全部，确保两者之和恒等于 N
+            const oppCount = Math.floor(N * 0.3); 
+            const mainCount = N - oppCount;       
 
             const preloadPlan = [];
-            // 压入主路径配额
             for (let i = 1; i <= mainCount; i++) {
                 preloadPlan.push(currentIndex + i * mainDir);
             }
-            // 压入反路径配额
             for (let i = 1; i <= oppCount; i++) {
                 preloadPlan.push(currentIndex + i * (-mainDir));
             }
@@ -1236,9 +1365,7 @@ window.Mix01InputController = class InputController {
                             this.preloadedUrls.add(targetUrl);
                             this.preloadedUrlsQueue.push(targetUrl);
 
-                            // 🚀 扩展优化 1：改用原生 Image 实例进行静默预载，避开部分 CDN 站点的 CORS 跨域审查限制
                             const preloadImg = new Image();
-                            // 🚀 核心修复：预加载一旦在后台完全下载完毕（onload 触发），立刻标记为“已就绪”状态
                             preloadImg.onload = () => {
                                 getLoadedHdUrls().add(targetUrl);
                             };
@@ -1246,11 +1373,10 @@ window.Mix01InputController = class InputController {
 
                             this._preloadImgInstancesMap.set(targetUrl, preloadImg);
 
-                            // 强引用实例数量上限设定为 50，防止长时间运行导致堆内存积压
                             if (this.preloadedUrlsQueue.length > 50) {
                                 const oldest = this.preloadedUrlsQueue.shift();
                                 this.preloadedUrls.delete(oldest);
-                                this._preloadImgInstancesMap.delete(oldest); // 释放旧 Image 强引用，允许被正常 GC 垃圾回收
+                                this._preloadImgInstancesMap.delete(oldest); 
                             }
                         }
                     })();
@@ -1281,7 +1407,6 @@ window.Mix01InputController = class InputController {
             } else {
                 this.cfg.state.isImmersive = true;
                 
-                // 🚀 核心修复：开启时也仅记录当前网站的沉浸状态偏好
                 const host = window.location.hostname;
                 if (host) {
                     this.cfg.siteImmersive[host] = true;
@@ -1300,7 +1425,7 @@ window.Mix01InputController = class InputController {
                         this.triggerZoom(nextImg);
                     } else {
                         this.render.showToast("⚠️ 当前页面未发现可用媒体");
-                        this.exitImmersive(); // 🚀 统一退出的调用，防止偏好状态残留
+                        this.exitImmersive(); 
                     }
                 } else {
                     this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
@@ -1367,7 +1492,6 @@ window.Mix01InputController = class InputController {
                 const nextMode = modeList[(modeList.indexOf(this.state.currentMode) + 1) % modeList.length]; 
                 this.state.currentMode = nextMode;
                 
-                // 🚀 核心修复：将按 V 键切换的视图模式，作为站点独立偏好永久保存在 siteModes 中
                 const host = window.location.hostname;
                 if (host) {
                     this.cfg.siteModes[host] = nextMode;
@@ -1375,7 +1499,7 @@ window.Mix01InputController = class InputController {
                 } else {
                     this.cfg.save({ mode: nextMode });
                 }
-                this.cfg.state.mode = nextMode; // 立即同步到配置管理器的内存状态中，使后续 hover 的图片直接生效
+                this.cfg.state.mode = nextMode; 
 
                 up = true; this._killPhysicsLoop(); this._startPhysicsLoop();
                 this.render.showToast(modeNames[this.state.currentMode]); 
@@ -1413,7 +1537,6 @@ window.Mix01InputController = class InputController {
         else if (k === 'arrowup' || k === 'w' || k === 'arrowdown' || k === 's') {
             if (!this.cfg.state.isImmersive || window.__mix01State.isFetchingMore) return;
 
-            // 🚀 核心优化 1：连连看高频按节流。防止物理按键触发频率过快，导致平滑滚动动画堆积、索引错位
             const now = Date.now();
             if (now - (this._lastKeySwitchTime || 0) < 150) {
                 e.preventDefault();
@@ -1429,13 +1552,10 @@ window.Mix01InputController = class InputController {
                 currentIndex = galleryImages.findIndex(media => (media.src||'video') === this.state.currentSrc);
             }
             
-            // 🚀 核心优化 2：解决虚拟滚动（Virtual Scroll）索引丢失 Bug。
-            // 如果由于页面过长，React 自动移除了上方已读图片的 DOM 节点导致索引变为 -1，
-            // 算法将自动通过页面几何数据，寻找当前最贴近网页屏幕物理中心的图片索引进行原地自愈，绝不回滚至页面最顶部（index 0）。
             if (currentIndex === -1) {
                 let closestIdx = 0;
                 let minDiff = Infinity;
-                const centerY = window.innerHeight / 2; // 获取屏幕垂直中心线位置
+                const centerY = window.innerHeight / 2; 
                 
                 galleryImages.forEach((media, idx) => {
                     const rect = media.getBoundingClientRect();
@@ -1443,7 +1563,7 @@ window.Mix01InputController = class InputController {
                     const diff = Math.abs(mediaCenterY - centerY);
                     if (diff < minDiff) {
                         minDiff = diff;
-                        closestIdx = idx; // 锁定物理距离最近的在屏 DOM
+                        closestIdx = idx; 
                     }
                 });
                 currentIndex = closestIdx;

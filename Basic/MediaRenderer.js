@@ -11,7 +11,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this._hdUrlCache = new Map();
         this._activeBlobUrls = new Set();
         this._currentBlob = null; 
-        this.controller = null; // 🚀 核心改进 5：建立对等双向绑定，彻底淘汰自身的会话 ID 跟踪，杜绝漂移风险
+        this.controller = null; // 建立对等双向绑定，彻底淘汰自身的会话 ID 跟踪，杜绝漂移风险
         this._ctxCallbacks = null; // 用于右键上下文菜单事件委托的回调登记
 
         this.initDOM();
@@ -61,7 +61,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
             <div class="ctx-item" data-action="close">✕ 关闭预览</div>
         `;
         
-        // 🚀 核心改进 7：全周期仅在此绑定一次 click 事件委托，防止反复 bind 引起总线摩擦和 MutationObserver 震荡
+        // 全周期仅在此绑定一次 click 事件委托，防止反复 bind 引起总线摩擦和 MutationObserver 震荡
         this.elements.ctxMenu.addEventListener('click', (e) => {
             const item = e.target.closest('.ctx-item[data-action]');
             if (!item) return;
@@ -77,7 +77,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
         const styleBlock = document.createElement('style');
         styleBlock.textContent = `
-            /* 🚀 核心改进 3：去除静态 will-change 样式声明，与 content.css 控制逻辑完全对齐 */
             #img-zoom-pro-viewer-xyz { 
                 z-index: 2147483647 !important; 
                 contain: layout paint !important; 
@@ -96,7 +95,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 left: 0;
                 top: 0;
             }
-            /* 🚀 核心改进 3：仅在 viewer 节点被追加 is-active 类（处于活跃工作状态）时启用合成层，杜绝显存长期溢出 */
             #img-zoom-pro-viewer-xyz.is-active #zoom-img-xyz,
             #img-zoom-pro-viewer-xyz.is-active #zoom-img-buffer-xyz,
             #img-zoom-pro-viewer-xyz.is-active #zoom-video-xyz {
@@ -106,7 +104,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 z-index: 2 !important;
                 transition: filter 0.3s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.12s ease-in-out !important;
             }
-            /* 🚀 方案二新增：利用 GPU 图像最近邻算法，防止微型小图高倍放大时发生视觉模糊 */
             .is-small-pixelated {
                 image-rendering: -webkit-optimize-contrast !important;
                 image-rendering: -moz-crisp-edges !important;
@@ -171,7 +168,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         if (this.elements.counter)  this.elements.counter.style.setProperty('z-index',  '2147483647', 'important');
     }
 
-    // 🚀 核心优化：直接基于 C++ 原生管线进行零堆内存加载，并返回 Promise 便于控制器流控制
     renderHDImageDirect(hdUrl, targetSessionId) {
         return new Promise((resolve, reject) => {
             const currentSessionId = this.controller ? this.controller.state.renderRequestId : 0;
@@ -182,7 +178,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
             this.elements.imgBuffer.classList.add('mix01-hd-buffering');
 
-            // 确保 imgBuffer 完美覆盖画面
             if (this.elements.img.src && this.elements.img.style.opacity !== '0.01') {
                 this.elements.imgBuffer.src = this.elements.img.src;
                 this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
@@ -191,9 +186,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
             }
 
-            // 🚀 方案一优化：设置极微弱的 opacity: 0.01 占位（而非 0）。
-            // 这会强制让浏览器底层（Blink）在多线程后台中，提前对该高清大图执行 GPU 纹理异步光栅化与显存上传（Pre-paint）。
-            // 当稍后 decode 完毕切换到 1 时，大图早已在显存中就绪，实现零丢帧过渡。
             this.setStyle(this.elements.img, 'opacity', '0.01');
             this.elements.img.classList.add('mix01-hd-buffering');
             this.elements.img.src = hdUrl;
@@ -205,7 +197,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
                     return;
                 }
 
-                // 🌟 高清大图彻底就绪，无缝淡入显现
                 this.elements.img.classList.remove('mix01-hd-buffering');
                 this.setStyle(this.elements.img, 'opacity', '1');
                 this.setStyle(this.elements.imgBuffer, 'opacity', '0');
@@ -281,7 +272,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
             } else if (request.action === 'saveHDUrl') {
                 getUrlAndProcess(url => { window.Mix01Utils.downloadMedia(url, this, false); sendResponse({ status: 'ok' }); }); return true;
             } else if (request.action === 'copyHDUrlText') {
-                // 🚀 新增：实现原生右键“复制链接”的数据解析与写入操作，自动推送 toast 交互提示
                 getUrlAndProcess(url => { 
                     navigator.clipboard.writeText(url).catch(() => {}); 
                     this.showToast('🔗 原图链接已复制'); 
@@ -320,10 +310,42 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     showToast(text) {
-        clearTimeout(this._toastTimer);
-        this.elements.toast.textContent = text; 
-        this.elements.toast.classList.add('show');
-        this._toastTimer = setTimeout(() => this.elements.toast.classList.remove('show'), 1200);
+        if (!this._activeToastQueue) {
+            this._activeToastQueue = [];
+        }
+
+        // 1. 创建动态的层叠式子级 Toast 卡片
+        const singleToast = document.createElement('div');
+        singleToast.className = 'img-zoom-toast-xyz';
+        singleToast.textContent = text;
+
+        // 2. 依据当前活跃队列长度计算堆叠的绝对垂直偏移值，支持动态推开
+        const offsetIndex = this._activeToastQueue.length;
+        singleToast.style.setProperty('bottom', `${30 + offsetIndex * 55}px`, 'important');
+        singleToast.style.setProperty('transition', 'all 0.35s cubic-bezier(0.2, 0.8, 0.2, 1)', 'important');
+        
+        document.body.appendChild(singleToast);
+        this._activeToastQueue.push(singleToast);
+
+        requestAnimationFrame(() => {
+            singleToast.classList.add('show');
+        });
+
+        // 3. 异步移除渐隐，重构后续 Toast 的 bottom 位置，避免排版截断
+        setTimeout(() => {
+            singleToast.classList.remove('show');
+            setTimeout(() => {
+                if (singleToast.parentNode) {
+                    singleToast.parentNode.removeChild(singleToast);
+                }
+                this._activeToastQueue = this._activeToastQueue.filter(t => t !== singleToast);
+                
+                // 实时向下递推
+                this._activeToastQueue.forEach((t, i) => {
+                    t.style.setProperty('bottom', `${30 + i * 55}px`, 'important');
+                });
+            }, 350); 
+        }, 1500);
     }
 
     updateStatus(type, vW, vH, isVideo) {
@@ -392,7 +414,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.clearBlobCache();
         if (this.elements.counter) this.elements.counter.style.setProperty('display', 'none', 'important');
 
-        // 清理沉浸模式遗留的行内属性，防止切换回普通模式后布局异常、尺寸紊乱
         const staleProperties = ['left', 'top', 'width', 'height', 'border-radius', 'border', 'background-color', 'background-image', 'pointer-events', 'transform'];
         staleProperties.forEach(prop => this.elements.viewer.style.removeProperty(prop));
 
@@ -403,19 +424,13 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.hdState.isLoading = false;
         this.stopVideoRender();
 
-        // 🚀 终极修复：彻底注销并清空当前容器元素的样式缓存。
-        // 由于我们在上文中使用 removeProperty 强行抹去了容器实际的行内属性，为了防止在第二次 hover 时 
-        // 缓存管理器（setStyles）产生“数值未发生变动”的误判并跳过重新赋值，我们在此处直接对该 DOM 的缓存进行物理删除，
-        // 从而迫使下一次物理 hover 触发时，引擎 100% 重新向 DOM 写入精确的高宽与定位数据。
         this.styleCache.delete(this.elements.viewer);
     }
 
-    // 🚀 方案五新增：自毁卸载函数
     destroy() {
         this.hide();
         if (this.domGuard) this.domGuard.disconnect();
         
-        // 彻底从页面 DOM 中安全剥离本扩展注入的所有 UI 元素，杜绝升级后多重 DOM 残留冲突
         const els = [this.elements.viewer, this.elements.toast, this.elements.ctxMenu, this.elements.counter];
         els.forEach(el => {
             if (el && el.parentNode) {
@@ -554,7 +569,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     updateLayout(activeMedia, rect, activeZoom, xP, yP, isSmallOptimized, customLensWidth, customLensHeight, isZoomManuallyChanged, currentHoveredSrc, _sw, _sh, panOffsetX, panOffsetY, mode, rotate, mirror, incomingSessionId) {
-        // 🚀 核心改进 5：以对等控制器的核心 renderRequestId 进行 Session 校验，彻底废弃内部自理的 _lastActiveSessionId
         const activeRequestId = this.controller ? this.controller.state.renderRequestId : 0;
         if (incomingSessionId && incomingSessionId !== activeRequestId) {
             return activeZoom; 
@@ -568,7 +582,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
             nw = this.videoState.lastNw || activeMedia.videoWidth || rect.width || 1;
             nh = this.videoState.lastNh || activeMedia.videoHeight || rect.height || 1;
         } else {
-            // 🚀 核心优化 6：彻底移除 complete 依赖。当高清图元数据加载完且 naturalWidth > 0 时便能立即提取高宽，在原图仅下载了 1%时就提早纠正镜头长宽比，消除下载完时的猛烈振荡
             if (activeMedia.naturalWidth > 0) {
                 nw = activeMedia.naturalWidth;
                 nh = activeMedia.naturalHeight;
@@ -580,7 +593,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         
         this._syncNoticeVisibility();
 
-        // 🚀 核心优化 7：对微缩 Favicon/像素图挂载锐化类名
         if (isSmallOptimized) {
             activeMedia.classList.add('is-small-pixelated');
             if (!isVideo) this.elements.imgBuffer.classList.add('is-small-pixelated');
@@ -596,26 +608,22 @@ window.Mix01MediaRenderer = class MediaRenderer {
         let cDW = 0, cDH = 0; 
         let vW = 0, vH = 0;   
 
-        // 🚀 核心纠偏：逆向计算网页 CSS（如 object-fit: cover）裁剪掉的原图物理尺寸比例，消除比例错乱引起的大图对不准、位置偏移 Bug
         let correctedXP = xP;
         let correctedYP = yP;
         
         if (nw > 1 && nh > 1 && rect.width > 0 && rect.height > 0) {
-            const rOrig = nw / nh; // 原图比例
-            const rThumb = rect.width / rect.height; // 缩略图容器比例
+            const rOrig = nw / nh; 
+            const rThumb = rect.width / rect.height; 
             
             if (rOrig > rThumb) {
-                // 原图比缩略图更宽（图片左右两边被 cropped 裁剪了）
                 const factor = rThumb / rOrig;
                 correctedXP = xP * factor + 0.5 * (1 - factor);
             } else if (rOrig < rThumb) {
-                // 原图比缩略图更高（图片上下两边被 cropped 裁剪了）
                 const factor = rOrig / rThumb;
                 correctedYP = yP * factor + 0.5 * (1 - factor);
             }
         }
 
-        // 将纠偏后的高精原图比例代入物理旋转和镜像公式中
         let vxP = correctedXP, vyP = correctedYP;
         if (rotate === 90) { vxP = 1 - correctedYP; vyP = correctedXP; }
         else if (rotate === 180) { vxP = 1 - correctedXP; vyP = 1 - correctedYP; }
@@ -674,7 +682,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
             this._enforceTopLayer();
 
             if (this.cfg.state.hasAgreed) {
-                // 🚀 修复：计算缩略图在不失真情况下的基准缩放比例（适应 cover 裁剪）
                 const thumbScale = Math.max(rect.width / nw, rect.height / nh);
                 cDW = nw * thumbScale * activeZoom;
                 cDH = nh * thumbScale * activeZoom;
@@ -692,14 +699,11 @@ window.Mix01MediaRenderer = class MediaRenderer {
                     lensW = isRotated ? customLensHeight : customLensWidth;
                     lensH = isRotated ? customLensWidth : customLensHeight;
                 } else {
-                    // 🚀 比例锁定算法：使放大镜盒子的尺寸比例与图片真实的宽高比例保持一致
                     const ratio = vW / (vH || 1);
                     
-                    // 1. 获取包含安全边距的初始放大后尺寸
                     let targetW = vW + 20;
                     let targetH = vH + 20;
                     
-                    // 2. 锁定最大尺寸（350px）：如果超出最大边界，按真实比例缩小，防止退化为正方形
                     const maxLensSize = 350;
                     if (targetW > maxLensSize || targetH > maxLensSize) {
                         if (ratio >= 1) {
@@ -711,7 +715,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
                         }
                     }
                     
-                    // 3. 锁定最小尺寸（100px）：防止放大镜过小，同时规避极端长宽比导致单边拉伸过长
                     const minLensSize = 100;
                     if (targetW < minLensSize) {
                         targetW = minLensSize;
@@ -754,6 +757,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 if (vH > lensH) visualOffsetY = -(vH * vyP - lensH / 2);
                 else             visualOffsetY = (lensH - vH) / 2;
                 
+                // 实时叠加 pan 偏移量物理计算
+                if (panOffsetX) visualOffsetX += panOffsetX;
+                if (panOffsetY) visualOffsetY += panOffsetY;
+
                 let offsetX = visualOffsetX + vW / 2 - cDW / 2;
                 let offsetY = visualOffsetY + vH / 2 - cDH / 2;
 
@@ -772,7 +779,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 this.setStyles(this.elements.imgBuffer, { position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
             }
 
-            // 🚀 修复：根据真实长宽比计算，防止跟随大图模式变形
             const thumbScale = Math.max(rect.width / nw, rect.height / nh);
             cDW = nw * thumbScale * activeZoom;
             cDH = nh * thumbScale * activeZoom;
@@ -803,6 +809,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
                     let offsetX = vW / 2 - cDW / 2;
                     let offsetY = vH / 2 - cDH / 2;
+                    
+                    if (panOffsetX) offsetX += panOffsetX;
+                    if (panOffsetY) offsetY += panOffsetY;
+
                     const matrixTransform = `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`;
                     this.setStyle(activeMedia, 'transform', matrixTransform);
                     if (!isVideo) this.setStyle(this.elements.imgBuffer, 'transform', matrixTransform);
@@ -815,6 +825,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
                 let visualOffsetX = (vW > lensW) ? -(vW - lensW) * vxP : 0;
                 let visualOffsetY = (vH > lensH) ? -(vH - lensH) * vyP : 0;
+
+                if (panOffsetX) visualOffsetX += panOffsetX;
+                if (panOffsetY) visualOffsetY += panOffsetY;
 
                 let offsetX = visualOffsetX + vW / 2 - cDW / 2;
                 let offsetY = visualOffsetY + vH / 2 - cDH / 2;
@@ -853,7 +866,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
             disableItem.textContent = isEnabled ? '🚫 在此网站禁用引擎' : '✅ 在此网站启用引擎';
         }
 
-        // 🚀 核心改进 7：上下文事件路由。全周期仅使用一次绑定。
         this._ctxCallbacks = callbacks;
 
         menu.style.setProperty('display', 'block', 'important');
@@ -910,12 +922,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 const container = adapter.getContainer ? adapter.getContainer(currentMedia) : document.body;
                 const states = await adapter.getStates(container, currentMedia);
 
-                // 🚀 核心改进 6：解决异步切换导致的 HUD 数据漂移。
-                // 在 await 结束后验证当前 URL，如果用户在此期间切换了图片，则立即丢弃失效响应。
                 if (this._pendingHudSrc !== currentSrc) return;
 
                 if (states) {
-                    // 🚀 核心修复：载入时优先合并本地内存状态缓存，彻底解决沉浸状态下喜欢和关注显示不同步的 Bug
                     if (window.__mix01State && window.__mix01State.likeMediaCache && window.__mix01State.likeMediaCache[currentSrc] !== undefined) {
                         states.isLiked = window.__mix01State.likeMediaCache[currentSrc];
                     }
@@ -930,7 +939,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
             }
         }
 
-        // 🚀 核心改进 1：防守性降级。兼容 Config 对象的长格式与短格式键名属性
         const keyMode     = (keys.mode          || keys.keyMode          || 'v').toUpperCase();
         const keyDownload = (keys.downloadVideo  || keys.keyDownloadVideo  || 'd').toUpperCase();
         const keyLike     = (keys.like           || keys.keyLike           || 'l').toUpperCase();
@@ -986,7 +994,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         ];
         hudElements.forEach(el => {
             if (el) {
-                // 🚀 核心改进 2：解决 transition 不生效。通过 setProperty 传参以支持 'important'
                 el.style.setProperty('transition', 'opacity 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)', 'important');
                 el.style.setProperty('opacity', opacity, 'important');
                 
@@ -1002,19 +1009,4 @@ window.Mix01MediaRenderer = class MediaRenderer {
             }
         });
     }
-
-    // 🚀 方案五新增：自毁卸载函数
-    destroy() {
-        this.hide();
-        if (this.domGuard) this.domGuard.disconnect();
-        
-        // 彻底从页面 DOM 中安全剥离本扩展注入的所有 UI 元素，杜绝升级后多重 DOM 残留冲突
-        const els = [this.elements.viewer, this.elements.toast, this.elements.ctxMenu, this.elements.counter];
-        els.forEach(el => {
-            if (el && el.parentNode) {
-                el.parentNode.removeChild(el);
-            }
-        });
-    }
 };
-
