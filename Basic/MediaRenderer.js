@@ -176,13 +176,27 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 return;
             }
 
+            // [新增] 提取备份回退 URL (原低清图 URL)
+            const fallbackUrl = (this.controller && this.controller.state.currentMedia)
+                ? (this.controller.state.currentMedia.src || '')
+                : (this.elements.img.src || '');
+
+            // [新增] 如果没有高清图链接，或者高清图链接被判定在坏链黑名单中，亦或者与低清图链接完全一致，则直接采用原低清图
+            if (!hdUrl || this.hdState.badUrls.has(hdUrl) || hdUrl === fallbackUrl) {
+                this.elements.img.classList.remove('mix01-hd-buffering');
+                this.setStyle(this.elements.img, 'opacity', '1');
+                this.setStyle(this.elements.imgBuffer, 'opacity', '0');
+                resolve();
+                return;
+            }
+
             this.elements.imgBuffer.classList.add('mix01-hd-buffering');
 
             if (this.elements.img.src && this.elements.img.style.opacity !== '0.01') {
                 this.elements.imgBuffer.src = this.elements.img.src;
                 this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
-            } else if (this.controller && this.controller.state.currentMedia) {
-                this.elements.imgBuffer.src = this.controller.state.currentMedia.src || '';
+            } else if (fallbackUrl) {
+                this.elements.imgBuffer.src = fallbackUrl;
                 this.setStyles(this.elements.imgBuffer, { display: 'block', opacity: '1' });
             }
 
@@ -215,10 +229,39 @@ window.Mix01MediaRenderer = class MediaRenderer {
                     reject(new Error("Session expired"));
                     return;
                 }
+
+                // [新增] 高清图加载或解码失败的处理机制
+                console.warn("Mix01: 高清图加载或解码失败，准备执行原图降级回退机制:", hdUrl, err);
                 
+                // 将失效的高清 URL 加入黑名单以防重复加载
+                this.hdState.badUrls.add(hdUrl);
                 this.elements.img.classList.remove('mix01-hd-buffering');
-                this.setStyle(this.elements.img, 'opacity', '1');
-                this.setStyle(this.elements.imgBuffer, 'opacity', '0');
+
+                if (fallbackUrl && fallbackUrl !== hdUrl) {
+                    // 执行安全的降级，将 src 切回低清原图
+                    this.elements.img.src = fallbackUrl;
+                    
+                    // 对原图重新调用 decode 确保完美平滑过渡，规避闪烁
+                    this.elements.img.decode().then(() => {
+                        this.setStyle(this.elements.img, 'opacity', '1');
+                        this.setStyle(this.elements.imgBuffer, 'opacity', '0');
+                        setTimeout(() => {
+                            this.setStyle(this.elements.imgBuffer, 'display', 'none');
+                            this.elements.imgBuffer.classList.remove('mix01-hd-buffering');
+                        }, 200);
+                    }).catch(() => {
+                        // 兜底：如果原图解码也异常，则硬性呈现
+                        this.setStyle(this.elements.img, 'opacity', '1');
+                        this.setStyle(this.elements.imgBuffer, 'opacity', '0');
+                    });
+                } else {
+                    this.setStyle(this.elements.img, 'opacity', '1');
+                    this.setStyle(this.elements.imgBuffer, 'opacity', '0');
+                }
+
+                // 弱气泡提示用户，增强交互容错性
+                this.showToast('⚠️ 高清原图获取失败，已自动降级展示普通图');
+                
                 reject(err);
             });
         });
