@@ -21,6 +21,8 @@
                 const topBound = -viewportHeight * 1.5;
                 const bottomBound = viewportHeight * 2.5;
 
+                const videoRectsByArticle = new WeakMap();
+
                 for (let i = 0; i < allMedia.length; i++) {
                     const media = allMedia[i];
                     if (media.id === 'zoom-img-xyz' || media.id === 'zoom-video-xyz') continue;
@@ -28,30 +30,60 @@
                     const rect = media.getBoundingClientRect();
                     if (rect.top < topBound || rect.bottom > bottomBound) continue;
                     if (rect.width <= 50 || rect.height <= 50) continue;
-                    
+
                     const article = media.closest('article');
                     if (article) {
-                        // 🚀 性能优化：采用 Dataset 专属状态阻断，避免重绘扫描时的文本重复匹配开销
                         if (article.dataset.mixAdStatus === 'ad') continue;
-                        if (article.dataset.mixAdStatus === 'clean') {
-                            validMedia.push(media);
+                        if (article.dataset.mixAdStatus !== 'clean') {
+                            const isAd = Array.from(article.querySelectorAll('span')).some(span =>
+                                /^(广告|赞助|Ad|Promoted)$/i.test(span.textContent.trim())
+                            );
+                            if (isAd) { article.dataset.mixAdStatus = 'ad'; continue; }
+                            article.dataset.mixAdStatus = 'clean';
+                        }
+                    }
+
+                    if (media.tagName === 'VIDEO') {
+                        if (article && !videoRectsByArticle.has(article)) {
+                            videoRectsByArticle.set(article, []);
+                        }
+                        if (article) videoRectsByArticle.get(article).push(rect);
+                        validMedia.push(media);
+                        continue;
+                    }
+
+                    if (media.tagName === 'IMG') {
+                        const src = media.src || '';
+                        if (src.includes('tweet_video_thumb') || src.includes('ext_tw_video_thumb') ||
+                            src.includes('amplify_video_thumb') || src.includes('video-thumbnail') ||
+                            src.includes('video_poster')) {
                             continue;
                         }
-                        
-                        const isAd = Array.from(article.querySelectorAll('span')).some(span => 
-                            /^(广告|赞助|Ad|Promoted)$/i.test(span.textContent.trim())
-                        );
-                        
-                        if (isAd) { 
-                            article.dataset.mixAdStatus = 'ad'; 
-                            continue; 
-                        } else { 
-                            article.dataset.mixAdStatus = 'clean'; 
-                            validMedia.push(media);
+
+                        let isVideoCover = false;
+
+                        if (article) {
+                            const videoEls = article.querySelectorAll('video');
+                            for (const v of videoEls) {
+                                if (v.poster && v.poster === src) { isVideoCover = true; break; }
+                            }
+                            if (!isVideoCover) {
+                                const vRects = videoRectsByArticle.get(article);
+                                if (vRects) {
+                                    for (const vr of vRects) {
+                                        const overlapX = Math.max(0, Math.min(rect.right, vr.right) - Math.max(rect.left, vr.left));
+                                        const overlapY = Math.max(0, Math.min(rect.bottom, vr.bottom) - Math.max(rect.top, vr.top));
+                                        const overlapArea = overlapX * overlapY;
+                                        const imgArea = rect.width * rect.height;
+                                        if (imgArea > 0 && overlapArea / imgArea > 0.5) { isVideoCover = true; break; }
+                                    }
+                                }
+                            }
                         }
-                    } else {
-                        validMedia.push(media);
+                        if (isVideoCover) continue;
                     }
+
+                    validMedia.push(media);
                 }
                 return validMedia;
             },
@@ -459,13 +491,13 @@
         }
     };
 
-    const regexCacheHost = {};
     window.Mix01ImmersiveEngine = {
         configs: Mix01ImmersiveRules,
         getAdapter(host) {
+            const cache = window.Mix01RegexCacheHost || {};
             for (const pattern in this.configs) {
-                if (!regexCacheHost[pattern]) regexCacheHost[pattern] = new RegExp(`^${pattern}$`);
-                if (regexCacheHost[pattern].test(host)) return this.configs[pattern];
+                if (!cache[pattern]) cache[pattern] = new RegExp(`^${pattern}$`);
+                if (cache[pattern].test(host)) return this.configs[pattern];
             }
             return null;
         }

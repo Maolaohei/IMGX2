@@ -54,6 +54,36 @@
         }
     };
 
+    const extractVideoUrlFromTweet = (json) => {
+        const tweetResult = json.data?.tweetResult?.result;
+        if (!tweetResult) return null;
+        const tweet = tweetResult.tweet || tweetResult;
+
+        let legacy = tweet.legacy;
+        if (!legacy?.extended_entities?.media && tweet.quoted_status_result?.result?.legacy?.extended_entities?.media) {
+            legacy = tweet.quoted_status_result.result.legacy;
+        }
+
+        const medias = legacy?.extended_entities?.media;
+        if (!medias || !Array.isArray(medias)) return null;
+
+        let maxBitrate = -1;
+        let videoUrl = null;
+        medias.forEach(media => {
+            if (media.type === 'video' || media.type === 'animated_gif') {
+                if (media.video_info && media.video_info.variants) {
+                    media.video_info.variants.forEach(v => {
+                        if (v.content_type === 'video/mp4' && (v.bitrate || 0) > maxBitrate) {
+                            maxBitrate = v.bitrate || 0;
+                            videoUrl = v.url;
+                        }
+                    });
+                }
+            }
+        });
+        return videoUrl;
+    };
+
     const getTwitterVideoUrlDirectly = async (statusId) => {
         const host = window.location.hostname;
         const base_url = `https://${host}/i/api/graphql/2ICDjqPd81tulZcYrtpTuQ/TweetResultByRestId`;
@@ -127,34 +157,7 @@
         const response = await fetch(url, { headers });
         if (!response.ok) throw new Error("HTTP " + response.status);
         
-        const json = await response.json();
-        const tweetResult = json.data?.tweetResult?.result;
-        if (!tweetResult) return null;
-        const tweet = tweetResult.tweet || tweetResult;
-        
-        let legacy = tweet.legacy;
-        if (!legacy?.extended_entities?.media && tweet.quoted_status_result?.result?.legacy?.extended_entities?.media) {
-            legacy = tweet.quoted_status_result.result.legacy;
-        }
-        
-        const medias = legacy?.extended_entities?.media;
-        if (!medias || !Array.isArray(medias)) return null;
-
-        let maxBitrate = -1;
-        let videoUrl = null;
-        medias.forEach(media => {
-            if (media.type === 'video' || media.type === 'animated_gif') {
-                if (media.video_info && media.video_info.variants) {
-                    media.video_info.variants.forEach(v => {
-                        if (v.content_type === 'video/mp4' && (v.bitrate || 0) > maxBitrate) {
-                            maxBitrate = v.bitrate || 0;
-                            videoUrl = v.url;
-                        }
-                    });
-                }
-            }
-        });
-        return videoUrl;
+        return extractVideoUrlFromTweet(await response.json());
     };
 
     const Mix01Configs = {
@@ -257,35 +260,7 @@
 
                             if (!response || !response.success || !response.data) return trigger.src || '';
 
-                            const json = response.data;
-                            const tweetResult = json.data?.tweetResult?.result;
-                            if (!tweetResult) return trigger.src || '';
-                            const tweet = tweetResult.tweet || tweetResult;
-                            
-                            let legacy = tweet.legacy;
-                            if (!legacy?.extended_entities?.media && tweet.quoted_status_result?.result?.legacy?.extended_entities?.media) {
-                                legacy = tweet.quoted_status_result.result.legacy;
-                            }
-                            
-                            const medias = legacy?.extended_entities?.media;
-                            if (!medias || !Array.isArray(medias)) return trigger.src || '';
-
-                            let maxBitrate = -1;
-                            let videoUrl = null;
-                            medias.forEach(media => {
-                                if (media.type === 'video' || media.type === 'animated_gif') {
-                                    if (media.video_info && media.video_info.variants) {
-                                        media.video_info.variants.forEach(v => {
-                                            if (v.content_type === 'video/mp4' && (v.bitrate || 0) > maxBitrate) {
-                                                maxBitrate = v.bitrate || 0;
-                                                videoUrl = v.url;
-                                            }
-                                        });
-                                    }
-                                }
-                            });
-                            
-                            const finalUrl = videoUrl || trigger.src || '';
+                            const finalUrl = extractVideoUrlFromTweet(response.data) || trigger.src || '';
                             if (finalUrl) {
                                 LRUCache.set('__mix01TwVideoCache', statusId, finalUrl, 30);
                             }
@@ -307,7 +282,8 @@
                     srcRegExp: '(//.+\\.hdslb\\.com/.+?@IMG@)[^?]*(\\?.*)?',
                     processor: (trigger, src, srcRegExpObj) => {
                         const largestSrc = tools.getLargestImgSrc(trigger.parentElement) || src;
-                        return srcRegExpObj.test(largestSrc) ? RegExp.$1 + RegExp.$2 : '';
+                        const m = srcRegExpObj.exec(largestSrc);
+                        return m ? m[1] + m[2] : '';
                     }
                 }
             ]
@@ -322,7 +298,8 @@
                     srcRegExp: '(//magazine\\.artstation\\.com/.+)(?:-\\d+x\\d+)?(@IMG@.*)',
                     processor: (trigger, src, srcRegExpObj) => {
                         const finalSrc = src || trigger.parentElement?.nextElementSibling?.src || '';
-                        return srcRegExpObj.test(finalSrc) ? RegExp.$1 + RegExp.$2 : '';
+                        const m = srcRegExpObj.exec(finalSrc);
+                        return m ? m[1] + m[2] : '';
                     }
                 }
             ]
@@ -337,10 +314,11 @@
                 {
                     srcRegExp: '//(?:.+\\.)?(konachan\\.(?:com|net)|yande\\.re)/.+/(\\w+)(?:/.*)?(@IMG@)',
                     processor: async (trigger, src, srcRegExpObj) => {
-                        if (srcRegExpObj.test(src)) {
+                        const m = srcRegExpObj.exec(src);
+                        if (m) {
                             return await tools.detectImage(
-                                `//${RegExp.$1}/image/${RegExp.$2}/${RegExp.$1}${RegExp.$3}`,
-                                `//${RegExp.$1}/jpeg/${RegExp.$2}/${RegExp.$1}${RegExp.$3}`
+                                `//${m[1]}/image/${m[2]}/${m[1]}${m[3]}`,
+                                `//${m[1]}/jpeg/${m[2]}/${m[1]}${m[3]}`
                             );
                         }
                         return '';
@@ -357,8 +335,9 @@
                     srcRegExp: '((?:.+\\.sinaimg\\.cn|image\\.storage\\.weibo\\.com)(?:/.+)?/)(?:small|large|thumbnail|\\w?mw\\d+|small|sq\\d+|thumb\\d+|bmiddle|orj\\d+|crop\\.[^/]+|square|wap\\d+)(/\\w+)(?:@IMG@)?.*',
                     processor: (trigger, src, srcRegExpObj) => {
                         const finalSrc = src || trigger.querySelector('img')?.src || '';
-                        if (srcRegExpObj.test(finalSrc)) {
-                            return `${RegExp.$1}large${RegExp.$2}${RegExp.$2[22] === 'g' ? '.gif' : '.jpg'}`;
+                        const m = srcRegExpObj.exec(finalSrc);
+                        if (m) {
+                            return `${m[1]}large${m[2]}${m[2][22] === 'g' ? '.gif' : '.jpg'}`;
                         }
                         return '';
                     }
@@ -399,7 +378,8 @@
                     srcRegExp: '(//(?:.*\\.media|static)\\.tumblr\\.com/.*?)_\\d+(?:sq)?((?:_v\\d+)?@IMG@)',
                     processor: (trigger, src, srcRegExpObj) => {
                         const finalSrc = src || trigger.closest('.post__content')?.querySelector('img')?.src || '';
-                        return srcRegExpObj.test(finalSrc) ? `${RegExp.$1}_1280${RegExp.$2}` : '';
+                        const m = srcRegExpObj.exec(finalSrc);
+                        return m ? `${m[1]}_1280${m[2]}` : '';
                     }
                 }
             ]
@@ -447,7 +427,8 @@
                     srcRegExp: '(//lh\\d+\\.googleusercontent\\.com/.+[/=])(?:-?[\\w\\d]+)+',
                     processor: (trigger, src, srcRegExpObj) => {
                         const finalSrc = src || trigger.querySelector('img')?.src || '';
-                        return srcRegExpObj.test(finalSrc) ? `${RegExp.$1}w0` : '';
+                        const m = srcRegExpObj.exec(finalSrc);
+                        return m ? `${m[1]}w0` : '';
                     }
                 },
                 {
@@ -499,8 +480,9 @@
                     srcRegExp: '(//i\\.pinimg\\.com/)(?:originals|\\d+x(?:\\d+(?:_\\w+)?)?)(/.+@IMG@)',
                     processor: async (trigger, src, srcRegExpObj) => {
                         const finalSrc = src || tools.getLargestImgSrc(trigger);
-                        if (srcRegExpObj.test(finalSrc)) {
-                            return await tools.detectImage(`${RegExp.$1}originals${RegExp.$2}`, `${RegExp.$1}736x${RegExp.$2}`);
+                        const m = srcRegExpObj.exec(finalSrc);
+                        if (m) {
+                            return await tools.detectImage(`${m[1]}originals${m[2]}`, `${m[1]}736x${m[2]}`);
                         }
                         return '';
                     }
@@ -514,7 +496,8 @@
                     srcRegExp: '(//.+\\.static\\.?flickr\\.com/(?:\\d+/)+(\\d+)_.+?)(?:_\\w)?(@IMG@)',
                     processor: (trigger, src, srcRegExpObj) => {
                         const finalSrc = src || tools.getLargestImgSrc(trigger.parentElement);
-                        return srcRegExpObj.test(finalSrc) ? `${RegExp.$1}_b${RegExp.$3}` : '';
+                        const m = srcRegExpObj.exec(finalSrc);
+                        return m ? `${m[1]}_b${m[3]}` : '';
                     }
                 },
                 { srcRegExp: '(//.+\\.staticflickr\\.com/\\d+/buddyicons/.+?)(?:_\\w)?(@IMG@.*)', processor: '$1_r$2' }
@@ -527,10 +510,11 @@
                     srcRegExp: '(wallhaven\\.cc/)w/((\\w{2})\\w+)',
                     processor: async (trigger, src, srcRegExpObj) => {
                         const aHref = trigger.closest('a')?.href || '';
-                        if (srcRegExpObj.test(aHref)) {
+                        const m = srcRegExpObj.exec(aHref);
+                        if (m) {
                             return await tools.detectImage(
-                                `//w.${RegExp.$1}full/${RegExp.$3}/wallhaven-${RegExp.$2}.jpg`,
-                                `//w.${RegExp.$1}full/${RegExp.$3}/wallhaven-${RegExp.$2}.png`
+                                `//w.${m[1]}full/${m[3]}/wallhaven-${m[2]}.jpg`,
+                                `//w.${m[1]}full/${m[3]}/wallhaven-${m[2]}.png`
                             );
                         }
                         return '';
@@ -545,8 +529,9 @@
                     srcRegExp: '(//i\\d*\\.ytimg\\.com/vi.*?/.+/).+(@IMG@)',
                     processor: async (trigger, src, srcRegExpObj) => {
                         const finalSrc = src || tools.getLargestImgSrc(trigger.closest('a')?.querySelector('img'));
-                        if (srcRegExpObj.test(finalSrc)) {
-                            return await tools.detectImage(`${RegExp.$1}maxresdefault${RegExp.$2}`, `${RegExp.$1}hqdefault${RegExp.$2}`);
+                        const m = srcRegExpObj.exec(finalSrc);
+                        if (m) {
+                            return await tools.detectImage(`${m[1]}maxresdefault${m[2]}`, `${m[1]}hqdefault${m[2]}`);
                         }
                         return '';
                     }
@@ -558,9 +543,10 @@
                 {
                     srcRegExp: '(//pic\\d+\\.zhimg\\.com/)(?:\\d+/)?(.+)_(?:\\d+x\\d+|[^.]+)(@IMG@)',
                     processor: (trigger, src, srcRegExpObj) => {
-                        if (srcRegExpObj.test(src)) {
+                        const m = srcRegExpObj.exec(src);
+                        if (m) {
                             const isGif = trigger.classList && trigger.classList.contains('column-gif');
-                            return RegExp.$1 + RegExp.$2 + (isGif ? '.gif' : RegExp.$3);
+                            return m[1] + m[2] + (isGif ? '.gif' : m[3]);
                         }
                         return '';
                     }
@@ -600,8 +586,8 @@
         }
     };
 
-    const regexCacheHost = {};
     const regexCacheSrcMatch = {};
+    window.Mix01RegexCacheHost = {};
 
     window.Mix01RuleEngine = {
         configs: Mix01Configs,
@@ -620,8 +606,8 @@
                 let rules = [];
                 for (const pattern in this.configs) {
                     if (pattern === '.*') continue; 
-                    if (!regexCacheHost[pattern]) regexCacheHost[pattern] = new RegExp(`^${pattern}$`);
-                    if (regexCacheHost[pattern].test(host)) {
+                    if (!window.Mix01RegexCacheHost[pattern]) window.Mix01RegexCacheHost[pattern] = new RegExp(`^${pattern}$`);
+                    if (window.Mix01RegexCacheHost[pattern].test(host)) {
                         rules = rules.concat(this.configs[pattern].srcMatching || []);
                     }
                 }

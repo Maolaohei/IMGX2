@@ -26,7 +26,6 @@ window.Mix01InputController = class InputController {
         
         this.imgPool = new Mix01ImagePool();
         this.activePreloads = new Set();
-        this.preloadAborters = []; 
         
         this.state = {
             _currentMediaRef: null,
@@ -44,7 +43,6 @@ window.Mix01InputController = class InputController {
             currentSrc: null, currentHdUrl: null, cachedRect: null,
             isSmallOptimized: false, customLensWidth: null, customLensHeight: null,
             isZoomManuallyChanged: false, keyboardSwitchTime: 0, isTicking: false,
-            bgClickCount: 0, bgClickTimer: null,
             isRenderingLock: false,
             lastRenderSignature: null,
             _galleryCache: null, _galleryCacheDirty: true,
@@ -77,8 +75,7 @@ window.Mix01InputController = class InputController {
         
         this.preloadedUrls = new Set();
         this.preloadedUrlsQueue = [];
-        this._preloadImgInstancesMap = new Map(); // 保存预加载 Image 实例的强引用保护池，防止 V8 垃圾回收提前释放内存缓存 (Memory Cache)
-        this.compiledKeys = {}; 
+        this._preloadImgInstancesMap = new Map();
         this._preloadTimer = null;   
         this._resizeTimer = null;    
         this._hoverDelayTimer = null; 
@@ -89,8 +86,6 @@ window.Mix01InputController = class InputController {
         this._lastDetectTime = 0;
         this._lastRectTime = 0;
         this._physicsFrameId = null; 
-        this._drag = { active: false, startX: 0, startY: 0, origLeft: 0, origTop: 0 };
-        this._pan = { active: false, moved: false, startX: 0, startY: 0, origPanX: 0, origPanY: 0 };
 
         this._mouseVector = { lastX: 0, lastY: 0, dx: 0, dy: 0, speed: 0, timestamp: 0 };
 
@@ -1227,7 +1222,7 @@ window.Mix01InputController = class InputController {
         window.__mix01State.followAuthorCache = window.__mix01State.followAuthorCache || {};
 
         if (adapter.getStates) {
-            currentState = adapter.getStates(container, lockedMedia);
+            currentState = await adapter.getStates(container, lockedMedia);
             if (window.__mix01State.likeMediaCache[lockedSrc] !== undefined) {
                 currentState.isLiked = window.__mix01State.likeMediaCache[lockedSrc];
             }
@@ -1251,7 +1246,7 @@ window.Mix01InputController = class InputController {
             if (!(isCombo && currentState.isFollowed)) {
                 const newState = await adapter.follow(container, lockedMedia);
                 if (newState !== null) {
-                    const tempStates = adapter.getStates ? adapter.getStates(container, lockedMedia) : null;
+                    const tempStates = adapter.getStates ? await adapter.getStates(container, lockedMedia) : null;
                     if (tempStates && tempStates.authorName) {
                         window.__mix01State.followAuthorCache[tempStates.authorName] = newState;
                     }
@@ -1314,13 +1309,6 @@ window.Mix01InputController = class InputController {
         if (this.cfg.state.preloadCount <= 0 || !this.state.currentMedia) return;
 
         if (this._preloadTimer) clearTimeout(this._preloadTimer);
-        
-        if (this.preloadAborters && this.preloadAborters.length > 0) {
-            this.preloadAborters.forEach(aborter => {
-                try { aborter.abort(); } catch (e) {}
-            });
-            this.preloadAborters = [];
-        }
 
         this._preloadTimer = setTimeout(() => {
             const galleryImages = this.getGalleryImages();
@@ -1361,7 +1349,7 @@ window.Mix01InputController = class InputController {
                             try { targetUrl = await window.Mix01RuleEngine.getHighResUrl(media, src); } catch (e) {}
                         }
 
-                        if (targetUrl && !this.preloadedUrls.has(targetUrl) && !this.render.badUrls?.has(targetUrl)) {
+                        if (targetUrl && !this.preloadedUrls.has(targetUrl) && !this.render.hdState.badUrls.has(targetUrl)) {
                             this.preloadedUrls.add(targetUrl);
                             this.preloadedUrlsQueue.push(targetUrl);
 

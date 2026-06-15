@@ -149,7 +149,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const variables = { 'tweetId': request.statusId, 'with_rux_injections': false, 'includePromotedContent': true, 'withCommunity': true, 'withQuickPromoteEligibilityTweetFields': true, 'withBirdwatchNotes': true, 'withVoice': true, 'withV2Timeline': true };
                 const features = { 'articles_preview_enabled': true, 'c9s_tweet_anatomy_moderator_badge_enabled': true, 'freedom_of_speech_not_reach_fetch_enabled': true, 'graphql_is_translatable_rweb_tweet_is_translatable_enabled': true, 'longform_notetweets_inline_media_enabled': true, 'responsive_web_twitter_article_tweet_consumption_enabled': true, 'rweb_tipjar_consumption_enabled': true, 'standardized_nudges_misinfo': true, 'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': true, 'view_counts_everywhere_api_enabled': true };
                 
-                const url = encodeURI(`${baseUrl}?variables=${JSON.stringify(variables)}&features=${JSON.stringify(features)}`);
+                const url = `${baseUrl}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}`;
                 const headers = {
                     'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
                     'x-twitter-active-user': 'yes',
@@ -210,21 +210,13 @@ async function handleImmersiveDownload(request, sendResponse) {
             clearTimeout(timeoutId);
         } catch (fetchError) {
             clearTimeout(timeoutId);
-            try {
-                const noCorsController = new AbortController();
-                const noCorsTimeoutId = setTimeout(() => noCorsController.abort(), 30000);
-                res = await fetch(initialUrl, { method: 'GET', mode: 'no-cors', credentials: 'include', signal: noCorsController.signal });
-                clearTimeout(noCorsTimeoutId);
-            } catch (noCorsError) {
-                chrome.downloads.download({ url: initialUrl, filename: `IMG_Download/${initialUrl.split('/').pop() || 'media'}`, saveAs: false }, () => {
-                    saveToHistory(initialUrl.split('/').pop() || "media", chrome.runtime.lastError ? "❌ 失败 (直接下载)" : "✅ 成功 (直接下载)");
-                });
-                return;
-            }
+            chrome.downloads.download({ url: initialUrl, filename: `IMG_Download/${initialUrl.split('/').pop() || 'media'}`, saveAs: false }, () => {
+                saveToHistory(initialUrl.split('/').pop() || "media", chrome.runtime.lastError ? "❌ 失败 (直接下载)" : "✅ 成功 (直接下载)");
+            });
+            return;
         }
         
         let finalUrl = initialUrl;
-        const isOpaque = res && res.type === 'opaque';
 
         if (res && res.status === 404 && initialUrl.includes('pximg.net')) {
             const altUrls = [];
@@ -253,7 +245,7 @@ async function handleImmersiveDownload(request, sendResponse) {
             }
         }
 
-        if (!res || isOpaque || !res.ok) {
+        if (!res || !res.ok) {
             chrome.downloads.download({ url: finalUrl, filename: `IMG_Download/${finalUrl.split('/').pop() || 'media'}`, saveAs: false, conflictAction: 'uniquify' }, () => {
                 saveToHistory(finalUrl.split('/').pop() || "media", chrome.runtime.lastError ? "❌ 失败 (直接下载回退)" : "✅ 成功 (直接下载回退)");
             });
@@ -300,7 +292,7 @@ async function handleImmersiveDownload(request, sendResponse) {
                 let cdDot = cdName.lastIndexOf('.');
                 if (cdDot !== -1) {
                     filename = cdName.substring(0, cdDot);
-                    ext = cdDot !== -1 ? cdName.substring(cdDot).toLowerCase() : ext;
+                    ext = cdName.substring(cdDot).toLowerCase();
                 } else {
                     filename = cdName;
                 }
