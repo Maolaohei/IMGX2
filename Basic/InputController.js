@@ -256,6 +256,10 @@ window.Mix01InputController = class InputController {
             cancelAnimationFrame(this._physicsFrameId);
             this._physicsFrameId = null;
         }
+        if (this._kineticFrameId) {
+            cancelAnimationFrame(this._kineticFrameId);
+            this._kineticFrameId = null;
+        }
         this.physics.active = false;
     }
 
@@ -290,13 +294,12 @@ window.Mix01InputController = class InputController {
     }
 
     _applyKineticInertia(vx, vy) {
-        let currentVx = vx * 16; // 缩放因子对齐至 60FPS 每帧渲染跨度
+        let currentVx = vx * 16;
         let currentVy = vy * 16;
-        const friction = 0.92;   // 阻尼系数
+        const friction = 0.92;
 
         const step = () => {
-            // 重新按住指针或退出时无缝切断惯性平移
-            if (this._pointerTracker.isDragging || !this.state.isViewerVisible) return;
+            if (this._pointerTracker.isDragging || !this.state.isViewerVisible) { this._kineticFrameId = null; return; }
 
             this.physics.targetPanX += currentVx;
             this.physics.targetPanY += currentVy;
@@ -304,14 +307,16 @@ window.Mix01InputController = class InputController {
             currentVx *= friction;
             currentVy *= friction;
 
-            this._clampTargetPan(false); // 阻尼衰减边缘吸附
+            this._clampTargetPan(false);
             this._startPhysicsLoop();
 
             if (Math.abs(currentVx) > 0.05 || Math.abs(currentVy) > 0.05) {
-                requestAnimationFrame(step);
+                this._kineticFrameId = requestAnimationFrame(step);
+            } else {
+                this._kineticFrameId = null;
             }
         };
-        requestAnimationFrame(step);
+        this._kineticFrameId = requestAnimationFrame(step);
     }
 
     _isEditableTarget(tgt) {
@@ -962,6 +967,10 @@ window.Mix01InputController = class InputController {
         this.mediaObserver.disconnect();
         if (this._resizeTimer) { clearTimeout(this._resizeTimer); this._resizeTimer = null; }
         if (this.render.hdState.progressTimer) { clearInterval(this.render.hdState.progressTimer); this.render.hdState.progressTimer = null; }
+
+        this.preloadedUrls.clear();
+        this.preloadedUrlsQueue.length = 0;
+        this._preloadImgInstancesMap.clear();
         
         this.state.currentMedia = null;
         this.state.currentSrc = null;

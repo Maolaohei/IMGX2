@@ -10,7 +10,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.immersiveState = { lastMedia: null, lastSrc: null, lastHudSignature: null };
         this._hdUrlCache = new Map();
         this._activeBlobUrls = new Set();
-        this._currentBlob = null; 
         this.controller = null; // 建立对等双向绑定，彻底淘汰自身的会话 ID 跟踪，杜绝漂移风险
         this._ctxCallbacks = null; // 用于右键上下文菜单事件委托的回调登记
 
@@ -274,7 +273,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
             }
             this._activeBlobUrls.clear();
         }
-        this._currentBlob = null;
     }
 
     setupMessageListener() {
@@ -474,6 +472,11 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.hide();
         if (this.domGuard) this.domGuard.disconnect();
         
+        if (this._activeToastQueue) {
+            this._activeToastQueue.forEach(t => { if (t.parentNode) t.parentNode.removeChild(t); });
+            this._activeToastQueue = [];
+        }
+
         const els = [this.elements.viewer, this.elements.toast, this.elements.ctxMenu, this.elements.counter];
         els.forEach(el => {
             if (el && el.parentNode) {

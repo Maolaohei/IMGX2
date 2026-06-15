@@ -27,17 +27,17 @@ window.Mix01Utils = {
     async _resolveDownloadUrl(url) {
         const state = window.__mix01State;
 
-        // 1. Blob URL 还原为真实远端 URL
         if (url.startsWith('blob:') && state?.blobToUrlMap?.[url]) {
             url = state.blobToUrlMap[url];
         }
 
-        // 2. 高清 URL 升级（仅在未直接命中原图路径时执行）
+        if (state?.hdUrlMap?.[url]) {
+            return state.hdUrlMap[url];
+        }
+
         if (!url.includes('img-original/') && window.Mix01RuleEngine) {
             try {
-                const imgEl = Array.from(document.querySelectorAll('img')).find(
-                    el => el.src === url || el.currentSrc === url
-                );
+                const imgEl = document.querySelector(`img[src="${CSS.escape(url)}"], img[currentsrc="${CSS.escape(url)}"]`);
                 const hdUrl = await window.Mix01RuleEngine.getHighResUrl(imgEl, url);
                 if (hdUrl) url = hdUrl;
             } catch (e) {
@@ -110,26 +110,20 @@ window.Mix01Utils = {
         renderer.showToast(isVideo ? "⏳ 正在提交视频下载任务..." : "⏳ 正在提交图片下载任务...");
 
         try {
-            // ✅ 在发送前完成 Blob 还原与高清升级，不再依赖猴子补丁
             const resolvedUrl = await this._resolveDownloadUrl(url);
             await this.sendMessage({
                 action: "downloadImmersiveImg",
                 url: resolvedUrl,
                 pageUrl: window.location.href
             });
-            renderer.showToast("✅ 已保存至 IMG_Download 文件夹内！");
+            renderer.showToast("📥 下载任务已提交，结果请查看提取记录");
         } catch (e) {
             console.warn("后台暂不可用，正在自动降级本地兜底通道...", e);
             this._downloadLocallyFallback(url, renderer, isVideo);
         }
     },
 
-    // 本地兜底下载通道：仅在后台 Service Worker 不可用时启动
     async _downloadLocallyFallback(url, renderer, isVideo) {
-        if (renderer._currentBlob && !isVideo) {
-            this._saveBlobLocally(renderer._currentBlob, url);
-            return;
-        }
         try {
             const response = await fetch(url, { mode: 'cors' });
             if (!response.ok) throw new Error("HTTP " + response.status);
