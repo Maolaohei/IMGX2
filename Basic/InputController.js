@@ -52,6 +52,7 @@ window.Mix01InputController = class InputController {
             isViewerVisible: false // 彻底解耦 DOM 样式读取，用内存变量代替对 elements.viewer.style.display 的读取
         };
 
+        this.compiledKeys = {};
         this.physics = {
             targetZoom: 2.0, currentZoom: 2.0,
             targetPanX: 0, currentPanX: 0,
