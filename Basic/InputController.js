@@ -2,18 +2,77 @@ class Mix01ImagePool {
     constructor() { this.pool = []; }
     acquire() { return this.pool.pop() || new Image(); }
     release(img) {
-        img.onload = null; img.onerror = null; img.src = '';
+        if (!img) return;
+        img.onload = null; img.onerror = null; img.onabort = null; img.src = '';
         if (this.pool.length < 30) this.pool.push(img);
+    }
+    releaseAll(iterable) {
+        for (const img of iterable) this.release(img);
     }
 }
 
-// 获取或初始化全局已就绪原图 URL 集合，确保在页面生命周期中跨会话持久存在
-const getLoadedHdUrls = () => {
+// Bounded global caches for long browsing sessions
+const CACHE_LIMITS = {
+    loadedHdUrls: 120,
+    hdUrlMap: 200,
+    likeMediaCache: 150,
+    followAuthorCache: 100,
+    badUrls: 80,
+    preloadedUrls: 40
+};
+
+const ensureMix01State = () => {
     window.__mix01State = window.__mix01State || {};
-    if (!window.__mix01State.loadedHdUrls) {
-        window.__mix01State.loadedHdUrls = new Set();
+    return window.__mix01State;
+};
+
+const trimSet = (set, maxSize) => {
+    if (!set || set.size <= maxSize) return set;
+    const overflow = set.size - maxSize;
+    let i = 0;
+    for (const value of set) {
+        set.delete(value);
+        if (++i >= overflow) break;
     }
-    return window.__mix01State.loadedHdUrls;
+    return set;
+};
+
+const rememberHdUrl = (src, hdUrl) => {
+    if (!src || !hdUrl) return;
+    const state = ensureMix01State();
+    state.hdUrlMap = state.hdUrlMap || {};
+    if (state.hdUrlMap[src] !== undefined) delete state.hdUrlMap[src];
+    state.hdUrlMap[src] = hdUrl;
+    const keys = Object.keys(state.hdUrlMap);
+    if (keys.length > CACHE_LIMITS.hdUrlMap) {
+        const overflow = keys.length - CACHE_LIMITS.hdUrlMap;
+        for (let i = 0; i < overflow; i++) delete state.hdUrlMap[keys[i]];
+    }
+};
+
+const rememberLoadedHdUrl = (hdUrl) => {
+    if (!hdUrl) return;
+    const set = getLoadedHdUrls();
+    if (set.has(hdUrl)) set.delete(hdUrl);
+    set.add(hdUrl);
+    trimSet(set, CACHE_LIMITS.loadedHdUrls);
+};
+
+const rememberBoundedObject = (bucket, key, value, maxSize) => {
+    if (!bucket || key == null) return;
+    if (bucket[key] !== undefined) delete bucket[key];
+    bucket[key] = value;
+    const keys = Object.keys(bucket);
+    if (keys.length > maxSize) {
+        const overflow = keys.length - maxSize;
+        for (let i = 0; i < overflow; i++) delete bucket[keys[i]];
+    }
+};
+
+const getLoadedHdUrls = () => {
+    const state = ensureMix01State();
+    if (!state.loadedHdUrls) state.loadedHdUrls = new Set();
+    return state.loadedHdUrls;
 };
 
 window.Mix01InputController = class InputController {
@@ -83,7 +142,12 @@ window.Mix01InputController = class InputController {
         this._cursorHideTimer = null; 
         this._hudIdleTimer = null; 
         this._cancelScrollWait = null; 
-        this._clickStart = null; // 全局点击起点，支持在小图模式下也能完美退出查看器
+        this._clickStart = null; // click origin for immersive background exit
+        this._pan = { active: false }; // drag state used by background click exit
+        this._preloadInFlight = 0;
+        this._preloadMaxConcurrent = 3;
+        this._lastHudRefresh = 0;
+        this._lastImmersiveLayoutRect = 0;
         this._lastDetectTime = 0;
         this._lastRectTime = 0;
         this._physicsFrameId = null; 
@@ -92,15 +156,23 @@ window.Mix01InputController = class InputController {
 
         this.visibleMediaElements = new Set();
         this.mediaIO = new IntersectionObserver((entries) => {
+            let dirty = false;
             for (let e of entries) {
-                if (e.isIntersecting) this.visibleMediaElements.add(e.target);
-                else this.visibleMediaElements.delete(e.target);
+                if (e.isIntersecting) {
+                    if (!this.visibleMediaElements.has(e.target)) dirty = true;
+                    this.visibleMediaElements.add(e.target);
+                } else if (this.visibleMediaElements.delete(e.target)) {
+                    dirty = true;
+                }
             }
+            if (dirty) this.state._galleryCacheDirty = true;
         }, { rootMargin: '300px' });
         
         this.initPassiveDOMScanner();
 
         this.mediaObserver = new MutationObserver((mutations) => {
+            if (this.state.isViewerVisible) return;
+
             let newSrc = null;
             for (let m of mutations) {
                 if (m.type === 'attributes' && m.attributeName === 'src' && m.target === this.state.currentMedia) {
@@ -109,14 +181,14 @@ window.Mix01InputController = class InputController {
                     }
                 }
             }
-            if (newSrc) {
-                this.state.currentSrc = newSrc;
-                if (this.render.elements.img.src !== this.state.currentHdUrl) {
-                    this.render.elements.img.src = newSrc;
-                    this.updateRender();
-                }
-                this.upgradeToHDQuietly(this.state.currentMedia, newSrc);
+            if (!newSrc) return;
+
+            this.state.currentSrc = newSrc;
+            if (this.render.elements.img.src !== this.state.currentHdUrl) {
+                this.render.elements.img.src = newSrc;
+                this.updateRender();
             }
+            this.upgradeToHDQuietly(this.state.currentMedia, newSrc);
         });
 
         this.bindEvents();
@@ -186,6 +258,7 @@ window.Mix01InputController = class InputController {
                 if (m.addedNodes && m.addedNodes.length > 0) {
                     for (let node of m.addedNodes) {
                         if (node.nodeType === Node.ELEMENT_NODE) {
+                            this.state._galleryCacheDirty = true;
                             const isImgOrVideo = node.tagName === 'IMG' || node.tagName === 'VIDEO';
                             if (isImgOrVideo) {
                                 if (!node._mix01Observed) { 
@@ -359,6 +432,7 @@ window.Mix01InputController = class InputController {
             if (e.button === 0) {
                 e.preventDefault();
                 this._pointerTracker.isDragging = true;
+                this._pan.active = true;
                 this._pointerTracker.startX = e.clientX;
                 this._pointerTracker.startY = e.clientY;
                 this._pointerTracker.startPanX = this.physics.targetPanX;
@@ -436,6 +510,7 @@ window.Mix01InputController = class InputController {
             
             if (this._pointerTracker.isDragging) {
                 this._pointerTracker.isDragging = false;
+                this._pan.active = false;
                 viewer.releasePointerCapture(e.pointerId);
                 
                 const speed = Math.sqrt(this._pointerTracker.velocityX ** 2 + this._pointerTracker.velocityY ** 2);
@@ -523,6 +598,58 @@ window.Mix01InputController = class InputController {
             this.handleKeyDown(e);
         }, optKey);
 
+        // Background click / double-click to exit immersive or close lens
+        const onPointerDownForClick = (e) => {
+            if (!this.state.isViewerVisible) return;
+            if (e.button !== 0) return;
+            this._clickStart = { x: e.clientX, y: e.clientY, t: performance.now() };
+        };
+        this.render.elements.viewer.addEventListener('pointerdown', onPointerDownForClick, { signal: this._eventSignalController.signal });
+        this.render.elements.viewer.addEventListener('click', (e) => this.handleBackgroundClick(e), { signal: this._eventSignalController.signal });
+        this.render.elements.viewer.addEventListener('dblclick', (e) => {
+            if (!this.state.isViewerVisible) return;
+            e.preventDefault();
+            e.stopPropagation();
+            if (this.cfg.state.isImmersive) this.exitImmersive();
+            else this.hideViewer();
+        }, { signal: this._eventSignalController.signal });
+
+        // Right-click context menu inside viewer
+        this.render.elements.viewer.addEventListener('contextmenu', (e) => {
+            if (!this.state.isViewerVisible || !this.cfg.state.hasAgreed) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const lockedMedia = this.state.currentMedia;
+            const lockedHd = this.state.currentHdUrl;
+            const lockedSrc = this.state.currentSrc;
+            this.render.showContextMenu(e.clientX, e.clientY, {
+                'copy-img': () => {
+                    const url = lockedHd || this.render.elements.img.src || lockedSrc;
+                    if (url) window.Mix01Utils.copyImageToClipboard(url, this.render);
+                },
+                'copy-url': () => {
+                    const url = lockedHd || this.render.elements.img.src || lockedSrc;
+                    if (!url) return;
+                    navigator.clipboard.writeText(url).then(() => this.render.showToast('原图链接已复制')).catch(() => {});
+                },
+                'copy-markdown': () => {
+                    const url = lockedHd || this.render.elements.img.src || lockedSrc;
+                    if (!url) return;
+                    navigator.clipboard.writeText('![](' + url + ')').then(() => this.render.showToast('Markdown 已复制')).catch(() => {});
+                },
+                'open-tab': () => {
+                    const url = lockedHd || this.render.elements.img.src || lockedSrc;
+                    if (url) window.open(url, '_blank', 'noopener,noreferrer');
+                },
+                'save': () => this.triggerGlobalDownloadWithParams(lockedMedia, lockedHd, lockedSrc),
+                'disable-site': () => this._quickToggleSite(),
+                'close': () => {
+                    if (this.cfg.state.isImmersive) this.exitImmersive();
+                    else this.hideViewer();
+                }
+            });
+        }, { signal: this._eventSignalController.signal });
+
         window.addEventListener('blur', () => this.hideViewer(), { signal: this._eventSignalController.signal });
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'hidden') this.hideViewer();
@@ -538,9 +665,13 @@ window.Mix01InputController = class InputController {
 
         this.hideViewer();
 
+        this.imgPool.releaseAll(this.activePreloads);
         this.activePreloads.clear();
+        this.imgPool.releaseAll(this._preloadImgInstancesMap.values());
         this._preloadImgInstancesMap.clear();
         this.preloadedUrls.clear();
+        this.preloadedUrlsQueue.length = 0;
+        this.visibleMediaElements.clear();
     }
 
     getMediaUnderCursor(clientX, clientY, target) {
@@ -589,8 +720,19 @@ window.Mix01InputController = class InputController {
                 this.render.elements.viewer.style.setProperty('cursor', 'none', 'important');
             }, 2000);
 
-            this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
-            this.updateRender(e);
+            // HUD DOM reads are expensive; refresh at most ~3Hz while moving
+            const nowHud = performance.now();
+            if (nowHud - this._lastHudRefresh > 320) {
+                this._lastHudRefresh = nowHud;
+                this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
+            }
+            // Immersive layout only needs frequent updates while dragging/zooming
+            if (this._pointerTracker.isDragging || this.physics.active || this.state.isZoomManuallyChanged) {
+                this.updateRender(e);
+            } else if (nowHud - this._lastImmersiveLayoutRect > 120) {
+                this._lastImmersiveLayoutRect = nowHud;
+                this.updateRender(e);
+            }
             return;
         }
 
@@ -678,52 +820,54 @@ window.Mix01InputController = class InputController {
             if (window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
                 const hdUrl = await window.Mix01RuleEngine.getHighResUrl(target, src);
                 if (hdUrl && hdUrl !== src && !this.render.hdState.badUrls.has(hdUrl)) {
-                    
-                    window.__mix01State = window.__mix01State || {};
-                    window.__mix01State.hdUrlMap = window.__mix01State.hdUrlMap || {};
-                    window.__mix01State.hdUrlMap[src] = hdUrl;
+                    rememberHdUrl(src, hdUrl);
 
-                    if (this.state.renderRequestId !== savedSessionId || this.state.currentSrc !== src) return; 
+                    if (this.state.renderRequestId !== savedSessionId || this.state.currentSrc !== src) return;
                     if (this.render.elements.img.src === hdUrl) return;
 
                     this.state.currentHdUrl = hdUrl;
                     this.render.hdState.isLoading = true;
                     this.render.hdState.progress = 0;
-                    
+
+                    // Fake progress only updates status label, not full layout
                     if (this.render.hdState.progressTimer) clearInterval(this.render.hdState.progressTimer);
                     this.render.hdState.progressTimer = setInterval(() => {
-                        if (this.state.renderRequestId !== savedSessionId) { clearInterval(this.render.hdState.progressTimer); return; }
+                        if (this.state.renderRequestId !== savedSessionId) {
+                            clearInterval(this.render.hdState.progressTimer);
+                            this.render.hdState.progressTimer = null;
+                            return;
+                        }
                         if (this.render.hdState.progress < 95) {
                             this.render.hdState.progress += Math.floor(Math.random() * 8) + 2;
                             if (this.render.hdState.progress > 95) this.render.hdState.progress = 95;
-                            this.updateRender(); 
+                            this.render.refreshHDStatusOnly();
                         }
-                    }, 150);
-                    this.updateRender(); 
+                    }, 180);
+                    this.render.refreshHDStatusOnly();
 
                     try {
                         await this.render.renderHDImageDirect(hdUrl, savedSessionId);
-                        
+
                         if (this.state.renderRequestId !== savedSessionId) return;
 
-                        if (this.render.hdState.progressTimer) { 
-                            clearInterval(this.render.hdState.progressTimer); 
-                            this.render.hdState.progressTimer = null; 
+                        if (this.render.hdState.progressTimer) {
+                            clearInterval(this.render.hdState.progressTimer);
+                            this.render.hdState.progressTimer = null;
                         }
                         this.render.hdState.progress = 100;
                         this.render.hdState.isLoading = false;
                         this._hdFetchController = null;
 
-                        getLoadedHdUrls().add(hdUrl);
+                        rememberLoadedHdUrl(hdUrl);
                         this.updateRender();
                     } catch (err) {
                         if (this.state.renderRequestId !== savedSessionId) return;
-                        if (this.render.hdState.progressTimer) { 
-                            clearInterval(this.render.hdState.progressTimer); 
-                            this.render.hdState.progressTimer = null; 
+                        if (this.render.hdState.progressTimer) {
+                            clearInterval(this.render.hdState.progressTimer);
+                            this.render.hdState.progressTimer = null;
                         }
                         this.render.hdState.isLoading = false;
-                        this.render.hdState.badUrls.add(hdUrl);
+                        this.render.markBadHdUrl(hdUrl);
                         this.updateRender();
                     }
                 }
@@ -754,20 +898,19 @@ window.Mix01InputController = class InputController {
         }
 
         if (this._preloadTimer) clearTimeout(this._preloadTimer);
-        for (let img of this.activePreloads) this.imgPool.release(img);
+        this.imgPool.releaseAll(this.activePreloads);
         this.activePreloads.clear();
         this.render.clearBlobCache(); 
         
         if (this._preloadImgInstancesMap) {
             for (let [url, img] of this._preloadImgInstancesMap) {
                 if (url !== target.src && url !== initialSrc) {
-                    if (img && !img.complete) {
-                        img.src = ''; 
-                    }
+                    this.imgPool.release(img);
                 }
             }
             this._preloadImgInstancesMap.clear();
         }
+        this._preloadInFlight = 0;
         
         this.state.isRenderingLock = false;
         this.state.lastRenderSignature = null;
@@ -891,8 +1034,15 @@ window.Mix01InputController = class InputController {
         const sW = window.innerWidth;
         const sH = window.innerHeight;
 
-        const rect = this.state.currentMedia.getBoundingClientRect();
-        this.state.cachedRect = rect; 
+        // Immersive fixed layout rarely needs fresh rect; throttle DOM reads
+        const nowRect = performance.now();
+        let rect = this.state.cachedRect;
+        const needFreshRect = !rect || !this.cfg.state.isImmersive || (nowRect - this._lastRectTime > 160) || this._pointerTracker.isDragging;
+        if (needFreshRect) {
+            rect = this.state.currentMedia.getBoundingClientRect();
+            this.state.cachedRect = rect;
+            this._lastRectTime = nowRect;
+        } 
 
         const x = e ? e.clientX : (window.lastMouseX !== undefined ? window.lastMouseX : sW / 2);
         const y = e ? e.clientY : (window.lastMouseY !== undefined ? window.lastMouseY : sH / 2);
@@ -969,9 +1119,15 @@ window.Mix01InputController = class InputController {
         if (this._resizeTimer) { clearTimeout(this._resizeTimer); this._resizeTimer = null; }
         if (this.render.hdState.progressTimer) { clearInterval(this.render.hdState.progressTimer); this.render.hdState.progressTimer = null; }
 
+        this.imgPool.releaseAll(this.activePreloads);
+        this.activePreloads.clear();
+        this.imgPool.releaseAll(this._preloadImgInstancesMap.values());
         this.preloadedUrls.clear();
         this.preloadedUrlsQueue.length = 0;
         this._preloadImgInstancesMap.clear();
+        this._preloadInFlight = 0;
+        this._pan.active = false;
+        this._clickStart = null;
         
         this.state.currentMedia = null;
         this.state.currentSrc = null;
@@ -1010,7 +1166,7 @@ window.Mix01InputController = class InputController {
             const startY = this._clickStart ? this._clickStart.y : e.clientY;
             const dx = Math.abs(e.clientX - startX);
             const dy = Math.abs(e.clientY - startY);
-            if (this._pan.active || dx > 5 || dy > 5) {
+            if ((this._pan && this._pan.active) || this._pointerTracker.isDragging || dx > 5 || dy > 5) {
                 return;
             }
             this.exitImmersive();
@@ -1095,7 +1251,13 @@ window.Mix01InputController = class InputController {
         if (adapter && adapter.getGalleryImages) {
             result = adapter.getGalleryImages();
         } else {
-            result = Array.from(document.querySelectorAll('img, video')).filter(media => {
+            // Prefer IntersectionObserver visible set; fall back to full scan only if sparse
+            const candidates = this.visibleMediaElements.size > 0
+                ? Array.from(this.visibleMediaElements)
+                : Array.from(document.querySelectorAll('img, video'));
+
+            result = candidates.filter(media => {
+                if (!media || !media.isConnected) return false;
                 if (media.id === 'zoom-img-xyz' || media.id === 'zoom-img-buffer-xyz' || media.id === 'zoom-video-xyz') return false;
                 
                 if (media.tagName === 'IMG') {
@@ -1130,6 +1292,10 @@ window.Mix01InputController = class InputController {
                     }
                 }
 
+                // Avoid layout thrash: use IO membership as proxy when available
+                if (this.visibleMediaElements.has(media)) {
+                    return (media.clientWidth || 0) > 50 && (media.clientHeight || 0) > 50;
+                }
                 const rect = media.getBoundingClientRect();
                 return rect.width > 50 && rect.height > 50; 
             });
@@ -1249,7 +1415,10 @@ window.Mix01InputController = class InputController {
         if (doLike && adapter.like) {
             if (!(isCombo && currentState.isLiked)) {
                 const newState = await adapter.like(container, lockedMedia);
-                if (newState !== null) window.__mix01State.likeMediaCache[lockedSrc] = newState;
+                if (newState !== null) {
+                    window.__mix01State.likeMediaCache = window.__mix01State.likeMediaCache || {};
+                    rememberBoundedObject(window.__mix01State.likeMediaCache, lockedSrc, newState, CACHE_LIMITS.likeMediaCache);
+                }
             }
         }
         if (doFollow && adapter.follow) {
@@ -1258,7 +1427,8 @@ window.Mix01InputController = class InputController {
                 if (newState !== null) {
                     const tempStates = adapter.getStates ? await adapter.getStates(container, lockedMedia) : null;
                     if (tempStates && tempStates.authorName) {
-                        window.__mix01State.followAuthorCache[tempStates.authorName] = newState;
+                        window.__mix01State.followAuthorCache = window.__mix01State.followAuthorCache || {};
+                        rememberBoundedObject(window.__mix01State.followAuthorCache, tempStates.authorName, newState, CACHE_LIMITS.followAuthorCache);
                     }
                 }
             }
@@ -1333,7 +1503,7 @@ window.Mix01InputController = class InputController {
             let mainDir = this.state.lastSwitchDirection || 1;
             if (!this.cfg.state.isImmersive && this._mouseVector.dy < -2) mainDir = -1; 
 
-            const oppCount = Math.floor(N * 0.3); 
+            const oppCount = Math.max(0, Math.floor(N * 0.2));
             const mainCount = N - oppCount;       
 
             const preloadPlan = [];
@@ -1344,42 +1514,73 @@ window.Mix01InputController = class InputController {
                 preloadPlan.push(currentIndex + i * (-mainDir));
             }
 
-            let loadedCount = 0;
+            const queue = [];
             for (const targetIndex of preloadPlan) {
                 if (targetIndex < 0 || targetIndex >= galleryImages.length) continue;
-
                 const media = galleryImages[targetIndex];
-                if (media.tagName === 'IMG') {
-                    const src = media.src;
-                    loadedCount++;
-                    
-                    (async () => {
-                        let targetUrl = src;
-                        if (this.cfg.state.loadHD === 'true' && window.Mix01RuleEngine && window.Mix01RuleEngine.getHighResUrl) {
-                            try { targetUrl = await window.Mix01RuleEngine.getHighResUrl(media, src); } catch (e) {}
-                        }
+                if (media && media.tagName === 'IMG' && media.src) queue.push(media);
+            }
 
-                        if (targetUrl && !this.preloadedUrls.has(targetUrl) && !this.render.hdState.badUrls.has(targetUrl)) {
+            const pump = () => {
+                while (this._preloadInFlight < this._preloadMaxConcurrent && queue.length > 0) {
+                    const media = queue.shift();
+                    const src = media.src;
+                    this._preloadInFlight++;
+
+                    (async () => {
+                        try {
+                            let targetUrl = src;
+                            const mapped = ensureMix01State().hdUrlMap?.[src];
+                            if (mapped) {
+                                targetUrl = mapped;
+                            } else if (this.cfg.state.loadHD === 'true' && window.Mix01RuleEngine?.getHighResUrl) {
+                                try {
+                                    targetUrl = await window.Mix01RuleEngine.getHighResUrl(media, src);
+                                    if (targetUrl && targetUrl !== src) rememberHdUrl(src, targetUrl);
+                                } catch (e) {}
+                            }
+
+                            if (!targetUrl || this.preloadedUrls.has(targetUrl) || this.render.hdState.badUrls.has(targetUrl)) {
+                                return;
+                            }
+
                             this.preloadedUrls.add(targetUrl);
                             this.preloadedUrlsQueue.push(targetUrl);
 
-                            const preloadImg = new Image();
+                            const preloadImg = this.imgPool.acquire();
+                            this.activePreloads.add(preloadImg);
+                            preloadImg.decoding = 'async';
                             preloadImg.onload = () => {
-                                getLoadedHdUrls().add(targetUrl);
+                                rememberLoadedHdUrl(targetUrl);
+                                this.activePreloads.delete(preloadImg);
+                            };
+                            preloadImg.onerror = () => {
+                                this.render.markBadHdUrl(targetUrl);
+                                this.activePreloads.delete(preloadImg);
+                                this.imgPool.release(preloadImg);
+                                this._preloadImgInstancesMap.delete(targetUrl);
                             };
                             preloadImg.src = targetUrl;
-
                             this._preloadImgInstancesMap.set(targetUrl, preloadImg);
 
-                            if (this.preloadedUrlsQueue.length > 50) {
+                            while (this.preloadedUrlsQueue.length > CACHE_LIMITS.preloadedUrls) {
                                 const oldest = this.preloadedUrlsQueue.shift();
                                 this.preloadedUrls.delete(oldest);
-                                this._preloadImgInstancesMap.delete(oldest); 
+                                const oldImg = this._preloadImgInstancesMap.get(oldest);
+                                if (oldImg) {
+                                    this._preloadImgInstancesMap.delete(oldest);
+                                    this.activePreloads.delete(oldImg);
+                                    this.imgPool.release(oldImg);
+                                }
                             }
+                        } finally {
+                            this._preloadInFlight = Math.max(0, this._preloadInFlight - 1);
+                            pump();
                         }
                     })();
                 }
-            }
+            };
+            pump();
         }, 120); 
     }
 

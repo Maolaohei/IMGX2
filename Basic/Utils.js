@@ -51,50 +51,56 @@ window.Mix01Utils = {
     async copyImageToClipboard(url, renderer) {
         renderer.showToast("⏳ 正在获取原图...");
         try {
-            // ✅ 统一使用 Promise 风格，后台失败或网络异常均可被外层 catch 捕获
+            // Prefer blob path to avoid base64 inflate + canvas re-encode
             const res = await this.sendMessage({
-                action: "fetchImageAsBase64",
+                action: "fetchImageAsBlob",
                 url,
                 pageUrl: window.location.href
             });
 
             if (!res?.success) throw new Error("Background fetch failed");
 
-            const blob = await fetch(res.base64).then(r => r.blob());
-            const blobUrl = URL.createObjectURL(blob);
+            let blob;
+            if (res.base64) {
+                // Backward-compatible base64 fallback
+                blob = await fetch(res.base64).then(r => r.blob());
+            } else if (res.dataUrl) {
+                blob = await fetch(res.dataUrl).then(r => r.blob());
+            } else {
+                throw new Error("Empty image payload");
+            }
 
-            // 解码图片以便转为标准 PNG
-            const img = new Image();
-            await new Promise((resolve, reject) => {
-                img.onload = resolve;
-                img.onerror = reject;
-                img.src = blobUrl;
-            });
-
-            const canvas = document.createElement('canvas');
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            canvas.getContext('2d', { alpha: false }).drawImage(img, 0, 0);
-
-            const pngBlob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-            URL.revokeObjectURL(blobUrl);
-
-            // 写入剪贴板前尝试重新聚焦，尽可能挽回异步延时导致的 User Gesture 失效
             window.focus();
             document.body?.focus();
 
+            // Prefer native type when clipboard supports it; convert to PNG only when needed
+            let writeBlob = blob;
+            const type = (blob.type || 'image/png').split(';')[0];
+            if (type !== 'image/png') {
+                try {
+                    const bitmap = await createImageBitmap(blob);
+                    const canvas = document.createElement('canvas');
+                    canvas.width = bitmap.width;
+                    canvas.height = bitmap.height;
+                    const ctx = canvas.getContext('2d', { alpha: false });
+                    ctx.drawImage(bitmap, 0, 0);
+                    if (bitmap.close) bitmap.close();
+                    writeBlob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+                } catch (convErr) {
+                    // keep original blob; clipboard write may still fail and fall back to text
+                    writeBlob = blob;
+                }
+            }
+
             try {
-                // 1. 首选：写入高清 PNG 二进制
-                await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
+                await navigator.clipboard.write([new ClipboardItem({ 'image/png': writeBlob })]);
                 renderer.showToast("✅ 已成功复制原图！");
             } catch (writeErr) {
                 console.warn("Mix01 剪贴板写入图片失败 (可能是焦点受阻)，降级方案启动...", writeErr);
                 try {
-                    // 2. 降级：写入图片直链文本
                     await navigator.clipboard.writeText(url);
                     renderer.showToast("📋 复制原图失败，已降级复制原图链接");
                 } catch (textErr) {
-                    // 3. 兜底：完全受限
                     console.error("Mix01 剪贴板完全受限:", textErr);
                     renderer.showToast("❌ 复制失败，请尝试直接右键保存图片");
                 }

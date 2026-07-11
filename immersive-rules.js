@@ -15,7 +15,11 @@
         '(?:(?:.+\\.)?twitter|x)\\.com': {
             getContainer: (media) => media.closest('article') || document.body,
             getGalleryImages: () => {
-                const allMedia = Array.from(document.querySelectorAll('img, video'));
+                // Prefer engine IO visible set when available to avoid full-document scans
+                const engineVisible = window.__mix01Engine?.controller?.visibleMediaElements;
+                const allMedia = (engineVisible && engineVisible.size > 0)
+                    ? Array.from(engineVisible)
+                    : Array.from(document.querySelectorAll('img, video'));
                 const validMedia = [];
                 const viewportHeight = window.innerHeight;
                 const topBound = -viewportHeight * 1.5;
@@ -462,7 +466,10 @@
             isFallback: true,
             getContainer: (media) => media.parentElement || document.body,
             getGalleryImages: () => {
-                const allMedia = Array.from(document.querySelectorAll('img, video'));
+                const engineVisible = window.__mix01Engine?.controller?.visibleMediaElements;
+                const allMedia = (engineVisible && engineVisible.size > 0)
+                    ? Array.from(engineVisible)
+                    : Array.from(document.querySelectorAll('img, video'));
                 const validMedia = [];
                 const viewportHeight = window.innerHeight;
                 const topBound = -viewportHeight * 1.5;

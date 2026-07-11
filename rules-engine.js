@@ -14,7 +14,45 @@
         }
     };
 
-    const tools = {
+    const TWITTER_DIRECT_FEATURES = {
+        'articles_preview_enabled': true,
+        'c9s_tweet_anatomy_moderator_badge_enabled': true,
+        'communities_web_enable_tweet_community_results_fetch': false,
+        'creator_subscriptions_quote_tweet_preview_enabled': false,
+        'creator_subscriptions_tweet_preview_api_enabled': false,
+        'freedom_of_speech_not_reach_fetch_enabled': true,
+        'graphql_is_translatable_rweb_tweet_is_translatable_enabled': true,
+        'longform_notetweets_consumption_enabled': false,
+        'longform_notetweets_inline_media_enabled': true,
+        'longform_notetweets_rich_text_read_enabled': false,
+        'premium_content_api_read_enabled': false,
+        'profile_label_improvements_pcf_label_in_post_enabled': true,
+        'responsive_web_edit_tweet_api_enabled': false,
+        'responsive_web_enhance_cards_enabled': false,
+        'responsive_web_graphql_exclude_directive_enabled': false,
+        'responsive_web_graphql_skip_user_profile_image_extensions_enabled': false,
+        'responsive_web_graphql_timeline_navigation_enabled': false,
+        'responsive_web_grok_analysis_button_from_backend': false,
+        'responsive_web_grok_analyze_button_fetch_trends_enabled': false,
+        'responsive_web_grok_analyze_post_followups_enabled': false,
+        'responsive_web_grok_image_annotation_enabled': false,
+        'responsive_web_grok_share_attachment_enabled': false,
+        'responsive_web_grok_show_grok_translated_post': false,
+        'responsive_web_jetfuel_frame': false,
+        'responsive_web_media_download_video_enabled': false,
+        'responsive_web_twitter_article_tweet_consumption_enabled': true,
+        'rweb_tipjar_consumption_enabled': true,
+        'rweb_video_screen_enabled': false,
+        'standardized_nudges_misinfo': true,
+        'tweet_awards_web_tipping_enabled': false,
+        'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': true,
+        'tweetypie_unmention_optimization_enabled': false,
+        'verified_phone_label_enabled': false,
+        'view_counts_everywhere_api_enabled': true
+    };
+    const TWITTER_DIRECT_FEATURES_QS = encodeURIComponent(JSON.stringify(TWITTER_DIRECT_FEATURES));
+
+const tools = {
         getLargestImgSrc: function (container) {
             if (!container || !container.querySelectorAll) return '';
             const imgs = Array.from(container.querySelectorAll('img, [style*="background"]'));
@@ -34,7 +72,14 @@
         detectImage: async function (primarySrc, fallbackSrc) {
             const cached = LRUCache.get('__mix01DetectCache', primarySrc);
             if (cached !== undefined) return cached;
-            return new Promise((resolve) => {
+
+            // In-flight dedupe: concurrent probes for same URL share one Image request
+            window.__mix01DetectInflight = window.__mix01DetectInflight || new Map();
+            if (window.__mix01DetectInflight.has(primarySrc)) {
+                return window.__mix01DetectInflight.get(primarySrc);
+            }
+
+            const task = new Promise((resolve) => {
                 const img = new Image();
                 const fallback = fallbackSrc || primarySrc;
                 let settled = false;
@@ -42,15 +87,23 @@
                     if (settled) return;
                     settled = true;
                     clearTimeout(timeoutId);
-                    img.src = ''; 
+                    img.onload = null;
+                    img.onerror = null;
+                    img.src = '';
                     LRUCache.set('__mix01DetectCache', primarySrc, url, 60);
+                    window.__mix01DetectInflight.delete(primarySrc);
                     resolve(url);
                 };
-                const timeoutId = setTimeout(() => settle(fallback), 8000);
+                // 2.5s is enough for most CDN probes; 8s was over-waiting on dead links
+                const timeoutId = setTimeout(() => settle(fallback), 2500);
                 img.onload  = () => settle(primarySrc);
                 img.onerror = () => settle(fallback);
+                img.decoding = 'async';
                 img.src = primarySrc;
             });
+
+            window.__mix01DetectInflight.set(primarySrc, task);
+            return task;
         }
     };
 
@@ -98,43 +151,7 @@
             'withVoice': true,
             'withV2Timeline': true
         };
-        const features = {
-            'articles_preview_enabled': true,
-            'c9s_tweet_anatomy_moderator_badge_enabled': true,
-            'communities_web_enable_tweet_community_results_fetch': false,
-            'creator_subscriptions_quote_tweet_preview_enabled': false,
-            'creator_subscriptions_tweet_preview_api_enabled': false,
-            'freedom_of_speech_not_reach_fetch_enabled': true,
-            'graphql_is_translatable_rweb_tweet_is_translatable_enabled': true,
-            'longform_notetweets_consumption_enabled': false,
-            'longform_notetweets_inline_media_enabled': true,
-            'longform_notetweets_rich_text_read_enabled': false,
-            'premium_content_api_read_enabled': false,
-            'profile_label_improvements_pcf_label_in_post_enabled': true,
-            'responsive_web_edit_tweet_api_enabled': false,
-            'responsive_web_enhance_cards_enabled': false,
-            'responsive_web_graphql_exclude_directive_enabled': false,
-            'responsive_web_graphql_skip_user_profile_image_extensions_enabled': false,
-            'responsive_web_graphql_timeline_navigation_enabled': false,
-            'responsive_web_grok_analysis_button_from_backend': false,
-            'responsive_web_grok_analyze_button_fetch_trends_enabled': false,
-            'responsive_web_grok_analyze_post_followups_enabled': false,
-            'responsive_web_grok_image_annotation_enabled': false,
-            'responsive_web_grok_share_attachment_enabled': false,
-            'responsive_web_grok_show_grok_translated_post': false,
-            'responsive_web_jetfuel_frame': false,
-            'responsive_web_media_download_video_enabled': false,
-            'responsive_web_twitter_article_tweet_consumption_enabled': true,
-            'rweb_tipjar_consumption_enabled': true,
-            'rweb_video_screen_enabled': false,
-            'standardized_nudges_misinfo': true,
-            'tweet_awards_web_tipping_enabled': false,
-            'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': true,
-            'tweetypie_unmention_optimization_enabled': false,
-            'verified_phone_label_enabled': false,
-            'view_counts_everywhere_api_enabled': true
-        };
-        const url = `${base_url}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}`;
+        const url = `${base_url}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${TWITTER_DIRECT_FEATURES_QS}`;
         
         const cookies = {};
         document.cookie.split(';').forEach(cookie => {

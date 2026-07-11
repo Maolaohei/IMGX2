@@ -115,6 +115,21 @@ function saveToHistory(filename, statusMsg) {
     processHistoryFlush();
 }
 
+const TWITTER_GQL_BASE = 'https://x.com/i/api/graphql/2ICDjqPd81tulZcYrtpTuQ/TweetResultByRestId';
+const TWITTER_GQL_FEATURES = {
+    'articles_preview_enabled': true,
+    'c9s_tweet_anatomy_moderator_badge_enabled': true,
+    'freedom_of_speech_not_reach_fetch_enabled': true,
+    'graphql_is_translatable_rweb_tweet_is_translatable_enabled': true,
+    'longform_notetweets_inline_media_enabled': true,
+    'responsive_web_twitter_article_tweet_consumption_enabled': true,
+    'rweb_tipjar_consumption_enabled': true,
+    'standardized_nudges_misinfo': true,
+    'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': true,
+    'view_counts_everywhere_api_enabled': true
+};
+const TWITTER_GQL_FEATURES_QS = encodeURIComponent(JSON.stringify(TWITTER_GQL_FEATURES));
+
 let _compiledBase64Domains = null;
 let _lastBase64DomainsStr = null;
 
@@ -145,11 +160,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
                 if (!ct0) throw new Error("No ct0 cookie found");
 
-                const baseUrl = `https://x.com/i/api/graphql/2ICDjqPd81tulZcYrtpTuQ/TweetResultByRestId`;
-                const variables = { 'tweetId': request.statusId, 'with_rux_injections': false, 'includePromotedContent': true, 'withCommunity': true, 'withQuickPromoteEligibilityTweetFields': true, 'withBirdwatchNotes': true, 'withVoice': true, 'withV2Timeline': true };
-                const features = { 'articles_preview_enabled': true, 'c9s_tweet_anatomy_moderator_badge_enabled': true, 'freedom_of_speech_not_reach_fetch_enabled': true, 'graphql_is_translatable_rweb_tweet_is_translatable_enabled': true, 'longform_notetweets_inline_media_enabled': true, 'responsive_web_twitter_article_tweet_consumption_enabled': true, 'rweb_tipjar_consumption_enabled': true, 'standardized_nudges_misinfo': true, 'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': true, 'view_counts_everywhere_api_enabled': true };
-                
-                const url = `${baseUrl}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}`;
+                const variables = {
+                    'tweetId': request.statusId,
+                    'with_rux_injections': false,
+                    'includePromotedContent': true,
+                    'withCommunity': true,
+                    'withQuickPromoteEligibilityTweetFields': true,
+                    'withBirdwatchNotes': true,
+                    'withVoice': true,
+                    'withV2Timeline': true
+                };
+                const url = `${TWITTER_GQL_BASE}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${TWITTER_GQL_FEATURES_QS}`;
                 const headers = {
                     'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
                     'x-twitter-active-user': 'yes',
@@ -168,14 +189,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
-    if (request.action === "fetchImageAsBase64") {
-        fetch(request.url, { headers: { 'Referer': request.pageUrl } })
-            .then(res => res.blob())
+    if (request.action === "fetchImageAsBase64" || request.action === "fetchImageAsBlob") {
+        // fetchImageAsBlob reuses dataURL transport (MV3 content scripts cannot receive Blob directly)
+        // but skips double-fetch on content side when possible by returning dataUrl once.
+        fetch(request.url, { headers: { 'Referer': request.pageUrl || '' } })
+            .then(res => {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.blob();
+            })
             .then(blob => {
                 const reader = new FileReader();
-                reader.onloadend = () => sendResponse({ success: true, base64: reader.result });
+                reader.onloadend = () => sendResponse({
+                    success: true,
+                    base64: reader.result,
+                    dataUrl: reader.result,
+                    contentType: blob.type || 'image/png',
+                    size: blob.size || 0
+                });
+                reader.onerror = () => sendResponse({ success: false });
                 reader.readAsDataURL(blob);
-            }).catch(e => sendResponse({ success: false }));
+            }).catch(e => sendResponse({ success: false, error: String(e && e.message || e) }));
         return true;
     }
 
@@ -331,7 +364,7 @@ async function handleImmersiveDownload(request, sendResponse) {
                     chunks.push(value);
                     chunkCount++;
 
-                    if (chunkCount % 50 === 0) {
+                    if (chunkCount % 100 === 0) {
                         await chrome.storage.local.get('_sw_keep_alive_').catch(() => {});
                     }
                 }

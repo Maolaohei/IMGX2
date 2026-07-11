@@ -229,11 +229,8 @@ window.Mix01MediaRenderer = class MediaRenderer {
                     return;
                 }
 
-                // [新增] 高清图加载或解码失败的处理机制
-                console.warn("Mix01: 高清图加载或解码失败，准备执行原图降级回退机制:", hdUrl, err);
-                
                 // 将失效的高清 URL 加入黑名单以防重复加载
-                this.hdState.badUrls.add(hdUrl);
+                this.markBadHdUrl(hdUrl);
                 this.elements.img.classList.remove('mix01-hd-buffering');
 
                 if (fallbackUrl && fallbackUrl !== hdUrl) {
@@ -273,6 +270,30 @@ window.Mix01MediaRenderer = class MediaRenderer {
             }
             this._activeBlobUrls.clear();
         }
+    }
+
+    markBadHdUrl(hdUrl) {
+        if (!hdUrl) return;
+        this.markBadHdUrl(hdUrl);
+        // Bound bad URL set to avoid unbounded growth on long sessions
+        if (this.hdState.badUrls.size > 80) {
+            const overflow = this.hdState.badUrls.size - 80;
+            let i = 0;
+            for (const value of this.hdState.badUrls) {
+                this.hdState.badUrls.delete(value);
+                if (++i >= overflow) break;
+            }
+        }
+    }
+
+    refreshHDStatusOnly() {
+        // Lightweight status refresh for fake HD progress; avoids full layout pass
+        try {
+            const isVideo = this.videoState.isRunning;
+            const vW = this.elements.viewer?.offsetWidth || 0;
+            const vH = this.elements.viewer?.offsetHeight || 0;
+            this.updateStatus(isVideo ? 'hd' : 'hd', vW, vH, isVideo);
+        } catch (e) {}
     }
 
     setupMessageListener() {
@@ -951,7 +972,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     async handleImmersiveActivity(currentMedia, currentSrc, keys) {
-        if (!this.cfg.state.isImmersive || this.elements.viewer.style.display !== 'block') return;
+        if (!this.cfg.state.isImmersive) return;
+        if (this.controller && this.controller.state && !this.controller.state.isViewerVisible) return;
+        if (!this.controller && this.elements.viewer.style.display !== 'block') return;
 
         this._pendingHudSrc = currentSrc;
 
