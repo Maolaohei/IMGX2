@@ -71,7 +71,345 @@
                 const rect = el.getBoundingClientRect();
                 return rect.width > 80 && rect.height > 80;
             });
-        }
+        },
+        extractAuthorHandle: function (scope) {
+            if (!scope) return '';
+            // Only trust the author identity block — never whole-article text (quoted/mentions pollute).
+            const userNameEl = scope.querySelector?.('[data-testid="User-Name"]') ||
+                scope.querySelector?.('[data-testid="UserName"]');
+            if (userNameEl) {
+                const m = (userNameEl.textContent || '').match(/@([A-Za-z0-9_]{1,15})/);
+                if (m) return '@' + m[1];
+                const href = userNameEl.querySelector?.('a[href^="/"]')?.getAttribute('href') || '';
+                const hm = href.match(/^\/([A-Za-z0-9_]{1,15})(?:\/|$)/);
+                if (hm && !/^(home|explore|search|i|settings|messages|notifications)$/i.test(hm[1])) {
+                    return '@' + hm[1];
+                }
+            }
+            const statusLink = scope.querySelector?.('a[href*="/status/"]');
+            if (statusLink) {
+                const hm = (statusLink.getAttribute('href') || '').match(/^\/([A-Za-z0-9_]{1,15})\/status\//);
+                if (hm) return '@' + hm[1];
+            }
+            return '';
+        },
+        getFollowCache: function () {
+            window.__mix01State = window.__mix01State || {};
+            window.__mix01State.followAuthorCache = window.__mix01State.followAuthorCache || {};
+            window.__mix01FollowCache = window.__mix01State.followAuthorCache;
+            return window.__mix01State.followAuthorCache;
+        },
+        writeFollowCache: function (author, state, meta = null) {
+            if (!author || state === undefined || state === null) return;
+            const cache = tools.getFollowCache();
+            const relation = (state === true) ? 'following'
+                : (state === false) ? 'follow'
+                : state;
+            // meta.confidence: confirmed (menu/button label) | inferred (timeline Following only)
+            const confidence = (meta && meta.confidence) ||
+                ((relation === 'subscribed' || relation === 'subscribe') ? 'confirmed' : 'inferred');
+            const source = (meta && meta.source) || 'unknown';
+            cache[author] = {
+                relation,
+                confidence,
+                source,
+                ts: Date.now()
+            };
+            // Keep legacy mirror for any old readers
+            window.__mix01FollowCache = cache;
+            const keys = Object.keys(cache);
+            if (keys.length > 120) {
+                for (let i = 0; i < keys.length - 120; i++) delete cache[keys[i]];
+            }
+        },
+        readFollowCacheEntry: function (author) {
+            if (!author) return null;
+            const cache = tools.getFollowCache();
+            const raw = cache[author];
+            if (raw == null) return null;
+            if (typeof raw === 'string' || typeof raw === 'boolean') {
+                const relation = raw === true ? 'following' : raw === false ? 'follow' : raw;
+                return {
+                    relation,
+                    confidence: relation === 'subscribed' ? 'confirmed' : 'inferred',
+                    source: 'legacy',
+                    ts: 0
+                };
+            }
+            if (typeof raw === 'object') {
+                const relation = raw.relation || null;
+                if (!relation) return null;
+                return {
+                    relation,
+                    confidence: raw.confidence || (relation === 'subscribed' ? 'confirmed' : 'inferred'),
+                    source: raw.source || 'unknown',
+                    ts: raw.ts || 0
+                };
+            }
+            return null;
+        },
+        // following | follow | subscribed | subscribe | null
+        classifyRelationControl: function (el) {
+            if (!el || el.disabled) return null;
+            const testId = (el.getAttribute('data-testid') || '').toLowerCase();
+            const aria = (el.getAttribute('aria-label') || '').trim();
+            const text = ((el.textContent || '') + ' ' + aria).replace(/\s+/g, ' ').trim();
+            const low = text.toLowerCase();
+
+            // Subscription signals first (X often coexists with Following wording)
+            if (testId.includes('unsubscribe') || testId.includes('subscribed') || testId.includes('superfollow')) {
+                if (testId.includes('unsubscribe') || testId.includes('subscribed') || /ing$/.test(testId)) return 'subscribed';
+                return 'subscribe';
+            }
+            if (/\u5df2\u8ba2\u9605|\u53d6\u6d88\u8ba2\u9605|unsubscribe|subscribed|super\s*subscribed|super.?follow.?ing/i.test(text)) return 'subscribed';
+            if ((/\u8ba2\u9605(?!\u4e86)|\bsubscribe\b|super\s*subscribe|super.?follow(?!ing)/i.test(text)) &&
+                !/unsubscribe|\u53d6\u6d88\u8ba2\u9605|subscribed/i.test(low)) {
+                return 'subscribe';
+            }
+
+            // Plain follow / following
+            if (testId.endsWith('-unfollow') || testId === 'unfollow') return 'following';
+            if (testId.endsWith('-follow') || testId === 'follow') return 'follow';
+            if (/\u6b63\u5728\u5173\u6ce8|\u5df2\u5173\u6ce8|\u53d6\u6d88\u5173\u6ce8|\bfollowing\b|unfollow|\u30d5\u30a9\u30ed\u30fc\u4e2d|\u30d5\u30a9\u30ed\u30fc\u89e3\u9664/i.test(text)) return 'following';
+            if (/^(\u5173\u6ce8|\u95dc\u8a3b|\u30d5\u30a9\u30ed\u30fc|follow)$/i.test(text) ||
+                /\u5173\u6ce8@|\u95dc\u8a3b@|follow @|\u30d5\u30a9\u30ed\u30fc @/i.test(text) ||
+                (/\bfollow\b/i.test(low) && !/following|followers|unfollow/i.test(low))) {
+                return 'follow';
+            }
+            return null;
+        },
+        // Live DOM on timelines often only shows Following even for Super Follow / Subscriptions.
+        // Only promote Following -> Subscribed when cache was menu/button confirmed.
+        mergeRelation: function (live, cached, cacheMeta = null) {
+            const norm = (v) => {
+                if (v === true) return 'following';
+                if (v === false) return 'follow';
+                if (v === 'subscribed' || v === 'following' || v === 'subscribe' || v === 'follow') return v;
+                return null;
+            };
+            live = norm(live);
+            cached = norm(cached);
+            const confirmed = !!(cacheMeta && cacheMeta.confidence === 'confirmed');
+
+            if (live === 'subscribed') return 'subscribed';
+            if (live === 'subscribe') return 'subscribe';
+            if (live === 'following') {
+                // Timeline rarely exposes Super Follow; sticky only if previously confirmed.
+                if (cached === 'subscribed' && confirmed) return 'subscribed';
+                return 'following';
+            }
+            if (live === 'follow') {
+                // Explicit Follow CTA clears any prior relation.
+                return 'follow';
+            }
+            // No live control: trust cache only
+            return cached || null;
+        },
+        collectRelationControls: function (scope) {
+            if (!scope || !scope.querySelectorAll) return [];
+            // Prefer explicit follow/subscribe controls. Avoid scanning every button (false positives).
+            const preferred = Array.from(scope.querySelectorAll(
+                'button[data-testid$="-follow"], button[data-testid$="-unfollow"], button[data-testid="follow"], button[data-testid="unfollow"], [role="button"][data-testid$="-follow"], [role="button"][data-testid$="-unfollow"], button[data-testid*="subscribe"], button[data-testid*="Subscribe"], button[data-testid*="superFollow"], button[data-testid*="SuperFollow"], [role="button"][data-testid*="subscribe"], [role="button"][data-testid*="SuperFollow"]'
+            ));
+            let nodes = preferred;
+            if (!nodes.length) {
+                // Fallback: only short labeled buttons in the author cell / header, not whole tweet body.
+                const tightScope = scope.querySelector?.('[data-testid="User-Name"]')?.closest('div') ||
+                    scope.querySelector?.('[data-testid="UserCell"]') ||
+                    scope;
+                nodes = Array.from((tightScope || scope).querySelectorAll('button, [role="button"]'))
+                    .filter(el => {
+                        if (!el) return false;
+                        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                        if (!t || t.length > 28) return false;
+                        return /follow|following|unfollow|subscribe|subscribed|unsubscribe|\u5173\u6ce8|\u8ba2\u9605|\u53d6\u6d88/i.test(t + ' ' + (el.getAttribute('aria-label') || ''));
+                    });
+            }
+            const out = [];
+            const seen = new Set();
+            for (const el of nodes) {
+                if (!el || seen.has(el)) continue;
+                const kind = tools.classifyRelationControl(el);
+                if (!kind) continue;
+                seen.add(el);
+                out.push({ el, kind });
+            }
+            return out;
+        },
+        resolveAuthorRelation: function (container, media) {
+            const article = (media && media.closest && media.closest('article')) ||
+                (container && container.closest && container.closest('article')) ||
+                container || null;
+            const author = tools.extractAuthorHandle(article) || tools.extractAuthorHandle(container);
+            const scopes = [];
+            // Prefer author identity cell first — avoids misreading controls from quoted tweets.
+            const userCell = article && (
+                article.querySelector('[data-testid="User-Name"]')?.closest('[data-testid="User-Names"], div') ||
+                article.querySelector('[data-testid="UserCell"]')
+            );
+            if (userCell) scopes.push(userCell);
+            if (article) scopes.push(article);
+            if (container && container !== article) scopes.push(container);
+
+            let live = null;
+            let source = null;
+            const order = { subscribed: 4, following: 3, subscribe: 2, follow: 1 };
+            for (const scope of scopes) {
+                const controls = tools.collectRelationControls(scope);
+                if (!controls.length) continue;
+                controls.sort((a, b) => (order[b.kind] || 0) - (order[a.kind] || 0));
+                live = controls[0].kind;
+                source = 'tweet';
+                break;
+            }
+            if (!live && author) {
+                const pathName = (location.pathname || '').replace(/\/+$/, '');
+                const handle = author.slice(1).toLowerCase();
+                const onAuthorProfile = new RegExp('^/' + handle + '(?:/|$)', 'i').test(pathName);
+                if (onAuthorProfile) {
+                    const header = document.querySelector('[data-testid="UserName"]')?.closest('div') ||
+                        document.querySelector('[data-testid="primaryColumn"]');
+                    if (header) {
+                        const controls = tools.collectRelationControls(header);
+                        if (controls.length) {
+                            controls.sort((a, b) => (order[b.kind] || 0) - (order[a.kind] || 0));
+                            live = controls[0].kind;
+                            source = 'profile';
+                        }
+                    }
+                }
+            }
+
+            const cacheEntry = tools.readFollowCacheEntry(author);
+            const cached = cacheEntry ? cacheEntry.relation : null;
+            const relation = tools.mergeRelation(live, cached, cacheEntry);
+            let isFollowed = null;
+            if (relation === 'following' || relation === 'subscribed') isFollowed = true;
+            else if (relation === 'follow' || relation === 'subscribe') isFollowed = false;
+
+            // Confidence for HUD: live subscribed/subscribe is confirmed; sticky subscribed needs confirmed cache.
+            let confidence = 'unknown';
+            if (live === 'subscribed' || live === 'subscribe') confidence = 'confirmed';
+            else if (relation === 'subscribed' && cacheEntry && cacheEntry.confidence === 'confirmed') confidence = 'confirmed';
+            else if (live === 'following' || live === 'follow') confidence = 'live';
+            else if (cached) confidence = cacheEntry.confidence || 'inferred';
+
+            return {
+                authorName: author || null,
+                relation,
+                isFollowed,
+                confidence,
+                source: live ? source : (cached ? 'cache' : null),
+                fromCache: !live && !!cached,
+                liveRelation: live || null,
+                cachedRelation: cached || null,
+                cacheConfidence: cacheEntry ? cacheEntry.confidence : null
+            };
+        },
+        findTweetCaret: function (article) {
+            if (!article) return null;
+            let caret = article.querySelector('[data-testid="caret"]') ||
+                article.querySelector('[aria-label*="\u66f4\u591a"]') ||
+                article.querySelector('[aria-label*="More"]');
+            if (caret) return caret;
+            const potentialCarets = article.querySelectorAll('button, [role="button"]');
+            for (const btn of potentialCarets) {
+                const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+                if (aria.includes('more') || aria.includes('\u66f4\u591a')) return btn;
+                const svg = btn.querySelector('svg');
+                if (svg && (svg.innerHTML.includes('M3.593 12') || svg.innerHTML.includes('M12 14c') || svg.innerHTML.includes('M12 8c1.1'))) {
+                    return btn;
+                }
+            }
+            return null;
+        },
+        // Open the tweet caret once to read Follow/Subscribe truth, then close. Session-cached per author.
+        probeAuthorRelationViaMenu: async function (container, media, force = false) {
+            const article = (media && media.closest && media.closest('article')) ||
+                (container && container.closest && container.closest('article')) ||
+                container || null;
+            const author = tools.extractAuthorHandle(article) || tools.extractAuthorHandle(container);
+            if (!author || !article) return null;
+
+            window.__mix01State = window.__mix01State || {};
+            window.__mix01State.relationProbeAt = window.__mix01State.relationProbeAt || {};
+            const last = window.__mix01State.relationProbeAt[author] || 0;
+            if (!force && Date.now() - last < 45_000) {
+                return tools.resolveAuthorRelation(container, media);
+            }
+            if (window.__mix01State.relationProbeInFlight === author) {
+                return tools.resolveAuthorRelation(container, media);
+            }
+            window.__mix01State.relationProbeInFlight = author;
+
+            try {
+                const caret = tools.findTweetCaret(article);
+                if (!caret) return tools.resolveAuthorRelation(container, media);
+
+                tools.forceClick(caret);
+                const menu = await tools.waitForMenu(700);
+                if (!menu) {
+                    tools.dismissMenus();
+                    window.__mix01State.relationProbeAt[author] = Date.now();
+                    return tools.resolveAuthorRelation(container, media);
+                }
+
+                const items = Array.from(menu.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"], [role="button"], button, div[tabindex]'));
+                let found = null; // subscribed | following | subscribe | follow
+                for (const item of items) {
+                    const tx = (item.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (!tx || tx.length > 60) continue;
+                    if (/Unsubscribe|\u53d6\u6d88\u8ba2\u9605|\u9000\u8ba2/i.test(tx)) { found = 'subscribed'; break; }
+                    if (/Unfollow|\u53d6\u6d88\u5173\u6ce8|\u30d5\u30a9\u30ed\u30fc\u89e3\u9664/i.test(tx)) { found = 'following'; break; }
+                    if (/Subscribe|\u8ba2\u9605/i.test(tx) && !/Unsubscribe|\u53d6\u6d88\u8ba2\u9605/i.test(tx)) {
+                        // Prefer keep scanning for stronger unfollow/unsubscribe first, but remember.
+                        if (!found) found = 'subscribe';
+                    }
+                    if (/^(Follow|\u5173\u6ce8|\u95dc\u8a3b|\u30d5\u30a9\u30ed\u30fc)\b|Follow @|\u5173\u6ce8 @/i.test(tx) &&
+                        !/Unfollow|Following|\u53d6\u6d88/i.test(tx)) {
+                        if (!found) found = 'follow';
+                    }
+                }
+                tools.dismissMenus();
+                window.__mix01State.relationProbeAt[author] = Date.now();
+
+                if (found) {
+                    tools.writeFollowCache(author, found, { confidence: 'confirmed', source: 'menu-probe' });
+                }
+                return tools.resolveAuthorRelation(container, media);
+            } catch (e) {
+                tools.dismissMenus();
+                return tools.resolveAuthorRelation(container, media);
+            } finally {
+                if (window.__mix01State.relationProbeInFlight === author) {
+                    window.__mix01State.relationProbeInFlight = null;
+                }
+            }
+        },
+        waitForMenu: async function (timeoutMs = 700) {
+            const t0 = performance.now();
+            while (performance.now() - t0 < timeoutMs) {
+                const menus = Array.from(document.querySelectorAll('[role="menu"]'));
+                if (menus.length) {
+                    const menu = menus[menus.length - 1];
+                    if (menu.querySelector('[role="menuitem"]')) return menu;
+                }
+                await new Promise(r => setTimeout(r, 40));
+            }
+            return null;
+        },
+        dismissMenus: function () {
+            // Escape-only: never click body/viewer (immersive overlay would exit on background click).
+            try {
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+            } catch (e) {}
+            try {
+                document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+            } catch (e) {}
+            // Soft-close any open menus by re-clicking their caret if still open after a beat.
+            // Avoid synthetic body clicks under immersive full-screen viewer.
+        },
+
     };
 
     const Mix01ImmersiveRules = {
@@ -197,17 +535,25 @@
 
                 return tools.sortByDocumentOrder(validMedia);
             },
-            getStates: (container) => {
-                const likeBtn = container.querySelector('[data-testid="unlike"]') || container.querySelector('[aria-label*="已喜欢"]') || container.querySelector('[aria-label*="Unlike"]');
-                let author = "", userNameEl = container.querySelector('[data-testid="User-Name"]');
-                if (userNameEl) { const match = userNameEl.textContent.match(/@[\w_]+/); if (match) author = match[0]; }
-                let isFollowed = null, profileScope = document.querySelector('[data-testid="primaryColumn"]');
-                if (profileScope) {
-                    if (profileScope.querySelector('[data-testid$="-unfollow"]')) isFollowed = true;
-                    else if (profileScope.querySelector('[data-testid$="-follow"]')) isFollowed = false;
-                }
-                if (isFollowed === null && author && window.__mix01FollowCache && window.__mix01FollowCache[author] !== undefined) isFollowed = window.__mix01FollowCache[author];
-                return { isLiked: !!likeBtn, isFollowed: isFollowed, authorName: author };
+            getStates: (container, media) => {
+                const likeBtn = container.querySelector('[data-testid="unlike"]') ||
+                    container.querySelector('[aria-label*="\u5df2\u559c\u6b22"]') ||
+                    container.querySelector('[aria-label*="Unlike"]');
+                const relation = tools.resolveAuthorRelation(container, media);
+                return {
+                    isLiked: !!likeBtn,
+                    isFollowed: relation.isFollowed,
+                    relation: relation.relation,
+                    authorName: relation.authorName,
+                    relationSource: relation.source,
+                    relationFromCache: relation.fromCache,
+                    confidence: relation.confidence,
+                    liveRelation: relation.liveRelation,
+                    cacheConfidence: relation.cacheConfidence
+                };
+            },
+            probeRelation: async (container, media, force = false) => {
+                return tools.probeAuthorRelationViaMenu(container, media, force);
             },
             like: async (container) => {
                 const btnLike = container.querySelector('[data-testid="like"]') || container.querySelector('[aria-label*="喜欢"]') || container.querySelector('[aria-label*="Like"]');
@@ -217,114 +563,121 @@
                 return null;
             },
             follow: async (container, media) => {
-                let author = "";
-                const userNameEl = container.querySelector('[data-testid="User-Name"]');
-                if (userNameEl) {
-                    const match = userNameEl.textContent.match(/@[\w_]+/);
-                    if (match) author = match[0];
-                }
+                const article = (media && media.closest && media.closest('article')) || container;
+                const relationInfo = tools.resolveAuthorRelation(container, media);
+                const author = relationInfo.authorName || tools.extractAuthorHandle(article) || '';
+                const currentlyIn = relationInfo.isFollowed === true;
 
-                // 1. 个人主页场景
-                const profileScope = document.querySelector('[data-testid="primaryColumn"]');
-                if (profileScope) {
-                    const btnUnfollow = profileScope.querySelector('[data-testid$="-unfollow"]') || profileScope.querySelector('[aria-label*="正在关注"]');
-                    const btnFollow = profileScope.querySelector('[data-testid$="-follow"]') || profileScope.querySelector('[aria-label*="关注"]');
-                    if (btnUnfollow) {
-                        tools.forceClick(btnUnfollow);
-                        await new Promise(r => setTimeout(r, 150));
-                        const confirm = document.querySelector('[data-testid="confirmationSheetConfirm"]') || document.querySelector('[role="dialog"] button');
-                        if (confirm) tools.forceClick(confirm);
-                        if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = false;
-                        return false;
-                    } else if (btnFollow) {
-                        tools.forceClick(btnFollow);
-                        if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = true;
-                        return true;
+                const remember = (stateBool, relationHint) => {
+                    const rel = stateBool ? (relationHint || 'following') : 'follow';
+                    tools.writeFollowCache(author, rel, { confidence: 'confirmed', source: 'action' });
+                    window.__mix01State = window.__mix01State || {};
+                    window.__mix01State.followRelationCache = window.__mix01State.followRelationCache || {};
+                    if (author) window.__mix01State.followRelationCache[author] = rel;
+                };
+
+                const clickConfirmIfAny = async () => {
+                    await new Promise(r => setTimeout(r, 120));
+                    const confirm = document.querySelector('[data-testid="confirmationSheetConfirm"]');
+                    if (confirm) { tools.forceClick(confirm); return true; }
+                    const dialog = document.querySelector('[role="dialog"]');
+                    if (dialog) {
+                        const btns = Array.from(dialog.querySelectorAll('[role="button"], button'));
+                        const target = btns.find(b => /Unfollow|\u53d6\u6d88\u5173\u6ce8|\u53d6\u6d88\u8ba2\u9605|Unsubscribe|\u786e\u8ba4|Confirm|\u30d5\u30a9\u30ed\u30fc\u89e3\u9664/i.test(b.textContent || ''));
+                        if (target) { tools.forceClick(target); return true; }
                     }
-                }
+                    return false;
+                };
 
-                // 2. 信息流场景：优先寻找推文上直接暴露的“关注”按钮
-                const directFollowBtn = container.querySelector('button[data-testid$="-follow"]') || container.querySelector('button[aria-label*="关注"]');
-                if (directFollowBtn) {
-                    tools.forceClick(directFollowBtn);
-                    if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = true;
-                    return true;
-                }
-
-                // 3. 🚀 容错抗老化改进：寻找右上角“三个点”下拉按钮。
-                // 引入 SVG 矢量特征兜底定位（X/Twitter 箭头常含有 M3.593 或 M12 14c 特征），抵抗官方 Class 名和 testid 的混淆变动 [1]
-                let caret = container.querySelector('[data-testid="caret"]') || container.querySelector('[aria-label*="更多"]');
-                if (!caret) {
-                    const potentialCarets = container.querySelectorAll('button, [role="button"]');
-                    for (const btn of potentialCarets) {
-                        const svg = btn.querySelector('svg');
-                        if (svg && (svg.innerHTML.includes('M3.593 12') || svg.innerHTML.includes('M12 14c') || svg.innerHTML.includes('M12 8c1.1'))) {
-                            caret = btn;
-                            break;
+                const toggleViaDirectButton = async () => {
+                    const scopes = [article, container].filter(Boolean);
+                    if (author) {
+                        const pathName = (location.pathname || '').replace(/\/+$/, '');
+                        const handle = author.slice(1).toLowerCase();
+                        if (new RegExp('^/' + handle + '(?:/|$)', 'i').test(pathName)) {
+                            const header = document.querySelector('[data-testid="UserName"]')?.closest('div');
+                            if (header) scopes.push(header);
                         }
                     }
-                }
-                if (!caret) return null;
-
-                tools.forceClick(caret);
-
-                // 动态轮询等待下拉菜单渲染完成（最多等待 600ms）
-                let menu = null;
-                for (let i = 0; i < 12; i++) {
-                    await new Promise(r => setTimeout(r, 50));
-                    const menus = Array.from(document.querySelectorAll('[role="menu"]'));
-                    if (menus.length > 0) {
-                        menu = menus[menus.length - 1];
-                        if (menu.querySelector('[role="menuitem"]')) break;
+                    for (const scope of scopes) {
+                        const controls = tools.collectRelationControls(scope);
+                        if (!controls.length) continue;
+                        let pick = null;
+                        if (currentlyIn) {
+                            pick = controls.find(c => c.kind === 'following' || c.kind === 'subscribed');
+                        } else {
+                            pick = controls.find(c => c.kind === 'follow') || controls.find(c => c.kind === 'subscribe');
+                        }
+                        if (!pick) continue;
+                        tools.forceClick(pick.el);
+                        if (currentlyIn) await clickConfirmIfAny();
+                        // Give X a beat to flip the button label before we re-read.
+                        await new Promise(r => setTimeout(r, 180));
+                        const after = tools.resolveAuthorRelation(container, media);
+                        if (after && after.relation) {
+                            const inNow = after.isFollowed === true;
+                            remember(inNow, after.relation);
+                            return inNow;
+                        }
+                        const nextIn = !currentlyIn;
+                        const hint = currentlyIn
+                            ? 'follow'
+                            : (pick.kind === 'subscribe' || pick.kind === 'subscribed' ? 'subscribed' : 'following');
+                        remember(nextIn, nextIn ? hint : 'follow');
+                        return nextIn;
                     }
-                }
-
-                if (!menu) {
-                    tools.forceClick(document.body); 
                     return null;
-                }
+                };
 
-                // 多国语言弹性匹配
-                const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
-                let targetBtn = null, willFollow = true;
-                for (let item of items) {
-                    const text = item.textContent || '';
-                    if (/Unfollow|取消关注|フォロー解除/i.test(text)) { 
-                        targetBtn = item; 
-                        willFollow = false; 
-                        break; 
-                    } else if (/Follow|关注|フォロー/i.test(text)) { 
-                        targetBtn = item; 
-                        willFollow = true; 
-                        break; 
-                    }
-                }
+                const toggleViaCaretMenu = async () => {
+                    const caret = tools.findTweetCaret(article);
+                    if (!caret) return null;
+                    tools.forceClick(caret);
+                    const menu = await tools.waitForMenu(750);
+                    if (!menu) { tools.dismissMenus(); return null; }
 
-                if (!targetBtn) {
-                    tools.forceClick(document.body); 
-                    return null;
-                }
-
-                tools.forceClick(targetBtn);
-
-                // 二次确认弹窗处理
-                if (!willFollow) {
-                    await new Promise(r => setTimeout(r, 200));
-                    const confirmBtn = document.querySelector('[data-testid="confirmationSheetConfirm"]');
-                    if (confirmBtn) {
-                        tools.forceClick(confirmBtn);
-                    } else {
-                        const dialog = document.querySelector('[role="dialog"], [data-testid="mask"]');
-                        if (dialog) {
-                            const btns = Array.from(dialog.querySelectorAll('[role="button"]'));
-                            const confirmTarget = btns.find(b => /Unfollow|取消关注|确认|フォロ/i.test(b.textContent));
-                            if (confirmTarget) tools.forceClick(confirmTarget);
+                    const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+                    let targetBtn = null;
+                    let willBeIn = true;
+                    let relationHint = 'following';
+                    for (const item of items) {
+                        const tx = item.textContent || '';
+                        if (/Unfollow|\u53d6\u6d88\u5173\u6ce8|\u30d5\u30a9\u30ed\u30fc\u89e3\u9664/i.test(tx)) {
+                            targetBtn = item; willBeIn = false; relationHint = 'follow'; break;
+                        }
+                        if (/Unsubscribe|\u53d6\u6d88\u8ba2\u9605|\u9000\u8ba2/i.test(tx)) {
+                            targetBtn = item; willBeIn = false; relationHint = 'follow'; break;
+                        }
+                        if (/Subscribe|\u8ba2\u9605/i.test(tx) && !/Unsubscribe|\u53d6\u6d88\u8ba2\u9605/i.test(tx)) {
+                            targetBtn = item; willBeIn = true; relationHint = 'subscribed';
+                        }
+                        if (/^(Follow|\u5173\u6ce8|\u95dc\u8a3b|\u30d5\u30a9\u30ed\u30fc)\b|Follow @|\u5173\u6ce8 @|\u95dc\u8a3b @/i.test(tx) && !/Unfollow|Following|\u53d6\u6d88/i.test(tx)) {
+                            targetBtn = item; willBeIn = true; relationHint = 'following'; break;
                         }
                     }
-                }
+                    if (!targetBtn) { tools.dismissMenus(); return null; }
+                    tools.forceClick(targetBtn);
+                    if (!willBeIn) await clickConfirmIfAny();
+                    else tools.dismissMenus();
+                    await new Promise(r => setTimeout(r, 180));
+                    const after = tools.resolveAuthorRelation(container, media);
+                    if (after && after.relation) {
+                        const inNow = after.isFollowed === true;
+                        // Menu may say Subscribe while live still only exposes Following.
+                        const finalRel = (!inNow) ? 'follow'
+                            : (relationHint === 'subscribed' || after.relation === 'subscribed') ? 'subscribed'
+                            : (after.relation || relationHint || 'following');
+                        remember(inNow, finalRel);
+                        return inNow;
+                    }
+                    remember(willBeIn, relationHint);
+                    return willBeIn;
+                };
 
-                if (author && window.__mix01FollowCache) window.__mix01FollowCache[author] = willFollow;
-                return willFollow;
+                // Prefer in-tweet CTA; never click random primaryColumn buttons from other authors.
+                let result = await toggleViaDirectButton();
+                if (result === null) result = await toggleViaCaretMenu();
+                return result;
             },
             downloadVideo: async (container, media) => {
                 const customSvgBtn = container.querySelector('svg g.download');

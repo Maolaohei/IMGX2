@@ -434,14 +434,15 @@ window.Mix01MediaRenderer = class MediaRenderer {
             if (singleToast._mix01Token === token) singleToast.classList.add('show');
         });
 
+        // Keep toasts brief so immersive browsing stays unobstructed.
         singleToast._mix01HideTimer = setTimeout(() => {
             if (singleToast._mix01Token !== token) return;
             singleToast.classList.remove('show');
             singleToast._mix01RemoveTimer = setTimeout(() => {
                 if (singleToast._mix01Token !== token) return;
                 this._retireToast(singleToast, false);
-            }, 350);
-        }, 2200);
+            }, 180);
+        }, 280);
     }
 
     _retireToast(toast, immediate) {
@@ -1122,8 +1123,8 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this._pendingHudSrc = currentSrc;
 
         const adapter = window.Mix01Utils.getImmersiveAdapter();
-        let likeText = '喜欢', likeIcon = '🤍', likeColor = '#dddddd';
-        let followText = '关注', followIcon = '👤', followColor = '#dddddd';
+                let likeText = '\u559c\u6b22', likeIcon = '\ud83d\udc94', likeColor = '#dddddd';
+        let followText = '\u5173\u6ce8', followIcon = '\ud83d\udc64', followColor = '#dddddd';
         let authorDisplay = '';
         let isFallback = false;
 
@@ -1137,16 +1138,113 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 if (this._pendingHudSrc !== currentSrc) return;
 
                 if (states) {
+                    // Like: cache is an optimistic layer, but only when present
                     if (window.__mix01State && window.__mix01State.likeMediaCache && window.__mix01State.likeMediaCache[currentSrc] !== undefined) {
                         states.isLiked = window.__mix01State.likeMediaCache[currentSrc];
                     }
-                    if (states.authorName && window.__mix01State && window.__mix01State.followAuthorCache && window.__mix01State.followAuthorCache[states.authorName] !== undefined) {
-                        states.isFollowed = window.__mix01State.followAuthorCache[states.authorName];
+
+                    // Follow/Subscribe:
+                    // 1) Live CTA wins for follow/unfollow.
+                    // 2) "subscribed" is only shown when confirmed (live label or menu-confirmed cache).
+                    // 3) Ambiguous "Following" may probe the caret menu once/session to distinguish Super Follow.
+                    const readCacheEntry = (author) => {
+                        if (!author || !window.__mix01State?.followAuthorCache) return null;
+                        const raw = window.__mix01State.followAuthorCache[author];
+                        if (raw == null) return null;
+                        if (typeof raw === 'string' || typeof raw === 'boolean') {
+                            const relation = raw === true ? 'following' : raw === false ? 'follow' : raw;
+                            return {
+                                relation,
+                                confidence: relation === 'subscribed' ? 'confirmed' : 'inferred'
+                            };
+                        }
+                        return {
+                            relation: raw.relation || null,
+                            confidence: raw.confidence || 'inferred'
+                        };
+                    };
+
+                    let relation = states.relation || null;
+                    let confidence = states.confidence || 'unknown';
+                    const cacheEntry = readCacheEntry(states.authorName);
+
+                    if ((states.isFollowed === null || states.isFollowed === undefined) && cacheEntry) {
+                        // Fill only when live is unknown.
+                        if (cacheEntry.relation === 'following' || cacheEntry.relation === 'subscribed') states.isFollowed = true;
+                        else if (cacheEntry.relation === 'follow' || cacheEntry.relation === 'subscribe') states.isFollowed = false;
+                        if (!relation) relation = cacheEntry.relation;
+                        if (confidence === 'unknown') confidence = cacheEntry.confidence || 'inferred';
+                    } else if (states.isFollowed != null && states.authorName) {
+                        // Align cache with live. Sticky subscribed only if previously confirmed.
+                        window.__mix01State = window.__mix01State || {};
+                        window.__mix01State.followAuthorCache = window.__mix01State.followAuthorCache || {};
+                        let next = relation || (states.isFollowed ? 'following' : 'follow');
+                        if (next === 'following' && cacheEntry?.relation === 'subscribed' && cacheEntry.confidence === 'confirmed') {
+                            next = 'subscribed';
+                            confidence = 'confirmed';
+                        }
+                        const conf = (next === 'subscribed' && confidence === 'confirmed') ? 'confirmed'
+                            : (states.liveRelation ? 'live' : 'inferred');
+                        window.__mix01State.followAuthorCache[states.authorName] = {
+                            relation: next,
+                            confidence: conf,
+                            source: states.relationSource || 'hud',
+                            ts: Date.now()
+                        };
+                        window.__mix01FollowCache = window.__mix01State.followAuthorCache;
+                        relation = next;
                     }
 
-                    if (states.isLiked)    { likeText = '已喜欢'; likeIcon = '❤️'; likeColor = '#FF4060'; }
-                    if (states.isFollowed) { followText = '已关注'; followIcon = '✓'; followColor = '#1da1f2'; }
-                    if (states.authorName) { authorDisplay = `<span class="author-tag">${states.authorName}</span> 的作品`; }
+                    // Ambiguous: live only says Following, cache has no confirmed subscription.
+                    // Probe caret menu once to recover true Super Follow / Subscribe state.
+                    const needsProbe = adapter.probeRelation && states.authorName &&
+                        (relation === 'following' || relation === 'follow' || !relation) &&
+                        !(cacheEntry && cacheEntry.confidence === 'confirmed' && cacheEntry.relation === 'subscribed') &&
+                        states.liveRelation !== 'subscribed' && states.liveRelation !== 'subscribe';
+
+                    if (needsProbe) {
+                        window.__mix01State = window.__mix01State || {};
+                        window.__mix01State.relationHudProbed = window.__mix01State.relationHudProbed || {};
+                        const probedAt = window.__mix01State.relationHudProbed[states.authorName] || 0;
+                        if (Date.now() - probedAt > 60_000) {
+                            window.__mix01State.relationHudProbed[states.authorName] = Date.now();
+                            try {
+                                const probed = await adapter.probeRelation(container, currentMedia, false);
+                                if (this._pendingHudSrc !== currentSrc) return;
+                                if (probed) {
+                                    states.isFollowed = probed.isFollowed;
+                                    relation = probed.relation || relation;
+                                    confidence = probed.confidence || confidence;
+                                    if (probed.authorName) states.authorName = probed.authorName;
+                                }
+                            } catch (e) { /* non-fatal */ }
+                        }
+                    }
+
+                    if (states.isLiked) { likeText = '\u5df2\u559c\u6b22'; likeIcon = '\u2764\ufe0f'; likeColor = '#FF4060'; }
+
+                    relation = relation ||
+                        (states.isFollowed === true ? 'following' : (states.isFollowed === false ? 'follow' : null));
+
+                    // Only paint "\u5df2\u8ba2\u9605" when confirmed. Otherwise show live Following/Follow truth.
+                    if (relation === 'subscribed' && (confidence === 'confirmed' || states.liveRelation === 'subscribed')) {
+                        followText = '\u5df2\u8ba2\u9605'; followIcon = '\u2b50'; followColor = '#f4c430';
+                    } else if (relation === 'following' || (relation === 'subscribed' && confidence !== 'confirmed')) {
+                        // Unconfirmed sticky sub -> show as Following rather than fake Subscribed.
+                        followText = '\u5df2\u5173\u6ce8'; followIcon = '\u2713'; followColor = '#1da1f2';
+                    } else if (relation === 'subscribe') {
+                        followText = '\u8ba2\u9605'; followIcon = '\ud83d\udc64'; followColor = '#dddddd';
+                    } else if (relation === 'follow' || states.isFollowed === false) {
+                        followText = '\u5173\u6ce8'; followIcon = '\ud83d\udc64'; followColor = '#dddddd';
+                    } else if (states.isFollowed === true) {
+                        followText = '\u5df2\u5173\u6ce8'; followIcon = '\u2713'; followColor = '#1da1f2';
+                    } else {
+                        followText = '\u672a\u786e\u8ba4'; followIcon = '\u2753'; followColor = '#aaaaaa';
+                    }
+
+                    if (states.authorName) {
+                        authorDisplay = `<span class="author-tag">${states.authorName}</span> \u7684\u4f5c\u54c1`;
+                    }
                 }
             }
         }
@@ -1196,8 +1294,8 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 if (this.elements.hint.style.opacity === '0') {
                     this.setStyle(this.elements.hint, 'display', 'none');
                 }
-            }, 600);
-        }, 3000);
+            }, 300);
+        }, 750);
     }
 
     setHUDOpacity(opacity) {

@@ -1874,8 +1874,21 @@ window.Mix01InputController = class InputController {
             if (window.__mix01State.likeMediaCache[lockedSrc] !== undefined) {
                 currentState.isLiked = window.__mix01State.likeMediaCache[lockedSrc];
             }
-            if (currentState.authorName && window.__mix01State.followAuthorCache[currentState.authorName] !== undefined) {
-                currentState.isFollowed = window.__mix01State.followAuthorCache[currentState.authorName];
+            // Cache only fills unknown live state; never override a real DOM answer.
+            // Support both legacy string/bool cache and structured {relation,confidence}.
+            if ((currentState.isFollowed === null || currentState.isFollowed === undefined) &&
+                currentState.authorName && window.__mix01State.followAuthorCache[currentState.authorName] !== undefined) {
+                const raw = window.__mix01State.followAuthorCache[currentState.authorName];
+                const cached = (raw && typeof raw === 'object') ? raw.relation : raw;
+                const conf = (raw && typeof raw === 'object') ? (raw.confidence || 'inferred') : 'inferred';
+                if (cached === true || cached === 'following' || cached === 'subscribed') currentState.isFollowed = true;
+                else if (cached === false || cached === 'follow' || cached === 'subscribe') currentState.isFollowed = false;
+                if (!currentState.relation) {
+                    if (typeof cached === 'string') currentState.relation = cached;
+                    else if (cached === true) currentState.relation = 'following';
+                    else if (cached === false) currentState.relation = 'follow';
+                }
+                if (!currentState.confidence) currentState.confidence = conf;
             }
         }
 
@@ -1893,23 +1906,67 @@ window.Mix01InputController = class InputController {
                 }
             }
         }
+
+        let followResult = null;
+        let followRelation = null;
         if (doFollow && adapter.follow) {
             if (!(isCombo && currentState.isFollowed)) {
-                const newState = await adapter.follow(container, lockedMedia);
-                if (newState !== null) {
-                    const tempStates = adapter.getStates ? await adapter.getStates(container, lockedMedia) : null;
-                    if (tempStates && tempStates.authorName) {
+                followResult = await adapter.follow(container, lockedMedia);
+                if (followResult !== null) {
+                    // Prefer post-action live state; fall back to action result + known author
+                    let authorName = currentState.authorName;
+                    // Preserve subscribed if we already knew it or action started from subscribe CTA
+                    let relation = followResult
+                        ? ((currentState.relation === 'subscribed' || currentState.relation === 'subscribe') ? 'subscribed' : 'following')
+                        : 'follow';
+                    if (adapter.getStates) {
+                        const tempStates = await adapter.getStates(container, lockedMedia);
+                        if (tempStates) {
+                            if (tempStates.authorName) authorName = tempStates.authorName;
+                            if (tempStates.relation) relation = tempStates.relation;
+                            else if (tempStates.isFollowed === true) {
+                                // Live may only expose Following for Super Follow users
+                                relation = (relation === 'subscribed') ? 'subscribed' : 'following';
+                            } else if (tempStates.isFollowed === false) {
+                                relation = 'follow';
+                            }
+                            // If live still unknown right after click, trust action result
+                            if (tempStates.isFollowed === null || tempStates.isFollowed === undefined) {
+                                // keep relation chosen above
+                            } else {
+                                followResult = !!tempStates.isFollowed;
+                            }
+                        }
+                    }
+                    followRelation = relation;
+                    if (authorName) {
                         window.__mix01State.followAuthorCache = window.__mix01State.followAuthorCache || {};
-                        rememberBoundedObject(window.__mix01State.followAuthorCache, tempStates.authorName, newState, CACHE_LIMITS.followAuthorCache);
+                        // Structured cache: only action-confirmed states are sticky as subscribed.
+                        rememberBoundedObject(
+                            window.__mix01State.followAuthorCache,
+                            authorName,
+                            { relation, confidence: 'confirmed', source: 'phantom', ts: Date.now() },
+                            CACHE_LIMITS.followAuthorCache
+                        );
+                        window.__mix01FollowCache = window.__mix01State.followAuthorCache;
                     }
                 }
+            } else {
+                followResult = true;
+                followRelation = currentState.relation || 'following';
             }
         }
 
-        if (actionType === 'double') this.render.showToast("💖 一键双连生效！(喜欢+关注)");
-        else if (actionType === 'triple') this.render.showToast("🚀 一键三连生效！(喜欢+关注+提取)");
-        else if (actionType === 'like') this.render.showToast(window.__mix01State.likeMediaCache[lockedSrc] ? "❤️ 已喜欢" : "🤍 已取消喜欢");
-        else if (actionType === 'follow') this.render.showToast("👤 关注状态已更新");
+        if (actionType === 'double') this.render.showToast('\ud83d\udc96 \u4e00\u952e\u53cc\u8fde\u751f\u6548\uff01(\u559c\u6b22+\u5173\u6ce8)');
+        else if (actionType === 'triple') this.render.showToast('\ud83d\ude80 \u4e00\u952e\u4e09\u8fde\u751f\u6548\uff01(\u559c\u6b22+\u5173\u6ce8+\u63d0\u53d6)');
+        else if (actionType === 'like') this.render.showToast(window.__mix01State.likeMediaCache[lockedSrc] ? '\u2764\ufe0f \u5df2\u559c\u6b22' : '\ud83d\udc94 \u5df2\u53d6\u6d88\u559c\u6b22');
+        else if (actionType === 'follow') {
+            if (followResult === null) this.render.showToast('\u26a0\ufe0f \u672a\u80fd\u786e\u8ba4\u5173\u6ce8/\u8ba2\u9605\u72b6\u6001');
+            else if (followResult && followRelation === 'subscribed') this.render.showToast('\u2b50 \u5df2\u8ba2\u9605');
+            else if (followResult) this.render.showToast('\u2713 \u5df2\u5173\u6ce8');
+            else if (followRelation === 'subscribe') this.render.showToast('\ud83d\udc64 \u5df2\u53d6\u6d88\u8ba2\u9605');
+            else this.render.showToast('\ud83d\udc64 \u5df2\u53d6\u6d88\u5173\u6ce8');
+        }
 
         this.render.handleImmersiveActivity(lockedMedia, lockedSrc, this.cfg.keys);
 
