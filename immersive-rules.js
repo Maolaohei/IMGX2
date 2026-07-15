@@ -44,6 +44,33 @@
                 merged.push(el);
             }
             return merged;
+        },
+        isUtilityImage: function (media) {
+            if (!media || media.tagName !== 'IMG') return false;
+            const src = media.currentSrc || media.src || '';
+            if (!src) return true;
+            if (src.includes('profile_images') || src.includes('emoji') || src.includes('hashflag')) return true;
+            if (src.includes('tweet_video_thumb') || src.includes('ext_tw_video_thumb') ||
+                src.includes('amplify_video_thumb') || src.includes('video-thumbnail') ||
+                src.includes('video_poster')) return true;
+            // Tiny chrome icons / reactions
+            if ((media.clientWidth || 0) > 0 && (media.clientWidth || 0) <= 40 &&
+                (media.clientHeight || 0) > 0 && (media.clientHeight || 0) <= 40) return true;
+            return false;
+        },
+        collectArticleMedia: function (article) {
+            if (!article) return [];
+            return Array.from(article.querySelectorAll('img, video')).filter(el => {
+                if (!el || !el.isConnected) return false;
+                if (el.id === 'zoom-img-xyz' || el.id === 'zoom-img-buffer-xyz' || el.id === 'zoom-video-xyz') return false;
+                if (tools.isUtilityImage(el)) return false;
+                if (el.tagName === 'VIDEO') return true;
+                const src = el.currentSrc || el.src || '';
+                // Prefer real media assets; allow large non-twimg fallbacks.
+                if (src.includes('/media/') || src.includes('twimg.com/media') || src.includes('pbs.twimg.com/media')) return true;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 80 && rect.height > 80;
+            });
         }
     };
 
@@ -52,78 +79,122 @@
             getContainer: (media) => media.closest('article') || document.body,
             getGalleryImages: () => {
                 // Merge visible + DOM candidates, then sort by document order.
-                // Pure visible-set order caused mixed up/down déjà-vu on X.
+                // Pure visible-set order caused mixed up/down deja-vu on X.
+                // Multi-image tweets: if any media of an article is near viewport,
+                // pull the whole photo set so immersive can step photo1 -> photoN.
                 const allMedia = tools.collectCandidateMedia();
-                const validMedia = [];
                 const viewportHeight = window.innerHeight;
-                // Wider band while navigating so reverse direction still has neighbors
                 const topBound = -viewportHeight * 2.5;
                 const bottomBound = viewportHeight * 3.5;
 
+                const nearArticles = new Set();
+                const looseMedia = [];
                 const videoRectsByArticle = new WeakMap();
+
+                const markArticle = (article, media, rect) => {
+                    if (!article) {
+                        looseMedia.push(media);
+                        return;
+                    }
+                    if (article.dataset.mixAdStatus === 'ad') return;
+                    if (article.dataset.mixAdStatus !== 'clean') {
+                        const isAd = Array.from(article.querySelectorAll('span')).some(span =>
+                            /^(?:\u5e7f\u544a|\u8d5e\u52a9|Ad|Promoted)$/i.test((span.textContent || '').trim())
+                        );
+                        if (isAd) { article.dataset.mixAdStatus = 'ad'; return; }
+                        article.dataset.mixAdStatus = 'clean';
+                    }
+                    nearArticles.add(article);
+                    if (media.tagName === 'VIDEO') {
+                        if (!videoRectsByArticle.has(article)) videoRectsByArticle.set(article, []);
+                        videoRectsByArticle.get(article).push(rect);
+                    }
+                };
 
                 for (let i = 0; i < allMedia.length; i++) {
                     const media = allMedia[i];
-                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-video-xyz') continue;
+                    if (!media || !media.isConnected) continue;
+                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-img-buffer-xyz' || media.id === 'zoom-video-xyz') continue;
+                    if (tools.isUtilityImage(media)) continue;
 
                     const rect = media.getBoundingClientRect();
+                    // Seed with near-viewport media; multi-image expansion happens below.
                     if (rect.top < topBound || rect.bottom > bottomBound) continue;
                     if (rect.width <= 50 || rect.height <= 50) continue;
 
                     const article = media.closest('article');
-                    if (article) {
-                        if (article.dataset.mixAdStatus === 'ad') continue;
-                        if (article.dataset.mixAdStatus !== 'clean') {
-                            const isAd = Array.from(article.querySelectorAll('span')).some(span =>
-                                /^(广告|赞助|Ad|Promoted)$/i.test(span.textContent.trim())
-                            );
-                            if (isAd) { article.dataset.mixAdStatus = 'ad'; continue; }
-                            article.dataset.mixAdStatus = 'clean';
-                        }
+                    markArticle(article, media, rect);
+                }
+
+                const validMedia = [];
+                const seen = new Set();
+
+                const pushMedia = (media, article) => {
+                    if (!media || seen.has(media)) return;
+                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-img-buffer-xyz' || media.id === 'zoom-video-xyz') return;
+                    if (tools.isUtilityImage(media)) return;
+
+                    const rect = media.getBoundingClientRect();
+                    const src = media.currentSrc || media.src || '';
+                    const isNamedMediaAsset = media.tagName === 'VIDEO' ||
+                        /\/media\//.test(src) || src.includes('twimg.com/media') || src.includes('pbs.twimg.com/media');
+                    // Keep multi-image siblings even if slightly outside band, as long as
+                    // their article was seeded. Still drop far-away recycled clones.
+                    if (!article) {
+                        if (rect.top < topBound || rect.bottom > bottomBound) return;
+                    } else {
+                        if (rect.top < topBound - viewportHeight || rect.bottom > bottomBound + viewportHeight) return;
                     }
+                    // Off-screen multi-photo tiles can report 0x0 before paint; keep named assets.
+                    if (!isNamedMediaAsset && (rect.width <= 40 || rect.height <= 40)) return;
 
-                    if (media.tagName === 'VIDEO') {
-                        if (article && !videoRectsByArticle.has(article)) {
-                            videoRectsByArticle.set(article, []);
-                        }
-                        if (article) videoRectsByArticle.get(article).push(rect);
-                        validMedia.push(media);
-                        continue;
-                    }
-
-                    if (media.tagName === 'IMG') {
-                        const src = media.src || '';
-                        if (src.includes('tweet_video_thumb') || src.includes('ext_tw_video_thumb') ||
-                            src.includes('amplify_video_thumb') || src.includes('video-thumbnail') ||
-                            src.includes('video_poster')) {
-                            continue;
-                        }
-
+                    if (media.tagName === 'IMG' && article) {
                         let isVideoCover = false;
-
-                        if (article) {
-                            const videoEls = article.querySelectorAll('video');
-                            for (const v of videoEls) {
-                                if (v.poster && v.poster === src) { isVideoCover = true; break; }
-                            }
-                            if (!isVideoCover) {
-                                const vRects = videoRectsByArticle.get(article);
-                                if (vRects) {
-                                    for (const vr of vRects) {
-                                        const overlapX = Math.max(0, Math.min(rect.right, vr.right) - Math.max(rect.left, vr.left));
-                                        const overlapY = Math.max(0, Math.min(rect.bottom, vr.bottom) - Math.max(rect.top, vr.top));
-                                        const overlapArea = overlapX * overlapY;
-                                        const imgArea = rect.width * rect.height;
-                                        if (imgArea > 0 && overlapArea / imgArea > 0.5) { isVideoCover = true; break; }
-                                    }
+                        const videoEls = article.querySelectorAll('video');
+                        for (const v of videoEls) {
+                            if (v.poster && src && v.poster === src) { isVideoCover = true; break; }
+                        }
+                        if (!isVideoCover) {
+                            const vRects = videoRectsByArticle.get(article);
+                            if (vRects) {
+                                for (const vr of vRects) {
+                                    const overlapX = Math.max(0, Math.min(rect.right, vr.right) - Math.max(rect.left, vr.left));
+                                    const overlapY = Math.max(0, Math.min(rect.bottom, vr.bottom) - Math.max(rect.top, vr.top));
+                                    const overlapArea = overlapX * overlapY;
+                                    const imgArea = rect.width * rect.height;
+                                    if (imgArea > 0 && overlapArea / imgArea > 0.5) { isVideoCover = true; break; }
                                 }
                             }
                         }
-                        if (isVideoCover) continue;
+                        if (isVideoCover) return;
                     }
 
+                    // Stamp stable slot inside multi-image posts for identity fallbacks.
+                    if (article && (!Number.isInteger(media._mixMediaSlot) || media._mixMediaSlot < 0)) {
+                        const siblings = tools.collectArticleMedia(article);
+                        const slot = siblings.indexOf(media);
+                        if (slot >= 0) media._mixMediaSlot = slot;
+                    }
+
+                    seen.add(media);
                     validMedia.push(media);
+                };
+
+                // Expand each near article to its full media set (2/3/4 photo grids).
+                for (const article of nearArticles) {
+                    const mediaList = tools.collectArticleMedia(article);
+                    // Refresh video rects for cover detection after expansion
+                    for (const m of mediaList) {
+                        if (m.tagName === 'VIDEO') {
+                            if (!videoRectsByArticle.has(article)) videoRectsByArticle.set(article, []);
+                            videoRectsByArticle.get(article).push(m.getBoundingClientRect());
+                        }
+                    }
+                    for (const m of mediaList) pushMedia(m, article);
                 }
+
+                for (const media of looseMedia) pushMedia(media, null);
+
                 return tools.sortByDocumentOrder(validMedia);
             },
             getStates: (container) => {

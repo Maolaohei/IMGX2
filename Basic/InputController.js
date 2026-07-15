@@ -210,6 +210,27 @@ window.Mix01InputController = class InputController {
                         }
                     }
                 }
+                // Stable per-tweet media slot for multi-image posts (photo 1..N)
+                if (!Number.isInteger(el._mixMediaSlot) || el._mixMediaSlot < 0) {
+                    const article = el.closest('article');
+                    if (article) {
+                        const mediaNodes = Array.from(article.querySelectorAll('img, video')).filter(node => {
+                            if (!node || node.id === 'zoom-img-xyz' || node.id === 'zoom-img-buffer-xyz' || node.id === 'zoom-video-xyz') return false;
+                            if (node.tagName === 'IMG') {
+                                const s = node.currentSrc || node.src || '';
+                                if (!s) return false;
+                                if (s.includes('profile_images') || s.includes('emoji') || s.includes('hashflag')) return false;
+                                if (s.includes('tweet_video_thumb') || s.includes('ext_tw_video_thumb') ||
+                                    s.includes('amplify_video_thumb') || s.includes('video_poster') || s.includes('video-thumbnail')) return false;
+                                // Prefer real photo assets; keep large non-twimg fallbacks.
+                                if (!s.includes('/media/') && !s.includes('twimg.com') && (node.clientWidth || 0) < 80) return false;
+                            }
+                            return true;
+                        });
+                        const slot = mediaNodes.indexOf(el);
+                        if (slot >= 0) el._mixMediaSlot = slot;
+                    }
+                }
             });
         };
         scanAndObserve(document);
@@ -1300,10 +1321,7 @@ window.Mix01InputController = class InputController {
             return;
         }
         const gallery = this.getGalleryImages();
-        let idx = gallery.indexOf(this.state.currentMedia);
-        if (idx === -1 && this.state.currentSrc) {
-            idx = gallery.findIndex(m => (m.src||'video') === this.state.currentSrc);
-        }
+        const idx = this._findGalleryIndex(gallery, this.state.currentMedia, this.state.currentSrc);
         this.render.updateCounter(idx >= 0 ? idx : 0, gallery.length);
     }
 
@@ -1315,19 +1333,76 @@ window.Mix01InputController = class InputController {
     // 3) Mixed up/down uses a visit trail so "down after up" restores history
     // 4) Boundary fetch never jumps to window head/tail (that caused déjà-vu)
 
+    _normalizeAssetSrc(src) {
+        if (!src || src === 'video') return '';
+        // Blob/MSE are ephemeral; never use them as durable identity.
+        if (src.startsWith('blob:') || src.startsWith('mediasource:')) return '';
+        try {
+            const u = new URL(src, location.href);
+            // X rotates ?name=small/large; pathname (media id) is stable per asset.
+            return `${u.origin}${u.pathname}`;
+        } catch (e) {
+            return src.split('?')[0].split('#')[0];
+        }
+    }
+
+    _mediaSlotInArticle(media) {
+        if (!media || !media.isConnected) return -1;
+        if (Number.isInteger(media._mixMediaSlot) && media._mixMediaSlot >= 0) {
+            return media._mixMediaSlot;
+        }
+        const article = media.closest?.('article') || media.closest?.('[data-testid="tweet"]');
+        if (!article) return -1;
+        const siblings = Array.from(article.querySelectorAll('img, video')).filter(el => {
+            if (!el || el === media) return true;
+            if (el.id === 'zoom-img-xyz' || el.id === 'zoom-img-buffer-xyz' || el.id === 'zoom-video-xyz') return false;
+            if (el.tagName === 'IMG') {
+                const s = el.currentSrc || el.src || '';
+                if (!s) return false;
+                if (s.includes('profile_images') || s.includes('emoji') || s.includes('hashflag')) return false;
+                if (s.includes('tweet_video_thumb') || s.includes('ext_tw_video_thumb') ||
+                    s.includes('amplify_video_thumb') || s.includes('video_poster') || s.includes('video-thumbnail')) return false;
+            }
+            return (el.clientWidth || 0) > 40 && (el.clientHeight || 0) > 40;
+        });
+        // Keep only real media-ish siblings for slot numbering
+        const mediaLike = siblings.filter(el => {
+            if (el.tagName === 'VIDEO') return true;
+            const s = el.currentSrc || el.src || '';
+            return !!(s && (s.includes('/media/') || s.includes('twimg.com') || el.naturalWidth > 0 || el.clientWidth > 80));
+        });
+        const list = mediaLike.length ? mediaLike : siblings;
+        const idx = list.indexOf(media);
+        if (idx >= 0) media._mixMediaSlot = idx;
+        return idx;
+    }
+
     _mediaKey(media) {
         if (!media) return '';
-        if (media._mixStatusId) return `sid:${media._mixStatusId}`;
-        const src = media.currentSrc || media.src || '';
-        if (src) {
-            // Strip cache-busters / size params that X rotates
-            try {
-                const u = new URL(src, location.href);
-                return `src:${u.origin}${u.pathname}`;
-            } catch (e) {
-                return `src:${src.split('?')[0]}`;
+
+        // 1) Durable asset URL wins (critical for multi-image tweets).
+        //    Never collapse same-status multi photos into one key.
+        const rawSrc = media.currentSrc || media.src || '';
+        const asset = this._normalizeAssetSrc(rawSrc);
+        if (asset) {
+            // Keep status as soft namespace only when present; asset path is the uniqueness.
+            if (media._mixStatusId && /\/media\//.test(asset)) {
+                return `asset:${media._mixStatusId}:${asset}`;
             }
+            return `src:${asset}`;
         }
+
+        // 2) Blob/MSE video (and rare empty-src nodes): status + slot / role.
+        if (media._mixStatusId) {
+            if (media.tagName === 'VIDEO') return `vid:${media._mixStatusId}`;
+            const slot = this._mediaSlotInArticle(media);
+            if (slot >= 0) return `sid:${media._mixStatusId}#${slot}`;
+            return `sid:${media._mixStatusId}#${media.tagName}`;
+        }
+
+        // 3) Last resort geometric fingerprint
+        const slot = this._mediaSlotInArticle(media);
+        if (slot >= 0) return `slot:${slot}:${media.tagName}:${Math.round(media.clientWidth)}x${Math.round(media.clientHeight)}`;
         return `el:${media.tagName}:${Math.round(media.clientWidth)}x${Math.round(media.clientHeight)}`;
     }
 
@@ -1415,6 +1490,11 @@ window.Mix01InputController = class InputController {
             const hit = gallery.find(m => this._mediaKey(m) === entry.key);
             if (hit) return hit;
             if (entry.src) {
+                const asset = this._normalizeAssetSrc(entry.src);
+                if (asset) {
+                    const byAsset = gallery.find(m => this._normalizeAssetSrc(m.currentSrc || m.src || '') === asset);
+                    if (byAsset) return byAsset;
+                }
                 const bySrc = gallery.find(m => (m.currentSrc || m.src || 'video') === entry.src);
                 if (bySrc) return bySrc;
             }
@@ -1428,10 +1508,17 @@ window.Mix01InputController = class InputController {
             let idx = gallery.indexOf(media);
             if (idx !== -1) return idx;
             const key = this._mediaKey(media);
-            idx = gallery.findIndex(m => this._mediaKey(m) === key);
-            if (idx !== -1) return idx;
+            if (key) {
+                idx = gallery.findIndex(m => this._mediaKey(m) === key);
+                if (idx !== -1) return idx;
+            }
         }
         const src = srcHint || this.state.currentSrc;
+        const asset = this._normalizeAssetSrc(src);
+        if (asset) {
+            const idx = gallery.findIndex(m => this._normalizeAssetSrc(m.currentSrc || m.src || '') === asset);
+            if (idx !== -1) return idx;
+        }
         if (src) {
             const idx = gallery.findIndex(m => (m.currentSrc || m.src || 'video') === src);
             if (idx !== -1) return idx;
@@ -1446,19 +1533,27 @@ window.Mix01InputController = class InputController {
         let idx = this._findGalleryIndex(sorted, fromMedia, this.state.currentSrc);
 
         if (idx === -1 && fromMedia) {
-            // Geometric fallback relative to current media rect
-            const base = fromMedia.getBoundingClientRect?.() || { top: window.innerHeight / 2, height: 0 };
+            // Geometric fallback relative to current media rect.
+            // Multi-image grids often share the same row (dx dominant, tiny dy).
+            const base = fromMedia.getBoundingClientRect?.() || { top: window.innerHeight / 2, left: 0, width: 0, height: 0 };
             const baseY = base.top + base.height / 2;
+            const baseX = base.left + base.width / 2;
             let best = null;
             let bestScore = Infinity;
             for (const m of sorted) {
                 if (m === fromMedia) continue;
                 const r = m.getBoundingClientRect();
                 const y = r.top + r.height / 2;
+                const x = r.left + r.width / 2;
                 const dy = y - baseY;
-                if (direction > 0 && dy <= 4) continue;
-                if (direction < 0 && dy >= -4) continue;
-                const score = Math.abs(dy) + Math.abs((r.left + r.width / 2) - (base.left + base.width / 2)) * 0.05;
+                const dx = x - baseX;
+                // Accept same-row neighbors: either clear vertical step, or horizontal step on same row.
+                const sameRow = Math.abs(dy) <= Math.max(24, base.height * 0.35);
+                const verticalOk = direction > 0 ? dy > 4 : dy < -4;
+                const horizontalOk = sameRow && (direction > 0 ? dx > 4 : dx < -4);
+                if (!verticalOk && !horizontalOk) continue;
+                // Prefer reading-order-ish closeness: vertical first, then horizontal.
+                const score = Math.abs(dy) * 1.2 + Math.abs(dx) * 0.35;
                 if (score < bestScore) {
                     bestScore = score;
                     best = m;
@@ -1869,11 +1964,7 @@ window.Mix01InputController = class InputController {
 
         this._preloadTimer = setTimeout(() => {
             const galleryImages = this.getGalleryImages();
-            let currentIndex = galleryImages.indexOf(this.state.currentMedia);
-            
-            if (currentIndex === -1 && this.state.currentSrc) {
-                currentIndex = galleryImages.findIndex(media => (media.src||'video') === this.state.currentSrc);
-            }
+            let currentIndex = this._findGalleryIndex(galleryImages, this.state.currentMedia, this.state.currentSrc);
             if (currentIndex === -1) return;
 
             const N = this.cfg.state.preloadCount;
