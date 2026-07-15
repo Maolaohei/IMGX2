@@ -274,7 +274,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
     markBadHdUrl(hdUrl) {
         if (!hdUrl) return;
-        this.markBadHdUrl(hdUrl);
+        this.hdState.badUrls.add(hdUrl);
         // Bound bad URL set to avoid unbounded growth on long sessions
         if (this.hdState.badUrls.size > 80) {
             const overflow = this.hdState.badUrls.size - 80;
