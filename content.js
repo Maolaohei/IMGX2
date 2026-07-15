@@ -62,22 +62,54 @@
         // 捕获已失效的初始化上下文
     }
 
-    window.addEventListener('beforeunload', () => {
-        window.__mix01State = {
-            userPaused: false,
-            isFetchingMore: false,
-            followCache: {},
-            likeMediaCache: {},
-            followAuthorCache: {},
-            blobToUrlMap: {},
-            hdUrlMap: {}
+    const pruneMix01Caches = (hard = false) => {
+        const state = window.__mix01State || {};
+        // Soft prune: keep small working sets for session continuity
+        const trimObj = (obj, max) => {
+            if (!obj) return {};
+            const keys = Object.keys(obj);
+            if (keys.length <= max) return obj;
+            const keep = keys.slice(-max);
+            const next = {};
+            for (const k of keep) next[k] = obj[k];
+            return next;
         };
-        window.__mix01PixivApiCache = undefined;
-        window.__mix01TwVideoCache = undefined;
-        window.__mix01DetectCache = undefined;
+        if (hard) {
+            window.__mix01State = {
+                userPaused: false,
+                isFetchingMore: false,
+                followCache: {},
+                likeMediaCache: {},
+                followAuthorCache: {},
+                blobToUrlMap: {},
+                hdUrlMap: {},
+                loadedHdUrls: undefined
+            };
+            window.__mix01PixivApiCache = undefined;
+            window.__mix01TwVideoCache = undefined;
+            window.__mix01DetectCache = undefined;
+            window.__mix01DetectInflight = undefined;
+        } else {
+            // Soft prune only cache maps; keep hover/mouse session context intact
+            state.likeMediaCache = trimObj(state.likeMediaCache, 80);
+            state.followAuthorCache = trimObj(state.followAuthorCache, 60);
+            state.hdUrlMap = trimObj(state.hdUrlMap, 120);
+            state.blobToUrlMap = trimObj(state.blobToUrlMap, 40);
+            window.__mix01State = state;
+            return;
+        }
+        // Hard prune clears ephemeral hover pointers
         window.lastHoveredSrc = null;
         window.lastHoveredMedia = null;
         window.lastMouseX = null;
         window.lastMouseY = null;
+    };
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') pruneMix01Caches(false);
+    }, { passive: true });
+
+    window.addEventListener('beforeunload', () => {
+        pruneMix01Caches(true);
     });
 })();

@@ -296,6 +296,26 @@ window.Mix01MediaRenderer = class MediaRenderer {
         } catch (e) {}
     }
 
+    // Single place to toggle image/video layers so softSwitch never leaves stacked surfaces
+    prepareMediaSurface(isVideo) {
+        this.stopVideoRender();
+        if (isVideo) {
+            this.setStyles(this.elements.img, { display: 'none', opacity: '0' });
+            this.setStyles(this.elements.imgBuffer, { display: 'none', opacity: '0' });
+            this.setStyles(this.elements.videoClone, { display: 'block' });
+            this.setStyles(this.elements.progressContainer, { display: 'block' });
+            this.elements.img.classList.remove('mix01-hd-buffering');
+            this.elements.imgBuffer.classList.remove('mix01-hd-buffering');
+        } else {
+            this.setStyles(this.elements.videoClone, { display: 'none' });
+            this.setStyles(this.elements.progressContainer, { display: 'none' });
+            this.setStyles(this.elements.img, { display: 'block' });
+            // buffer stays hidden until HD path needs it
+            this.setStyles(this.elements.imgBuffer, { display: 'none', opacity: '0' });
+            this.setStyle(this.elements.spinner, 'display', 'none');
+        }
+    }
+
     setupMessageListener() {
         chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const getUrlAndProcess = async (actionFn) => {
@@ -372,42 +392,82 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     showToast(text) {
-        if (!this._activeToastQueue) {
-            this._activeToastQueue = [];
+        if (!this._activeToastQueue) this._activeToastQueue = [];
+        if (!this._toastPool) this._toastPool = [];
+        if (this._toastSeq == null) this._toastSeq = 0;
+
+        let singleToast = this._toastPool.pop();
+        if (!singleToast) {
+            singleToast = document.createElement('div');
+            singleToast.className = 'img-zoom-toast-xyz';
         }
 
-        // 1. 创建动态的层叠式子级 Toast 卡片
-        const singleToast = document.createElement('div');
-        singleToast.className = 'img-zoom-toast-xyz';
-        singleToast.textContent = text;
+        // Invalidate any pending timers from a previous life of this node
+        const token = ++this._toastSeq;
+        singleToast._mix01Token = token;
+        if (singleToast._mix01HideTimer) {
+            clearTimeout(singleToast._mix01HideTimer);
+            singleToast._mix01HideTimer = null;
+        }
+        if (singleToast._mix01RemoveTimer) {
+            clearTimeout(singleToast._mix01RemoveTimer);
+            singleToast._mix01RemoveTimer = null;
+        }
 
-        // 2. 依据当前活跃队列长度计算堆叠的绝对垂直偏移值，支持动态推开
+        singleToast.textContent = text;
+        singleToast.classList.remove('show');
+
+        // Drop overflow immediately and cancel their timers cleanly
+        while (this._activeToastQueue.length >= 3) {
+            const oldest = this._activeToastQueue.shift();
+            this._retireToast(oldest, true);
+        }
+
         const offsetIndex = this._activeToastQueue.length;
         singleToast.style.setProperty('bottom', `${30 + offsetIndex * 55}px`, 'important');
         singleToast.style.setProperty('transition', 'all 0.35s cubic-bezier(0.2, 0.8, 0.2, 1)', 'important');
-        
-        document.body.appendChild(singleToast);
+        singleToast.style.setProperty('display', 'block', 'important');
+        if (!singleToast.parentNode) document.body.appendChild(singleToast);
         this._activeToastQueue.push(singleToast);
 
         requestAnimationFrame(() => {
-            singleToast.classList.add('show');
+            if (singleToast._mix01Token === token) singleToast.classList.add('show');
         });
 
-        // 3. 异步移除渐隐，重构后续 Toast 的 bottom 位置，避免排版截断
-        setTimeout(() => {
+        singleToast._mix01HideTimer = setTimeout(() => {
+            if (singleToast._mix01Token !== token) return;
             singleToast.classList.remove('show');
-            setTimeout(() => {
-                if (singleToast.parentNode) {
-                    singleToast.parentNode.removeChild(singleToast);
-                }
-                this._activeToastQueue = this._activeToastQueue.filter(t => t !== singleToast);
-                
-                // 实时向下递推
-                this._activeToastQueue.forEach((t, i) => {
-                    t.style.setProperty('bottom', `${30 + i * 55}px`, 'important');
-                });
-            }, 350); 
-        }, 1500);
+            singleToast._mix01RemoveTimer = setTimeout(() => {
+                if (singleToast._mix01Token !== token) return;
+                this._retireToast(singleToast, false);
+            }, 350);
+        }, 2200);
+    }
+
+    _retireToast(toast, immediate) {
+        if (!toast) return;
+        // Bump token so any pending callbacks no-op
+        toast._mix01Token = (toast._mix01Token || 0) + 1000000;
+        if (toast._mix01HideTimer) {
+            clearTimeout(toast._mix01HideTimer);
+            toast._mix01HideTimer = null;
+        }
+        if (toast._mix01RemoveTimer) {
+            clearTimeout(toast._mix01RemoveTimer);
+            toast._mix01RemoveTimer = null;
+        }
+        toast.classList.remove('show');
+        const idx = this._activeToastQueue ? this._activeToastQueue.indexOf(toast) : -1;
+        if (idx >= 0) this._activeToastQueue.splice(idx, 1);
+        toast.style.setProperty('display', 'none', 'important');
+        if (!this._toastPool) this._toastPool = [];
+        if (this._toastPool.length < 6) this._toastPool.push(toast);
+        else if (toast.parentNode) toast.parentNode.removeChild(toast);
+        if (!immediate && this._activeToastQueue) {
+            this._activeToastQueue.forEach((t, i) => {
+                t.style.setProperty('bottom', `${30 + i * 55}px`, 'important');
+            });
+        }
     }
 
     updateStatus(type, vW, vH, isVideo) {
@@ -494,8 +554,12 @@ window.Mix01MediaRenderer = class MediaRenderer {
         if (this.domGuard) this.domGuard.disconnect();
         
         if (this._activeToastQueue) {
-            this._activeToastQueue.forEach(t => { if (t.parentNode) t.parentNode.removeChild(t); });
+            [...this._activeToastQueue].forEach(t => this._retireToast(t, true));
             this._activeToastQueue = [];
+        }
+        if (this._toastPool) {
+            this._toastPool.forEach(t => { if (t.parentNode) t.parentNode.removeChild(t); });
+            this._toastPool = [];
         }
 
         const els = [this.elements.viewer, this.elements.toast, this.elements.ctxMenu, this.elements.counter];
@@ -513,53 +577,94 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.videoState.lastNh = 0;
         this.currentVideoEl = videoEl;
         this._lastProgressPct = null;
+        this._videoUsedStream = false;
 
-        this.setStyles(this.elements.img,              { display: 'none' });
-        this.setStyles(this.elements.videoClone,       { display: 'block' });
-        this.setStyles(this.elements.progressContainer,{ display: 'block' });
-
+        this.prepareMediaSurface(true);
         videoEl.muted = true;
 
         const vc = this.elements.videoClone;
-        
         vc.muted = false;
         vc.volume = 1.0;
-        
-        try {
+
+        const clearCloneSrc = () => {
+            if (vc.srcObject) {
+                const stream = vc.srcObject;
+                if (stream.getTracks) stream.getTracks().forEach(t => t.stop());
+                vc.srcObject = null;
+            }
+            if (vc.getAttribute('src')) {
+                vc.removeAttribute('src');
+                try { vc.load(); } catch (e) {}
+            }
+        };
+
+        const attachStream = () => {
+            clearCloneSrc();
             if (videoEl.captureStream) {
                 const stream = videoEl.captureStream();
-                if (stream.active) vc.srcObject = stream;
-                else throw new Error("Stream inactive");
+                if (!stream.active) throw new Error('Stream inactive');
+                vc.srcObject = stream;
             } else if (videoEl.mozCaptureStream) {
                 vc.srcObject = videoEl.mozCaptureStream();
             } else {
-                throw new Error("No captureStream");
+                throw new Error('No captureStream');
+            }
+            this._videoUsedStream = true;
+        };
+
+        const attachSrc = () => {
+            clearCloneSrc();
+            const src = videoEl.currentSrc || videoEl.src;
+            if (!src) throw new Error('No video src');
+            if (vc.src !== src) vc.src = src;
+            if (Number.isFinite(videoEl.currentTime)) {
+                try { vc.currentTime = videoEl.currentTime; } catch (e) {}
+            }
+            this._videoUsedStream = false;
+        };
+
+        // Prefer cheap src sync; fall back to captureStream on failure.
+        let mode = 'src';
+        try {
+            if (videoEl.currentSrc || videoEl.src) attachSrc();
+            else {
+                attachStream();
+                mode = 'stream';
             }
         } catch (e) {
-            vc.srcObject = null;
-            if (vc.src !== videoEl.src) {
-                vc.src = videoEl.src;
-                vc.currentTime = videoEl.currentTime;
+            try {
+                attachStream();
+                mode = 'stream';
+            } catch (e2) {
+                try { attachSrc(); mode = 'src'; } catch (_) {}
             }
         }
 
+        const onCloneError = () => {
+            if (!this.videoState.isRunning || this._videoUsedStream) return;
+            try {
+                attachStream();
+                launchPlayback();
+            } catch (e) {}
+        };
+        vc.addEventListener('error', onCloneError, { once: true });
+        this._videoCloneErrorHandler = onCloneError;
+
         const launchPlayback = () => {
             if (window.__mix01State.userPaused || !this.videoState.isRunning) return;
-            
             videoEl.play().catch(() => {});
-
             vc.play().catch((err) => {
-                if (err.name === 'NotAllowedError') {
-                    console.warn("Mix01: 有声自动播放受阻，降级为静音自动播放机制以确保画面不静止");
+                if (err && err.name === 'NotAllowedError') {
                     vc.muted = true;
                     vc.play().catch(() => {});
+                } else if (!this._videoUsedStream) {
+                    onCloneError();
                 }
             });
         };
 
         if (videoEl.readyState < 2) {
             this.setStyle(this.elements.spinner, 'display', 'block');
-            
             const onCanPlay = () => {
                 this.setStyle(this.elements.spinner, 'display', 'none');
                 launchPlayback();
@@ -571,22 +676,14 @@ window.Mix01MediaRenderer = class MediaRenderer {
             launchPlayback();
         }
 
-        const updateFrame = () => {
+        if (this._videoProgressHandler && this.currentVideoEl) {
+            // currentVideoEl already set; remove previous if any was left
+        }
+        if (this._videoProgressHandler) {
+            try { videoEl.removeEventListener('timeupdate', this._videoProgressHandler); } catch (e) {}
+        }
+        this._videoProgressHandler = () => {
             if (!this.videoState.isRunning) return;
-
-            if (vc.srcObject && !vc.srcObject.active && !videoEl.ended) {
-                try { vc.srcObject = videoEl.captureStream(); } catch(e){}
-            }
-
-            if (!window.__mix01State.userPaused && !videoEl.ended) {
-                if (videoEl.paused && videoEl.readyState >= 1) {
-                    videoEl.play().catch(() => {});
-                }
-                if (vc.paused && vc.readyState >= 1) {
-                    vc.play().catch(() => {});
-                }
-            }
-
             if (videoEl.duration > 0) {
                 const pct = ((videoEl.currentTime / videoEl.duration) * 100).toFixed(2) + '%';
                 if (pct !== this._lastProgressPct) {
@@ -594,23 +691,55 @@ window.Mix01MediaRenderer = class MediaRenderer {
                     this._lastProgressPct = pct;
                 }
             }
-
             if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
                 this.videoState.lastNw = videoEl.videoWidth;
                 this.videoState.lastNh = videoEl.videoHeight;
             }
+            if (!this._videoUsedStream && !window.__mix01State.userPaused) {
+                const drift = Math.abs((vc.currentTime || 0) - videoEl.currentTime);
+                if (drift > 0.35) {
+                    try { vc.currentTime = videoEl.currentTime; } catch (e) {}
+                }
+            }
+        };
+        videoEl.addEventListener('timeupdate', this._videoProgressHandler);
 
-            if (videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
-            else requestAnimationFrame(updateFrame);
+        const updateFrame = () => {
+            if (!this.videoState.isRunning) return;
+            if (this._videoUsedStream && vc.srcObject && !vc.srcObject.active && !videoEl.ended) {
+                try { vc.srcObject = videoEl.captureStream(); } catch (e) {}
+            }
+            if (!window.__mix01State.userPaused && !videoEl.ended) {
+                if (videoEl.paused && videoEl.readyState >= 1) videoEl.play().catch(() => {});
+                if (vc.paused && vc.readyState >= 1) vc.play().catch(() => {});
+            }
+            this._videoKeepAliveId = setTimeout(() => {
+                if (!this.videoState.isRunning) return;
+                if (this._videoUsedStream && videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
+                else updateFrame();
+            }, this._videoUsedStream ? 100 : 250);
         };
 
-        if (videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
-        else requestAnimationFrame(updateFrame);
+        if (this._videoUsedStream && videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
+        else this._videoKeepAliveId = setTimeout(updateFrame, 250);
     }
 
     stopVideoRender() {
         this.videoState.isRunning = false;
         this._lastProgressPct = null;
+        if (this._videoKeepAliveId) {
+            clearTimeout(this._videoKeepAliveId);
+            this._videoKeepAliveId = null;
+        }
+        if (this.currentVideoEl && this._videoProgressHandler) {
+            this.currentVideoEl.removeEventListener('timeupdate', this._videoProgressHandler);
+            this._videoProgressHandler = null;
+        }
+        if (this.elements.videoClone && this._videoCloneErrorHandler) {
+            this.elements.videoClone.removeEventListener('error', this._videoCloneErrorHandler);
+            this._videoCloneErrorHandler = null;
+        }
+        this._videoUsedStream = false;
 
         if (this.elements.videoClone) {
             this.elements.videoClone.pause();
@@ -1024,6 +1153,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.immersiveState.lastSrc         = currentSrc;
         this.immersiveState.lastHudSignature= hudSignature;
 
+        // Incremental HUD update: rebuild only when signature changed (already gated above)
         let hudHTML = `<div style="display:flex;align-items:center;gap:15px;">`;
         hudHTML += `<span class="hud-status-item">切换 <span class="kbd-btn">${keyMode}</span></span>`;
         hudHTML += `<span class="hud-status-item">暂停 <span class="kbd-btn">SPACE</span></span>`;
@@ -1038,10 +1168,11 @@ window.Mix01MediaRenderer = class MediaRenderer {
         hudHTML += `<span class="hud-status-item">退出 <span class="kbd-btn">双击</span></span>`;
         hudHTML += `</div>`;
 
-        this.elements.hint.innerHTML = hudHTML;
+        if (this.elements.hint.dataset.hudHtml !== hudHTML) {
+            this.elements.hint.innerHTML = hudHTML;
+            this.elements.hint.dataset.hudHtml = hudHTML;
+        }
         this.setStyle(this.elements.hint, 'display', 'block');
-
-        void this.elements.hint.offsetWidth; 
         this.setStyle(this.elements.hint, 'opacity', '1');
 
         clearTimeout(this.hudState.hintTimer);

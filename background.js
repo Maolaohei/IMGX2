@@ -337,13 +337,26 @@ async function handleImmersiveDownload(request, sendResponse) {
         const contentType = _rawCt; 
         
         if (useBase64) {
+            // base64Domains exist for hotlink-protected hosts: prefer in-SW fetch -> dataURL.
+            // Direct remote download is only a fallback when payload is too large / stream fails.
             const contentLength = res.headers.get('content-length');
-            const sizeLimit = 10 * 1024 * 1024; 
+            const sizeLimit = 8 * 1024 * 1024;
+            const knownTooLarge = contentLength && parseInt(contentLength, 10) > sizeLimit;
 
-            if (contentLength && parseInt(contentLength) > sizeLimit) {
-                chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
-                    saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (大文件直下)" : "✅ 成功 (大文件直下)");
+            const downloadDirect = (reason) => new Promise((resolve) => {
+                chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, (downloadId) => {
+                    const ok = !chrome.runtime.lastError && downloadId !== undefined;
+                    saveToHistory(finalDownloadName, ok ? `✅ 成功 (${reason})` : `❌ 失败 (${reason})`);
+                    resolve(ok);
                 });
+            });
+
+            if (knownTooLarge) {
+                // Avoid buffering huge payloads in SW memory
+                if (res.body && res.body.cancel) {
+                    try { res.body.cancel(); } catch (e) {}
+                }
+                await downloadDirect('大文件直下');
             } else {
                 const reader = res.body.getReader();
                 let receivedLength = 0;
@@ -351,52 +364,58 @@ async function handleImmersiveDownload(request, sendResponse) {
                 let aborted = false;
                 let chunkCount = 0;
 
-                while(true) {
-                    const {done, value} = await reader.read();
+                while (true) {
+                    const { done, value } = await reader.read();
                     if (done) break;
                     receivedLength += value.length;
-                    
                     if (receivedLength > sizeLimit) {
-                        reader.cancel('File too large'); 
+                        reader.cancel('File too large');
                         aborted = true;
                         break;
                     }
                     chunks.push(value);
                     chunkCount++;
-
                     if (chunkCount % 100 === 0) {
                         await chrome.storage.local.get('_sw_keep_alive_').catch(() => {});
                     }
                 }
 
                 if (aborted) {
-                    chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
-                        saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败 (流超载回退)" : "✅ 成功 (流超载回退)");
-                    });
+                    await downloadDirect('流超载回退');
                 } else {
                     const blob = new Blob(chunks, { type: contentType });
-                    const fileReader = new FileReader();
-                    
-                    fileReader.onloadend = () => {
-                        const dataUrl = fileReader.result;
-                        chrome.downloads.download({ url: dataUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, (downloadId) => {
-                            if (downloadId === undefined) {
-                                chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" });
-                            }
-                            saveToHistory(finalDownloadName, (chrome.runtime.lastError || downloadId === undefined) ? "❌ 失败" : "✅ 成功 (Base64)");
-                        });
-                    };
+                    chunks = null;
+                    const dataUrl = await new Promise((resolve, reject) => {
+                        const fileReader = new FileReader();
+                        fileReader.onloadend = () => resolve(fileReader.result);
+                        fileReader.onerror = () => reject(fileReader.error || new Error('FileReader failed'));
+                        fileReader.readAsDataURL(blob);
+                    }).catch(() => null);
 
-                    fileReader.onerror = () => {
-                        chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
-                            saveToHistory(finalDownloadName, "❌ 失败 (Base64转换异常回退)");
+                    if (!dataUrl) {
+                        await downloadDirect('Base64转换异常回退');
+                    } else {
+                        await new Promise((resolve) => {
+                            chrome.downloads.download({ url: dataUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, (downloadId) => {
+                                if (downloadId === undefined || chrome.runtime.lastError) {
+                                    chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
+                                        saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功 (直链回退)");
+                                        resolve();
+                                    });
+                                } else {
+                                    saveToHistory(finalDownloadName, "✅ 成功 (Base64)");
+                                    resolve();
+                                }
+                            });
                         });
-                    };
-
-                    fileReader.readAsDataURL(blob);
+                    }
                 }
             }
         } else {
+            // Non-base64: body already fetched only to inspect headers/type; cancel before direct download
+            if (res.body && res.body.cancel) {
+                try { res.body.cancel(); } catch (e) {}
+            }
             chrome.downloads.download({ url: finalUrl, filename: finalDownloadName, saveAs: false, conflictAction: "uniquify" }, () => {
                 saveToHistory(finalDownloadName, chrome.runtime.lastError ? "❌ 失败" : "✅ 成功");
             });

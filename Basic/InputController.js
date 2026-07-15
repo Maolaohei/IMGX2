@@ -258,12 +258,14 @@ window.Mix01InputController = class InputController {
                 if (m.addedNodes && m.addedNodes.length > 0) {
                     for (let node of m.addedNodes) {
                         if (node.nodeType === Node.ELEMENT_NODE) {
-                            this.state._galleryCacheDirty = true;
                             const isImgOrVideo = node.tagName === 'IMG' || node.tagName === 'VIDEO';
+                            // Sync path stays light: only direct media dirties gallery.
+                            // Containers are scanned on idle; scan itself will observe nested media.
                             if (isImgOrVideo) {
-                                if (!node._mix01Observed) { 
-                                    node._mix01Observed = true; 
-                                    this.mediaIO.observe(node); 
+                                this.state._galleryCacheDirty = true;
+                                if (!node._mix01Observed) {
+                                    node._mix01Observed = true;
+                                    this.mediaIO.observe(node);
                                 }
                             }
                             queueNodeForScan(node);
@@ -335,6 +337,11 @@ window.Mix01InputController = class InputController {
             this._kineticFrameId = null;
         }
         this.physics.active = false;
+    }
+
+    _kickPhysics() {
+        this._killPhysicsLoop();
+        this._startPhysicsLoop();
     }
 
     _clampTargetPan(elastic = false) {
@@ -412,6 +419,11 @@ window.Mix01InputController = class InputController {
         // 🚀 指针按下：支持多指缩放与单手拖拽惯性平移，彻底避免 convertTouchToMouse 报错
         viewer.addEventListener('pointerdown', (e) => {
             if (!this.state.isViewerVisible) return;
+
+            // Track click origin for background-exit gesture (merged into primary handler)
+            if (e.button === 0) {
+                this._clickStart = { x: e.clientX, y: e.clientY, t: performance.now() };
+            }
 
             this._pointerTracker.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
@@ -599,12 +611,6 @@ window.Mix01InputController = class InputController {
         }, optKey);
 
         // Background click / double-click to exit immersive or close lens
-        const onPointerDownForClick = (e) => {
-            if (!this.state.isViewerVisible) return;
-            if (e.button !== 0) return;
-            this._clickStart = { x: e.clientX, y: e.clientY, t: performance.now() };
-        };
-        this.render.elements.viewer.addEventListener('pointerdown', onPointerDownForClick, { signal: this._eventSignalController.signal });
         this.render.elements.viewer.addEventListener('click', (e) => this.handleBackgroundClick(e), { signal: this._eventSignalController.signal });
         this.render.elements.viewer.addEventListener('dblclick', (e) => {
             if (!this.state.isViewerVisible) return;
@@ -875,11 +881,29 @@ window.Mix01InputController = class InputController {
         } catch (error) { console.warn('Mix01 Engine HD Exception:', error); }
     }
 
-    async triggerZoom(target) {
+    async triggerZoom(target, options = {}) {
         if (target === this.state.currentMedia && (target.src || 'video') === this.state.currentSrc) return;
         if (target.tagName === 'VIDEO' && this.cfg.state.disableVideoDefaultView && !this.cfg.state.isImmersive) return;
 
-        this.hideViewer();
+        // softSwitch is opt-in (keyboard gallery). Hover open still uses full hide/open.
+        const softSwitch = !!options.softSwitch && this.state.isViewerVisible;
+        if (softSwitch) {
+            // Same-session switch: keep viewer shell, only swap media pipeline
+            if (this._hdFetchController) {
+                this._hdFetchController.abort();
+                this._hdFetchController = null;
+            }
+            if (this.render.hdState.progressTimer) {
+                clearInterval(this.render.hdState.progressTimer);
+                this.render.hdState.progressTimer = null;
+            }
+            this.render.hdState.isLoading = false;
+            this.render.hdState.progress = 0;
+            this.render.prepareMediaSurface(target.tagName === 'VIDEO');
+            this.mediaObserver.disconnect();
+        } else {
+            this.hideViewer();
+        }
 
         const savedSessionId = ++this.state.renderRequestId;
 
@@ -923,7 +947,8 @@ window.Mix01InputController = class InputController {
         this.state.cachedRect = target.getBoundingClientRect();
         this._lastRectTime = performance.now(); 
         
-        this.state._galleryCacheDirty = true;
+        // Soft switch keeps gallery cache; only hard open marks dirty when needed
+        if (!softSwitch) this.state._galleryCacheDirty = true;
         
         this.mediaObserver.disconnect();
         if (target.tagName === 'IMG') {
@@ -961,7 +986,7 @@ window.Mix01InputController = class InputController {
         this.render.setStyle(this.render.elements.notice, 'display', 'none');
 
         if (target.tagName === 'VIDEO') {
-            this.render.setStyle(this.render.elements.img, 'display', 'none');
+            this.render.prepareMediaSurface(true);
             this.render.startVideoRender(target);
             this.updateRender();
             this.render.setStyle(this.render.elements.viewer, 'display', 'block');
@@ -974,8 +999,7 @@ window.Mix01InputController = class InputController {
             return;
         }
 
-        this.render.setStyle(this.render.elements.progressContainer, 'display', 'none');
-        this.render.setStyle(this.render.elements.img, 'display', 'block');
+        this.render.prepareMediaSurface(false);
         this.render.setStyle(this.render.elements.img, 'max-width', 'none'); 
         this.render.setStyle(this.render.elements.img, 'max-height', 'none');
         this.render.setStyle(this.render.elements.img, 'opacity', '0');
@@ -1126,6 +1150,7 @@ window.Mix01InputController = class InputController {
         this.preloadedUrlsQueue.length = 0;
         this._preloadImgInstancesMap.clear();
         this._preloadInFlight = 0;
+        if (this._hdProbeScheduled) this._hdProbeScheduled.clear();
         this._pan.active = false;
         this._clickStart = null;
         
@@ -1362,7 +1387,7 @@ window.Mix01InputController = class InputController {
         
         this.state.lastSwitchDirection = direction;
 
-        this.triggerZoom(nextImg);
+        this.triggerZoom(nextImg, { softSwitch: true });
 
         nextImg.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
@@ -1529,48 +1554,59 @@ window.Mix01InputController = class InputController {
 
                     (async () => {
                         try {
-                            let targetUrl = src;
+                            const warmUrl = (url) => {
+                                if (!url || this.preloadedUrls.has(url) || this.render.hdState.badUrls.has(url)) return;
+                                this.preloadedUrls.add(url);
+                                this.preloadedUrlsQueue.push(url);
+
+                                const img = this.imgPool.acquire();
+                                this.activePreloads.add(img);
+                                img.decoding = 'async';
+                                img.onload = () => {
+                                    rememberLoadedHdUrl(url);
+                                    this.activePreloads.delete(img);
+                                };
+                                img.onerror = () => {
+                                    this.render.markBadHdUrl(url);
+                                    this.activePreloads.delete(img);
+                                    this.imgPool.release(img);
+                                    this._preloadImgInstancesMap.delete(url);
+                                };
+                                img.src = url;
+                                this._preloadImgInstancesMap.set(url, img);
+
+                                while (this.preloadedUrlsQueue.length > CACHE_LIMITS.preloadedUrls) {
+                                    const oldest = this.preloadedUrlsQueue.shift();
+                                    this.preloadedUrls.delete(oldest);
+                                    const oldImg = this._preloadImgInstancesMap.get(oldest);
+                                    if (oldImg) {
+                                        this._preloadImgInstancesMap.delete(oldest);
+                                        this.activePreloads.delete(oldImg);
+                                        this.imgPool.release(oldImg);
+                                    }
+                                }
+                            };
+
+                            // 1) Always warm the best known URL immediately
                             const mapped = ensureMix01State().hdUrlMap?.[src];
-                            if (mapped) {
-                                targetUrl = mapped;
-                            } else if (this.cfg.state.loadHD === 'true' && window.Mix01RuleEngine?.getHighResUrl) {
-                                try {
-                                    targetUrl = await window.Mix01RuleEngine.getHighResUrl(media, src);
-                                    if (targetUrl && targetUrl !== src) rememberHdUrl(src, targetUrl);
-                                } catch (e) {}
-                            }
+                            warmUrl(mapped || src);
 
-                            if (!targetUrl || this.preloadedUrls.has(targetUrl) || this.render.hdState.badUrls.has(targetUrl)) {
-                                return;
-                            }
-
-                            this.preloadedUrls.add(targetUrl);
-                            this.preloadedUrlsQueue.push(targetUrl);
-
-                            const preloadImg = this.imgPool.acquire();
-                            this.activePreloads.add(preloadImg);
-                            preloadImg.decoding = 'async';
-                            preloadImg.onload = () => {
-                                rememberLoadedHdUrl(targetUrl);
-                                this.activePreloads.delete(preloadImg);
-                            };
-                            preloadImg.onerror = () => {
-                                this.render.markBadHdUrl(targetUrl);
-                                this.activePreloads.delete(preloadImg);
-                                this.imgPool.release(preloadImg);
-                                this._preloadImgInstancesMap.delete(targetUrl);
-                            };
-                            preloadImg.src = targetUrl;
-                            this._preloadImgInstancesMap.set(targetUrl, preloadImg);
-
-                            while (this.preloadedUrlsQueue.length > CACHE_LIMITS.preloadedUrls) {
-                                const oldest = this.preloadedUrlsQueue.shift();
-                                this.preloadedUrls.delete(oldest);
-                                const oldImg = this._preloadImgInstancesMap.get(oldest);
-                                if (oldImg) {
-                                    this._preloadImgInstancesMap.delete(oldest);
-                                    this.activePreloads.delete(oldImg);
-                                    this.imgPool.release(oldImg);
+                            // 2) If HD unknown, resolve on idle and warm HD without being blocked by original src membership
+                            if (!mapped && this.cfg.state.loadHD === 'true' && window.Mix01RuleEngine?.getHighResUrl) {
+                                this._hdProbeScheduled = this._hdProbeScheduled || new Set();
+                                if (!this._hdProbeScheduled.has(src) && !this.render.hdState.badUrls.has(src)) {
+                                    this._hdProbeScheduled.add(src);
+                                    const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 120));
+                                    idle(() => {
+                                        window.Mix01RuleEngine.getHighResUrl(media, src).then((hd) => {
+                                            this._hdProbeScheduled.delete(src);
+                                            if (!hd || hd === src) return;
+                                            rememberHdUrl(src, hd);
+                                            warmUrl(hd);
+                                        }).catch(() => {
+                                            this._hdProbeScheduled.delete(src);
+                                        });
+                                    });
                                 }
                             }
                         } finally {
@@ -1678,11 +1714,11 @@ window.Mix01InputController = class InputController {
 
         if (k === this.cfg.keys.rotate) { 
             this.state.currentRotate = (this.state.currentRotate + 90) % 360; 
-            up = true; this._clampTargetPan(); this._killPhysicsLoop(); this._startPhysicsLoop();
+            up = true; this._clampTargetPan(); this._kickPhysics();
         } 
         else if (k === this.cfg.keys.mirror) { 
             this.state.currentMirror *= -1; 
-            up = true; this._killPhysicsLoop(); this._startPhysicsLoop();
+            up = true; this._kickPhysics();
         } 
         else if (k === this.cfg.keys.mode) { 
             if (this.cfg.state.isImmersive) {
@@ -1700,19 +1736,19 @@ window.Mix01InputController = class InputController {
                 }
                 this.cfg.state.mode = nextMode; 
 
-                up = true; this._killPhysicsLoop(); this._startPhysicsLoop();
+                up = true; this._kickPhysics();
                 this.render.showToast(modeNames[this.state.currentMode]); 
             }
         }
         else if (k === this.cfg.keys.zoomIn || k === '+') { 
             this.physics.targetZoom += 0.5; this.state.isZoomManuallyChanged = true; 
             this.render.showToast(`${this.physics.targetZoom.toFixed(1)}x`); up = true; 
-            this._clampTargetPan(); this._killPhysicsLoop(); this._startPhysicsLoop();
+            this._clampTargetPan(); this._kickPhysics();
         } 
         else if (k === this.cfg.keys.zoomOut || k === '-') { 
             this.physics.targetZoom = Math.max(0.5, this.physics.targetZoom - 0.5); this.state.isZoomManuallyChanged = true; 
             this.render.showToast(`${this.physics.targetZoom.toFixed(1)}x`); up = true; 
-            this._clampTargetPan(); this._killPhysicsLoop(); this._startPhysicsLoop();
+            this._clampTargetPan(); this._kickPhysics();
         }
         
         else if (e.key === 'Escape') {
@@ -1733,7 +1769,8 @@ window.Mix01InputController = class InputController {
                 return;
             }
         }
-        else if (k === 'arrowup' || k === 'w' || k === 'arrowdown' || k === 's') {
+        else if (k === 'arrowup' || k === 'w' || k === 'arrowdown') {
+            // Note: bare 's' is reserved for double-action shortcut; use ArrowDown for next
             if (!this.cfg.state.isImmersive || window.__mix01State.isFetchingMore) return;
 
             const now = Date.now();
@@ -1768,7 +1805,7 @@ window.Mix01InputController = class InputController {
                 currentIndex = closestIdx;
             }
 
-            const isNext = (k === 'arrowdown' || k === 's');
+            const isNext = (k === 'arrowdown');
 
             if (isNext) {
                 if (currentIndex < galleryImages.length - 1) {
