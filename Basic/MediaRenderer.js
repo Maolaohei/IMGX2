@@ -298,11 +298,11 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
     // Single place to toggle image/video layers so softSwitch never leaves stacked surfaces
     prepareMediaSurface(isVideo) {
-        this.stopVideoRender();
+        // Style-only switch. Never stop the active pipeline here — callers own lifecycle.
         if (isVideo) {
             this.setStyles(this.elements.img, { display: 'none', opacity: '0' });
             this.setStyles(this.elements.imgBuffer, { display: 'none', opacity: '0' });
-            this.setStyles(this.elements.videoClone, { display: 'block' });
+            this.setStyles(this.elements.videoClone, { display: 'block', opacity: '1' });
             this.setStyles(this.elements.progressContainer, { display: 'block' });
             this.elements.img.classList.remove('mix01-hd-buffering');
             this.elements.imgBuffer.classList.remove('mix01-hd-buffering');
@@ -310,7 +310,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
             this.setStyles(this.elements.videoClone, { display: 'none' });
             this.setStyles(this.elements.progressContainer, { display: 'none' });
             this.setStyles(this.elements.img, { display: 'block' });
-            // buffer stays hidden until HD path needs it
+            // Do not force opacity here — triggerZoom owns the decode fade-in.
             this.setStyles(this.elements.imgBuffer, { display: 'none', opacity: '0' });
             this.setStyle(this.elements.spinner, 'display', 'none');
         }
@@ -571,15 +571,19 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     startVideoRender(videoEl) {
+        // Tear down any previous session first, then arm state.
+        this.stopVideoRender();
+        this.prepareMediaSurface(true);
+
         this.videoState.isRunning = true;
         this.videoState.original = { paused: videoEl.paused, muted: videoEl.muted };
-        this.videoState.lastNw = 0;
-        this.videoState.lastNh = 0;
+        this.videoState.lastNw = videoEl.videoWidth || 0;
+        this.videoState.lastNh = videoEl.videoHeight || 0;
         this.currentVideoEl = videoEl;
         this._lastProgressPct = null;
         this._videoUsedStream = false;
 
-        this.prepareMediaSurface(true);
+        // Immersive clone owns audio; mute page video to avoid double audio.
         videoEl.muted = true;
 
         const vc = this.elements.videoClone;
@@ -600,15 +604,15 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
         const attachStream = () => {
             clearCloneSrc();
-            if (videoEl.captureStream) {
-                const stream = videoEl.captureStream();
-                if (!stream.active) throw new Error('Stream inactive');
-                vc.srcObject = stream;
-            } else if (videoEl.mozCaptureStream) {
-                vc.srcObject = videoEl.mozCaptureStream();
-            } else {
-                throw new Error('No captureStream');
+            let stream = null;
+            if (videoEl.captureStream) stream = videoEl.captureStream();
+            else if (videoEl.mozCaptureStream) stream = videoEl.mozCaptureStream();
+            if (!stream) throw new Error('No captureStream');
+            // Some players need a play() tick before stream becomes active
+            if (!stream.active) {
+                videoEl.play().catch(() => {});
             }
+            vc.srcObject = stream;
             this._videoUsedStream = true;
         };
 
@@ -623,22 +627,44 @@ window.Mix01MediaRenderer = class MediaRenderer {
             this._videoUsedStream = false;
         };
 
-        // Prefer cheap src sync; fall back to captureStream on failure.
-        let mode = 'src';
+        // X/Twitter often uses blob:/MSE — reusing src on another <video> is unreliable.
+        // Prefer captureStream there; plain CDN mp4 can use src.
+        const rawSrc = videoEl.currentSrc || videoEl.src || '';
+        const host = (typeof location !== 'undefined' && location.hostname) || '';
+        const preferStream =
+            rawSrc.startsWith('blob:') ||
+            rawSrc.startsWith('mediasource:') ||
+            !rawSrc ||
+            /(?:^|\.)(?:x|twitter)\.com$/i.test(host);
+
         try {
-            if (videoEl.currentSrc || videoEl.src) attachSrc();
-            else {
-                attachStream();
-                mode = 'stream';
-            }
+            if (preferStream) attachStream();
+            else attachSrc();
         } catch (e) {
             try {
-                attachStream();
-                mode = 'stream';
+                if (preferStream) attachSrc();
+                else attachStream();
             } catch (e2) {
-                try { attachSrc(); mode = 'src'; } catch (_) {}
+                // last resort: leave clone empty; spinner path still tries play later
             }
         }
+
+        const launchPlayback = () => {
+            if (window.__mix01State.userPaused || !this.videoState.isRunning) return;
+            videoEl.play().catch(() => {});
+            vc.play().catch((err) => {
+                if (err && err.name === 'NotAllowedError') {
+                    vc.muted = true;
+                    vc.play().catch(() => {});
+                } else if (!this._videoUsedStream) {
+                    // src path failed at play-time — promote to stream
+                    try {
+                        attachStream();
+                        vc.play().catch(() => {});
+                    } catch (_) {}
+                }
+            });
+        };
 
         const onCloneError = () => {
             if (!this.videoState.isRunning || this._videoUsedStream) return;
@@ -650,19 +676,6 @@ window.Mix01MediaRenderer = class MediaRenderer {
         vc.addEventListener('error', onCloneError, { once: true });
         this._videoCloneErrorHandler = onCloneError;
 
-        const launchPlayback = () => {
-            if (window.__mix01State.userPaused || !this.videoState.isRunning) return;
-            videoEl.play().catch(() => {});
-            vc.play().catch((err) => {
-                if (err && err.name === 'NotAllowedError') {
-                    vc.muted = true;
-                    vc.play().catch(() => {});
-                } else if (!this._videoUsedStream) {
-                    onCloneError();
-                }
-            });
-        };
-
         if (videoEl.readyState < 2) {
             this.setStyle(this.elements.spinner, 'display', 'block');
             const onCanPlay = () => {
@@ -671,14 +684,13 @@ window.Mix01MediaRenderer = class MediaRenderer {
             };
             videoEl.addEventListener('canplay', onCanPlay, { once: true });
             videoEl.addEventListener('loadeddata', onCanPlay, { once: true });
+            // Still attempt play; some X videos never fire canplay while already decoding frames
+            launchPlayback();
         } else {
             this.setStyle(this.elements.spinner, 'display', 'none');
             launchPlayback();
         }
 
-        if (this._videoProgressHandler && this.currentVideoEl) {
-            // currentVideoEl already set; remove previous if any was left
-        }
         if (this._videoProgressHandler) {
             try { videoEl.removeEventListener('timeupdate', this._videoProgressHandler); } catch (e) {}
         }
@@ -715,13 +727,19 @@ window.Mix01MediaRenderer = class MediaRenderer {
             }
             this._videoKeepAliveId = setTimeout(() => {
                 if (!this.videoState.isRunning) return;
-                if (this._videoUsedStream && videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
-                else updateFrame();
+                if (this._videoUsedStream && videoEl.requestVideoFrameCallback) {
+                    videoEl.requestVideoFrameCallback(updateFrame);
+                } else {
+                    updateFrame();
+                }
             }, this._videoUsedStream ? 100 : 250);
         };
 
-        if (this._videoUsedStream && videoEl.requestVideoFrameCallback) videoEl.requestVideoFrameCallback(updateFrame);
-        else this._videoKeepAliveId = setTimeout(updateFrame, 250);
+        if (this._videoUsedStream && videoEl.requestVideoFrameCallback) {
+            videoEl.requestVideoFrameCallback(updateFrame);
+        } else {
+            this._videoKeepAliveId = setTimeout(updateFrame, 250);
+        }
     }
 
     stopVideoRender() {
@@ -767,7 +785,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
     updateLayout(activeMedia, rect, activeZoom, xP, yP, isSmallOptimized, customLensWidth, customLensHeight, isZoomManuallyChanged, currentHoveredSrc, _sw, _sh, panOffsetX, panOffsetY, mode, rotate, mirror, incomingSessionId) {
         const activeRequestId = this.controller ? this.controller.state.renderRequestId : 0;
         if (incomingSessionId && incomingSessionId !== activeRequestId) {
-            return activeZoom; 
+            return activeZoom;
         }
 
         const sW = window.innerWidth, sH = window.innerHeight;
@@ -777,16 +795,14 @@ window.Mix01MediaRenderer = class MediaRenderer {
         if (isVideo) {
             nw = this.videoState.lastNw || activeMedia.videoWidth || rect.width || 1;
             nh = this.videoState.lastNh || activeMedia.videoHeight || rect.height || 1;
+        } else if (activeMedia.naturalWidth > 0) {
+            nw = activeMedia.naturalWidth;
+            nh = activeMedia.naturalHeight;
         } else {
-            if (activeMedia.naturalWidth > 0) {
-                nw = activeMedia.naturalWidth;
-                nh = activeMedia.naturalHeight;
-            } else {
-                nw = rect.width || 1;
-                nh = rect.height || 1;
-            }
+            nw = Math.max(1, rect.width || 1);
+            nh = Math.max(1, rect.height || 1);
         }
-        
+
         this._syncNoticeVisibility();
 
         if (isSmallOptimized) {
@@ -797,20 +813,20 @@ window.Mix01MediaRenderer = class MediaRenderer {
             if (!isVideo) this.elements.imgBuffer.classList.remove('is-small-pixelated');
         }
 
-        const modeClass = this.cfg.state.isImmersive ? 'mode-immersive' : `mode-${mode}`;
+        const safeMode = (mode === 'full-follow') ? 'full-follow' : 'partial';
+        const modeClass = this.cfg.state.isImmersive ? 'mode-immersive' : `mode-${safeMode}`;
         this.setClass(this.elements.viewer, `${modeClass} is-active`);
 
         const isRotated = rotate % 180 !== 0;
-        let cDW = 0, cDH = 0; 
-        let vW = 0, vH = 0;   
+        let cDW = 0, cDH = 0;
+        let vW = 0, vH = 0;
 
+        // Map pointer ratio onto the actual bitmap (thumbnail may be object-fit: cover)
         let correctedXP = xP;
         let correctedYP = yP;
-        
         if (nw > 1 && nh > 1 && rect.width > 0 && rect.height > 0) {
-            const rOrig = nw / nh; 
-            const rThumb = rect.width / rect.height; 
-            
+            const rOrig = nw / nh;
+            const rThumb = rect.width / rect.height;
             if (rOrig > rThumb) {
                 const factor = rThumb / rOrig;
                 correctedXP = xP * factor + 0.5 * (1 - factor);
@@ -826,12 +842,58 @@ window.Mix01MediaRenderer = class MediaRenderer {
         else if (rotate === 270) { vxP = correctedYP; vyP = 1 - correctedXP; }
         if (mirror === -1) { vxP = 1 - vxP; }
 
+        const applyMediaBox = (width, height, transform) => {
+            this.setStyles(activeMedia, {
+                position: 'absolute',
+                width: `${width}px`,
+                height: `${height}px`,
+                margin: '0px',
+                left: '0px',
+                top: '0px',
+                right: 'auto',
+                bottom: 'auto'
+            });
+            this.setStyle(activeMedia, 'transform', transform);
+            if (!isVideo) {
+                this.setStyles(this.elements.imgBuffer, {
+                    position: 'absolute',
+                    width: `${width}px`,
+                    height: `${height}px`,
+                    margin: '0px',
+                    left: '0px',
+                    top: '0px',
+                    right: 'auto',
+                    bottom: 'auto'
+                });
+                this.setStyle(this.elements.imgBuffer, 'transform', transform);
+            }
+        };
+
+        const placeViewer = (x, y, w, h, extra = {}) => {
+            this.setStyles(this.elements.viewer, {
+                display: 'block',
+                position: 'fixed',
+                left: '0px',
+                top: '0px',
+                width: `${w}px`,
+                height: `${h}px`,
+                overflow: 'hidden',
+                'pointer-events': extra.pointerEvents || 'none',
+                'background-color': extra.bg || 'rgba(15,15,15,0.92)',
+                'background-image': extra.bgImage || 'none',
+                border: extra.border || '1px solid rgba(255,255,255,0.2)',
+                'border-radius': extra.radius || '8px',
+                transform: `translate3d(${x}px,${y}px,0)`
+            });
+            this._enforceTopLayer();
+        };
+
         if (this.cfg.state.isImmersive) {
             this.setStyles(this.elements.viewer, {
                 display: 'block', position: 'fixed', width: '100vw', height: '100vh',
                 left: '0px', top: '0px', 'background-color': 'rgba(0,0,0,0.95)',
                 'background-image': 'none', border: 'none', 'border-radius': '0',
-                'pointer-events': 'auto', transform: 'none'
+                'pointer-events': 'auto', transform: 'none', overflow: 'hidden'
             });
             this._enforceTopLayer();
 
@@ -843,209 +905,161 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 const scaleW = maxW / (vNw || 1);
                 const scaleH = maxH / (vNh || 1);
                 activeZoom = Math.min(scaleW, scaleH);
-                if (activeZoom > 50) activeZoom = 50; 
+                if (activeZoom > 50) activeZoom = 50;
             }
 
             cDW = nw * activeZoom; cDH = nh * activeZoom;
             vW = isRotated ? cDH : cDW;
             vH = isRotated ? cDW : cDH;
 
-            this.setStyles(activeMedia, { position: 'absolute', width: `${cDW}px`, height: `${cDH}px`, margin: '0px', left: '0px', top: '0px' });
-            if (!isVideo) {
-                this.setStyles(this.elements.imgBuffer, { position: 'absolute', width: `${cDW}px`, height: `${cDH}px`, margin: '0px', left: '0px', top: '0px' });
-            }
-
             let visualOffsetX = (sW - vW) / 2;
             let visualOffsetY = (sH - vH) / 2;
-
             if (isZoomManuallyChanged && (vW > sW || vH > sH)) {
                 visualOffsetX = (vW > sW) ? -(vW - sW) * vxP : visualOffsetX;
                 visualOffsetY = (vH > sH) ? -(vH - sH) * vyP : visualOffsetY;
             }
-            
             if (panOffsetX) visualOffsetX += panOffsetX;
             if (panOffsetY) visualOffsetY += panOffsetY;
 
-            let offsetX = visualOffsetX + vW / 2 - cDW / 2;
-            let offsetY = visualOffsetY + vH / 2 - cDH / 2;
-
+            const offsetX = visualOffsetX + vW / 2 - cDW / 2;
+            const offsetY = visualOffsetY + vH / 2 - cDH / 2;
             const matrixTransform = `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`;
-            this.setStyle(activeMedia, 'transform', matrixTransform);
-            if (!isVideo) this.setStyle(this.elements.imgBuffer, 'transform', matrixTransform);
+            applyMediaBox(cDW, cDH, matrixTransform);
         }
-        else if (mode === 'partial') {
-            this.setStyles(this.elements.viewer, { display: 'block', position: 'fixed', overflow: 'hidden', left: '0px', top: '0px' });
-            this._enforceTopLayer();
+        else if (safeMode === 'partial') {
+            // -------- Local magnifier --------
+            // Image is scaled from the on-page thumbnail footprint * zoom.
+            // Viewer is a fixed lens that pans over the magnified bitmap.
+            const zoom = Math.max(1.25, Number(activeZoom) || 2);
 
-            if (this.cfg.state.hasAgreed) {
-                const thumbScale = Math.max(rect.width / nw, rect.height / nh);
-                cDW = nw * thumbScale * activeZoom;
-                cDH = nh * thumbScale * activeZoom;
-                
-                vW = isRotated ? cDH : cDW;
-                vH = isRotated ? cDW : cDH;
-
-                this.setStyles(activeMedia, { width: cDW + 'px', height: cDH + 'px', position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
-                if (!isVideo) {
-                    this.setStyles(this.elements.imgBuffer, { width: cDW + 'px', height: cDH + 'px', position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
-                }
-
-                let lensW, lensH;
-                if (isSmallOptimized && customLensWidth && customLensHeight) {
-                    lensW = isRotated ? customLensHeight : customLensWidth;
-                    lensH = isRotated ? customLensWidth : customLensHeight;
-                } else {
-                    const ratio = vW / (vH || 1);
-                    
-                    let targetW = vW + 20;
-                    let targetH = vH + 20;
-                    
-                    const maxLensSize = 350;
-                    if (targetW > maxLensSize || targetH > maxLensSize) {
-                        if (ratio >= 1) {
-                            targetW = maxLensSize;
-                            targetH = targetW / ratio;
-                        } else {
-                            targetH = maxLensSize;
-                            targetW = targetH * ratio;
-                        }
-                    }
-                    
-                    const minLensSize = 100;
-                    if (targetW < minLensSize) {
-                        targetW = minLensSize;
-                        targetH = Math.min(maxLensSize, targetW / ratio);
-                    }
-                    if (targetH < minLensSize) {
-                        targetH = minLensSize;
-                        targetW = Math.min(maxLensSize, targetH * ratio);
-                    }
-                    
-                    lensW = targetW;
-                    lensH = targetH;
-                }
-                this.setStyles(this.elements.viewer, { width: lensW + 'px', height: lensH + 'px' });
-
-                const clientX = window.lastMouseX || rect.left + rect.width  / 2;
-                const clientY = window.lastMouseY || rect.top  + rect.height / 2;
-
-                let vX = clientX + 20, vY = clientY + 20;
-                if (vX + lensW > sW) vX = clientX - lensW - 20;
-                if (vY + lensH > sH) vY = clientY - lensH - 20;
-                
-                this.setStyle(this.elements.viewer, 'transform', `translate3d(${vX}px,${vY}px,0)`);
-
-                if (cDW < 350 && cDH < 350 && !customLensWidth) {
-                    this.setStyles(this.elements.viewer, {
-                        border: '1px solid rgba(255,255,255,0.2)',
-                        'background-image': 'radial-gradient(circle, rgba(20,20,20,1) 0%, rgba(0,0,0,1) 100%)',
-                        'background-color': '#000'
-                    });
-                } else {
-                    this.setStyles(this.elements.viewer, {
-                        'background-image': 'none', 'background-color': 'transparent', border: '1px solid rgba(255,255,255,0.4)'
-                    });
-                }
-
-                let visualOffsetX = 0, visualOffsetY = 0;
-                if (vW > lensW) visualOffsetX = -(vW * vxP - lensW / 2);
-                else             visualOffsetX = (lensW - vW) / 2;
-                if (vH > lensH) visualOffsetY = -(vH * vyP - lensH / 2);
-                else             visualOffsetY = (lensH - vH) / 2;
-                
-                // 实时叠加 pan 偏移量物理计算
-                if (panOffsetX) visualOffsetX += panOffsetX;
-                if (panOffsetY) visualOffsetY += panOffsetY;
-
-                let offsetX = visualOffsetX + vW / 2 - cDW / 2;
-                let offsetY = visualOffsetY + vH / 2 - cDH / 2;
-
-                const matrixTransform = `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`;
-                this.setStyle(activeMedia, 'transform', matrixTransform);
-                if (!isVideo) this.setStyle(this.elements.imgBuffer, 'transform', matrixTransform);
-            }
-        } else {
-            this.setStyles(this.elements.viewer, {
-                display: 'block', position: 'fixed', left: '0px', top: '0px',
-                'background-color': 'rgba(20,20,20,0.9)', 'background-image': 'none'
-            });
-            this._enforceTopLayer();
-            this.setStyles(activeMedia, { position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
-            if (!isVideo) {
-                this.setStyles(this.elements.imgBuffer, { position: 'absolute', right: 'auto', bottom: 'auto', margin: '0px', left: '0px', top: '0px' });
-            }
-
-            const thumbScale = Math.max(rect.width / nw, rect.height / nh);
-            cDW = nw * thumbScale * activeZoom;
-            cDH = nh * thumbScale * activeZoom;
-            
+            // cover-scale: fill the thumbnail box, then magnify
+            const thumbScale = Math.max((rect.width || 1) / nw, (rect.height || 1) / nh);
+            cDW = nw * thumbScale * zoom;
+            cDH = nh * thumbScale * zoom;
             vW = isRotated ? cDH : cDW;
             vH = isRotated ? cDW : cDH;
 
-            const maxVW = sW * (mode === 'full-follow' ? 0.7 : 0.95);
-            const maxVH = sH * (mode === 'full-follow' ? 0.7 : 0.95);
-
-            const clientX = window.lastMouseX || rect.left + rect.width  / 2;
-            const clientY = window.lastMouseY || rect.top  + rect.height / 2;
-
-            if (!this.cfg.state.breakoutView || !this.cfg.state.hasAgreed) {
-                const safeMaxVW = maxVW - 10, safeMaxVH = maxVH - 10;
-                const ratio = vW / vH;
-                if (vW > safeMaxVW) { vW = safeMaxVW; vH = vW / ratio; }
-                if (vH > safeMaxVH) { vH = safeMaxVH; vW = vH * ratio; }
-                
-                cDW = isRotated ? vH : vW;
-                cDH = isRotated ? vW : vH;
-
-                this.setStyles(this.elements.viewer, { width: `${vW}px`, height: `${vH}px` });
-                
-                if (this.cfg.state.hasAgreed) {
-                    this.setStyles(activeMedia, { width: `${cDW}px`, height: `${cDH}px` });
-                    if (!isVideo) this.setStyles(this.elements.imgBuffer, { width: `${cDW}px`, height: `${cDH}px` });
-
-                    let offsetX = vW / 2 - cDW / 2;
-                    let offsetY = vH / 2 - cDH / 2;
-                    
-                    if (panOffsetX) offsetX += panOffsetX;
-                    if (panOffsetY) offsetY += panOffsetY;
-
-                    const matrixTransform = `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`;
-                    this.setStyle(activeMedia, 'transform', matrixTransform);
-                    if (!isVideo) this.setStyle(this.elements.imgBuffer, 'transform', matrixTransform);
+            let lensW, lensH;
+            if (isSmallOptimized && customLensWidth && customLensHeight) {
+                lensW = isRotated ? customLensHeight : customLensWidth;
+                lensH = isRotated ? customLensWidth : customLensHeight;
+            } else {
+                // Lens grows with zoom a bit, but stays readable
+                const base = Math.min(420, Math.max(140, Math.max(rect.width, rect.height) * 1.8));
+                const ratio = vW / (vH || 1);
+                if (ratio >= 1) {
+                    lensW = Math.min(base, vW);
+                    lensH = Math.min(base / ratio, vH);
+                } else {
+                    lensH = Math.min(base, vH);
+                    lensW = Math.min(base * ratio, vW);
                 }
-            } else {
-                const lensW = Math.min(vW, maxVW), lensH = Math.min(vH, maxVH);
-                this.setStyles(this.elements.viewer, { width: `${lensW}px`, height: `${lensH}px` });
-                this.setStyles(activeMedia, { width: `${cDW}px`, height: `${cDH}px` });
-                if (!isVideo) this.setStyles(this.elements.imgBuffer, { width: `${cDW}px`, height: `${cDH}px` });
-
-                let visualOffsetX = (vW > lensW) ? -(vW - lensW) * vxP : 0;
-                let visualOffsetY = (vH > lensH) ? -(vH - lensH) * vyP : 0;
-
-                if (panOffsetX) visualOffsetX += panOffsetX;
-                if (panOffsetY) visualOffsetY += panOffsetY;
-
-                let offsetX = visualOffsetX + vW / 2 - cDW / 2;
-                let offsetY = visualOffsetY + vH / 2 - cDH / 2;
-                
-                const matrixTransform = `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`;
-                this.setStyle(activeMedia, 'transform', matrixTransform);
-                if (!isVideo) this.setStyle(this.elements.imgBuffer, 'transform', matrixTransform);
+                lensW = Math.max(120, lensW);
+                lensH = Math.max(120, lensH);
             }
 
-            let vX, vY;
-            if (mode === 'full-follow') {
-                vX = clientX + 25; vY = clientY + 25;
-                if (vX + vW > sW) vX = clientX - vW - 20;
-                if (vY + vH > sH) vY = clientY - vH - 20;
-            } else {
-                const margin = 30;
-                vX = (clientX < sW / 2) ? sW - vW - margin : margin;
-                vY = clientY - (vH / 2);
-                if (vY < margin) vY = margin;
-                if (vY + vH > sH - margin) vY = sH - vH - margin;
+            // Content pan so the pointed pixel sits near lens center
+            let visualOffsetX = (vW > lensW) ? -(vW * vxP - lensW / 2) : (lensW - vW) / 2;
+            let visualOffsetY = (vH > lensH) ? -(vH * vyP - lensH / 2) : (lensH - vH) / 2;
+            // Clamp pan so edges don't leave the lens empty
+            if (vW > lensW) visualOffsetX = Math.min(0, Math.max(lensW - vW, visualOffsetX));
+            else visualOffsetX = (lensW - vW) / 2;
+            if (vH > lensH) visualOffsetY = Math.min(0, Math.max(lensH - vH, visualOffsetY));
+            else visualOffsetY = (lensH - vH) / 2;
+
+            if (panOffsetX) visualOffsetX += panOffsetX;
+            if (panOffsetY) visualOffsetY += panOffsetY;
+
+            const offsetX = visualOffsetX + vW / 2 - cDW / 2;
+            const offsetY = visualOffsetY + vH / 2 - cDH / 2;
+            const matrixTransform = `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`;
+
+            // Keep magnifier content visible even if a prior HD transition left opacity low
+            if (!isVideo && this.elements.img && this.elements.img.style.opacity === '0') {
+                // still loading first frame — leave opacity management to triggerZoom/decode
+            } else if (!isVideo) {
+                this.setStyle(this.elements.img, 'opacity', '1');
             }
-            this.setStyle(this.elements.viewer, 'transform', `translate3d(${vX}px,${vY}px,0)`);
+
+            applyMediaBox(cDW, cDH, matrixTransform);
+
+            const clientX = window.lastMouseX ?? (rect.left + rect.width / 2);
+            const clientY = window.lastMouseY ?? (rect.top + rect.height / 2);
+            let vX = clientX + 18;
+            let vY = clientY + 18;
+            if (vX + lensW > sW - 8) vX = clientX - lensW - 18;
+            if (vY + lensH > sH - 8) vY = clientY - lensH - 18;
+            vX = Math.max(8, Math.min(sW - lensW - 8, vX));
+            vY = Math.max(8, Math.min(sH - lensH - 8, vY));
+
+            placeViewer(vX, vY, lensW, lensH, {
+                bg: 'rgba(12,12,12,0.88)',
+                border: '1px solid rgba(255,255,255,0.18)',
+                radius: '12px'
+            });
+
+            // report visual footprint
+            vW = lensW; vH = lensH;
+            activeZoom = zoom;
+        }
+        else {
+            // -------- Full-follow (整体跟随) --------
+            // Floating preview that tracks the cursor and KEEPS zoom.
+            // Previous code reassigned cDW=vW after viewport clamping, which cancelled zoom.
+            const zoom = Math.max(1, Number(activeZoom) || 2);
+            const thumbScale = Math.max((rect.width || 1) / nw, (rect.height || 1) / nh);
+            cDW = nw * thumbScale * zoom;
+            cDH = nh * thumbScale * zoom;
+            let contentW = isRotated ? cDH : cDW;
+            let contentH = isRotated ? cDW : cDH;
+
+            // Viewer chrome size: show a comfortable window, not the whole zoomed bitmap
+            const maxVW = sW * 0.72;
+            const maxVH = sH * 0.72;
+            const minVW = Math.min(220, sW * 0.4);
+            const minVH = Math.min(180, sH * 0.35);
+
+            // Prefer showing ~min(content, max) so zoom still crops inside the frame
+            vW = Math.min(Math.max(contentW, minVW), maxVW);
+            vH = Math.min(Math.max(contentH, minVH), maxVH);
+
+            // If content is smaller than the min chrome, shrink chrome to content
+            vW = Math.min(vW, Math.max(contentW, 120));
+            vH = Math.min(vH, Math.max(contentH, 120));
+
+            // Pan magnified content under the pointer focus
+            let visualOffsetX = (contentW > vW) ? -(contentW - vW) * vxP : (vW - contentW) / 2;
+            let visualOffsetY = (contentH > vH) ? -(contentH - vH) * vyP : (vH - contentH) / 2;
+            if (contentW > vW) visualOffsetX = Math.min(0, Math.max(vW - contentW, visualOffsetX));
+            if (contentH > vH) visualOffsetY = Math.min(0, Math.max(vH - contentH, visualOffsetY));
+            if (panOffsetX) visualOffsetX += panOffsetX;
+            if (panOffsetY) visualOffsetY += panOffsetY;
+
+            const offsetX = visualOffsetX + contentW / 2 - cDW / 2;
+            const offsetY = visualOffsetY + contentH / 2 - cDH / 2;
+            const matrixTransform = `translate3d(${offsetX}px,${offsetY}px,0) scaleX(${mirror}) rotate(${rotate}deg)`;
+
+            if (!isVideo) this.setStyle(this.elements.img, 'opacity', '1');
+            applyMediaBox(cDW, cDH, matrixTransform);
+
+            const clientX = window.lastMouseX ?? (rect.left + rect.width / 2);
+            const clientY = window.lastMouseY ?? (rect.top + rect.height / 2);
+
+            // Follow cursor with smart flip; keep fully on-screen
+            let vX = clientX + 22;
+            let vY = clientY + 22;
+            if (vX + vW > sW - 10) vX = clientX - vW - 22;
+            if (vY + vH > sH - 10) vY = clientY - vH - 22;
+            vX = Math.max(10, Math.min(sW - vW - 10, vX));
+            vY = Math.max(10, Math.min(sH - vH - 10, vY));
+
+            placeViewer(vX, vY, vW, vH, {
+                bg: 'rgba(15,15,15,0.94)',
+                border: '1px solid rgba(255,255,255,0.2)',
+                radius: '8px'
+            });
+
+            activeZoom = zoom;
         }
 
         this.updateStatus(activeMedia.src !== currentHoveredSrc ? 'hd' : 'original', vW, vH, isVideo);

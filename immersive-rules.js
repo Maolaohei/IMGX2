@@ -8,6 +8,42 @@
             el.dispatchEvent(new MouseEvent('mousedown', opts));
             el.dispatchEvent(new MouseEvent('mouseup', opts));
             el.dispatchEvent(new MouseEvent('click', opts));
+        },
+        // Reading order beats IntersectionObserver insertion order
+        sortByDocumentOrder: function (list) {
+            if (!list || list.length < 2) return list || [];
+            return list
+                .filter(el => el && el.isConnected)
+                .map((el, idx) => ({ el, idx }))
+                .sort((a, b) => {
+                    if (a.el === b.el) return 0;
+                    const rel = a.el.compareDocumentPosition(b.el);
+                    if (rel & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+                    if (rel & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+                    return a.idx - b.idx;
+                })
+                .map(x => x.el);
+        },
+        collectCandidateMedia: function () {
+            // Prefer a broader DOM sample than only currently-intersecting nodes.
+            // Visible-set alone reshuffles when users reverse scroll direction.
+            const engineVisible = window.__mix01Engine?.controller?.visibleMediaElements;
+            const fromDom = Array.from(document.querySelectorAll('article img, article video, img, video'));
+            if (!engineVisible || engineVisible.size === 0) return fromDom;
+
+            const merged = [];
+            const seen = new Set();
+            for (const el of engineVisible) {
+                if (!el || seen.has(el)) continue;
+                seen.add(el);
+                merged.push(el);
+            }
+            for (const el of fromDom) {
+                if (!el || seen.has(el)) continue;
+                seen.add(el);
+                merged.push(el);
+            }
+            return merged;
         }
     };
 
@@ -15,15 +51,14 @@
         '(?:(?:.+\\.)?twitter|x)\\.com': {
             getContainer: (media) => media.closest('article') || document.body,
             getGalleryImages: () => {
-                // Prefer engine IO visible set when available to avoid full-document scans
-                const engineVisible = window.__mix01Engine?.controller?.visibleMediaElements;
-                const allMedia = (engineVisible && engineVisible.size > 0)
-                    ? Array.from(engineVisible)
-                    : Array.from(document.querySelectorAll('img, video'));
+                // Merge visible + DOM candidates, then sort by document order.
+                // Pure visible-set order caused mixed up/down déjà-vu on X.
+                const allMedia = tools.collectCandidateMedia();
                 const validMedia = [];
                 const viewportHeight = window.innerHeight;
-                const topBound = -viewportHeight * 1.5;
-                const bottomBound = viewportHeight * 2.5;
+                // Wider band while navigating so reverse direction still has neighbors
+                const topBound = -viewportHeight * 2.5;
+                const bottomBound = viewportHeight * 3.5;
 
                 const videoRectsByArticle = new WeakMap();
 
@@ -89,7 +124,7 @@
 
                     validMedia.push(media);
                 }
-                return validMedia;
+                return tools.sortByDocumentOrder(validMedia);
             },
             getStates: (container) => {
                 const likeBtn = container.querySelector('[data-testid="unlike"]') || container.querySelector('[aria-label*="已喜欢"]') || container.querySelector('[aria-label*="Unlike"]');
@@ -466,18 +501,15 @@
             isFallback: true,
             getContainer: (media) => media.parentElement || document.body,
             getGalleryImages: () => {
-                const engineVisible = window.__mix01Engine?.controller?.visibleMediaElements;
-                const allMedia = (engineVisible && engineVisible.size > 0)
-                    ? Array.from(engineVisible)
-                    : Array.from(document.querySelectorAll('img, video'));
+                const allMedia = tools.collectCandidateMedia();
                 const validMedia = [];
                 const viewportHeight = window.innerHeight;
-                const topBound = -viewportHeight * 1.5;
-                const bottomBound = viewportHeight * 2.5;
+                const topBound = -viewportHeight * 2.5;
+                const bottomBound = viewportHeight * 3.5;
 
                 for (let i = 0; i < allMedia.length; i++) {
                     const media = allMedia[i];
-                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz') continue;
+                    if (media.id === 'zoom-img-xyz' || media.id === 'zoom-canvas-xyz' || media.id === 'zoom-video-xyz' || media.id === 'zoom-img-buffer-xyz') continue;
 
                     const rect = media.getBoundingClientRect();
                     if (rect.top < topBound || rect.bottom > bottomBound) continue;
@@ -486,7 +518,7 @@
                         validMedia.push(media);
                     }
                 }
-                return validMedia;
+                return tools.sortByDocumentOrder(validMedia);
             },
             getStates: () => ({ isLiked: null, isFollowed: null, authorName: '' }),
             like: async () => null,

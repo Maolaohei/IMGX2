@@ -899,6 +899,7 @@ window.Mix01InputController = class InputController {
             }
             this.render.hdState.isLoading = false;
             this.render.hdState.progress = 0;
+            this.render.stopVideoRender();
             this.render.prepareMediaSurface(target.tagName === 'VIDEO');
             this.mediaObserver.disconnect();
         } else {
@@ -944,6 +945,24 @@ window.Mix01InputController = class InputController {
         
         this.state.currentMedia = target; 
         this.state.currentSrc = target.src || 'video';
+        // Trail ownership:
+        // - empty trail: seed
+        // - at tip: append/update via _pushNavTrail
+        // - mid-trail (history replay): only refresh matching ref, never truncate future
+        if (this.cfg.state.isImmersive) {
+            this._ensureNavTrail();
+            const key = this._mediaKey(target);
+            const trail = this._navTrail;
+            const cur = this._navTrailIndex >= 0 ? trail[this._navTrailIndex] : null;
+            if (this._navTrailIndex < 0) {
+                this._pushNavTrail(target, true);
+            } else if (cur && cur.key === key) {
+                cur.ref = new WeakRef(target);
+                cur.src = target.currentSrc || target.src || cur.src;
+            } else if (this._navTrailIndex === trail.length - 1) {
+                this._pushNavTrail(target);
+            }
+        }
         this.state.cachedRect = target.getBoundingClientRect();
         this._lastRectTime = performance.now(); 
         
@@ -986,7 +1005,7 @@ window.Mix01InputController = class InputController {
         this.render.setStyle(this.render.elements.notice, 'display', 'none');
 
         if (target.tagName === 'VIDEO') {
-            this.render.prepareMediaSurface(true);
+            // startVideoRender owns stop + surface + playback arming
             this.render.startVideoRender(target);
             this.updateRender();
             this.render.setStyle(this.render.elements.viewer, 'display', 'block');
@@ -999,6 +1018,7 @@ window.Mix01InputController = class InputController {
             return;
         }
 
+        this.render.stopVideoRender();
         this.render.prepareMediaSurface(false);
         this.render.setStyle(this.render.elements.img, 'max-width', 'none'); 
         this.render.setStyle(this.render.elements.img, 'max-height', 'none');
@@ -1026,6 +1046,14 @@ window.Mix01InputController = class InputController {
             else { this.physics.targetZoom = this.cfg.state.zoom; }
         } else {
             this.physics.targetZoom = this.cfg.state.zoom;
+        }
+
+        // Non-immersive modes need a real magnify factor; 0/NaN configs collapse to "no effect"
+        if (!this.cfg.state.isImmersive) {
+            const minZoom = (this.state.currentMode === 'partial') ? 1.8 : 1.25;
+            if (!Number.isFinite(this.physics.targetZoom) || this.physics.targetZoom < minZoom) {
+                this.physics.targetZoom = Math.max(minZoom, Number(this.cfg.state.zoom) || minZoom);
+            }
         }
         
         this.physics.currentZoom = this.physics.targetZoom;
@@ -1111,9 +1139,20 @@ window.Mix01InputController = class InputController {
                 currentSessionId 
             );
             
-            if (!this.state.isZoomManuallyChanged) {
+            // Immersive auto-fit may rewrite zoom. Partial/full-follow must keep configured zoom
+            // or the magnifier/follow preview looks like "no zoom".
+            if (!this.state.isZoomManuallyChanged && this.cfg.state.isImmersive) {
                 this.physics.currentZoom = returnedZoom;
                 this.physics.targetZoom = returnedZoom;
+            } else if (!this.state.isZoomManuallyChanged) {
+                // Keep physics in sync with the effective zoom used by layout (min clamp etc.)
+                if (Number.isFinite(returnedZoom) && returnedZoom > 0) {
+                    this.physics.currentZoom = returnedZoom;
+                    // do not stomp targetZoom permanently below user config on every mousemove
+                    if (Math.abs(this.physics.targetZoom - returnedZoom) > 0.01) {
+                        this.physics.targetZoom = returnedZoom;
+                    }
+                }
             }
         } catch (err) {
             console.warn("Mix01 Render Engine:", err);
@@ -1153,6 +1192,8 @@ window.Mix01InputController = class InputController {
         if (this._hdProbeScheduled) this._hdProbeScheduled.clear();
         this._pan.active = false;
         this._clickStart = null;
+        // Full close ends the immersive browsing session trail
+        if (!this.cfg.state.isImmersive) this._resetNavTrail();
         
         this.state.currentMedia = null;
         this.state.currentSrc = null;
@@ -1169,7 +1210,8 @@ window.Mix01InputController = class InputController {
 
     exitImmersive() {
         this.cfg.state.isImmersive = false;
-        this.state.isViewerVisible = false; 
+        this.state.isViewerVisible = false;
+        this._resetNavTrail();
         
         const host = window.location.hostname;
         if (host) {
@@ -1265,18 +1307,320 @@ window.Mix01InputController = class InputController {
         this.render.updateCounter(idx >= 0 ? idx : 0, gallery.length);
     }
 
+
+    // ===================== Immersive gallery navigation =====================
+    // Design goals:
+    // 1) Document order is the only truth (not IntersectionObserver Set order)
+    // 2) Directional moves prefer geometric neighbors, not raw index±1
+    // 3) Mixed up/down uses a visit trail so "down after up" restores history
+    // 4) Boundary fetch never jumps to window head/tail (that caused déjà-vu)
+
+    _mediaKey(media) {
+        if (!media) return '';
+        if (media._mixStatusId) return `sid:${media._mixStatusId}`;
+        const src = media.currentSrc || media.src || '';
+        if (src) {
+            // Strip cache-busters / size params that X rotates
+            try {
+                const u = new URL(src, location.href);
+                return `src:${u.origin}${u.pathname}`;
+            } catch (e) {
+                return `src:${src.split('?')[0]}`;
+            }
+        }
+        return `el:${media.tagName}:${Math.round(media.clientWidth)}x${Math.round(media.clientHeight)}`;
+    }
+
+    _sortMediaDocumentOrder(list) {
+        if (!list || list.length < 2) return list || [];
+        // documentPosition is stable for connected nodes and matches reading order
+        return list
+            .filter(el => el && el.isConnected)
+            .map((el, idx) => ({ el, idx }))
+            .sort((a, b) => {
+                if (a.el === b.el) return 0;
+                const rel = a.el.compareDocumentPosition(b.el);
+                if (rel & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+                if (rel & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+                // disconnected / uncommon: keep original relative order
+                return a.idx - b.idx;
+            })
+            .map(x => x.el);
+    }
+
+    _dedupeMedia(list) {
+        const seen = new Set();
+        const out = [];
+        for (const el of list) {
+            if (!el || !el.isConnected) continue;
+            const key = this._mediaKey(el);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            out.push(el);
+        }
+        return out;
+    }
+
+    _ensureNavTrail() {
+        if (!this._navTrail) {
+            this._navTrail = [];
+            this._navTrailIndex = -1;
+            this._navTrailKeys = new Set();
+        }
+        return this._navTrail;
+    }
+
+    _resetNavTrail(seedMedia = null) {
+        this._navTrail = [];
+        this._navTrailIndex = -1;
+        this._navTrailKeys = new Set();
+        if (seedMedia) this._pushNavTrail(seedMedia, true);
+    }
+
+    _pushNavTrail(media, force = false) {
+        if (!media) return;
+        const trail = this._ensureNavTrail();
+        const key = this._mediaKey(media);
+        if (!key) return;
+
+        // If user went back in trail then branches forward, drop the discarded future
+        if (this._navTrailIndex >= 0 && this._navTrailIndex < trail.length - 1) {
+            const dropped = trail.splice(this._navTrailIndex + 1);
+            for (const d of dropped) this._navTrailKeys.delete(d.key);
+        }
+
+        const last = trail[this._navTrailIndex];
+        if (!force && last && last.key === key) {
+            last.ref = new WeakRef(media);
+            return;
+        }
+
+        trail.push({ key, ref: new WeakRef(media), src: media.currentSrc || media.src || 'video' });
+        this._navTrailKeys.add(key);
+        this._navTrailIndex = trail.length - 1;
+
+        // Bound memory
+        while (trail.length > 200) {
+            const old = trail.shift();
+            this._navTrailKeys.delete(old.key);
+            this._navTrailIndex = Math.max(0, this._navTrailIndex - 1);
+        }
+    }
+
+    _resolveTrailMedia(entry, gallery) {
+        if (!entry) return null;
+        const live = entry.ref?.deref?.();
+        if (live && live.isConnected) return live;
+        if (gallery && gallery.length) {
+            const hit = gallery.find(m => this._mediaKey(m) === entry.key);
+            if (hit) return hit;
+            if (entry.src) {
+                const bySrc = gallery.find(m => (m.currentSrc || m.src || 'video') === entry.src);
+                if (bySrc) return bySrc;
+            }
+        }
+        return null;
+    }
+
+    _findGalleryIndex(gallery, media, srcHint = null) {
+        if (!gallery || !gallery.length) return -1;
+        if (media) {
+            let idx = gallery.indexOf(media);
+            if (idx !== -1) return idx;
+            const key = this._mediaKey(media);
+            idx = gallery.findIndex(m => this._mediaKey(m) === key);
+            if (idx !== -1) return idx;
+        }
+        const src = srcHint || this.state.currentSrc;
+        if (src) {
+            const idx = gallery.findIndex(m => (m.currentSrc || m.src || 'video') === src);
+            if (idx !== -1) return idx;
+        }
+        return -1;
+    }
+
+    _pickDirectionalNeighbor(gallery, fromMedia, direction) {
+        // direction: +1 down/next (document later), -1 up/prev (document earlier)
+        if (!gallery || !gallery.length) return null;
+        const sorted = this._sortMediaDocumentOrder(gallery);
+        let idx = this._findGalleryIndex(sorted, fromMedia, this.state.currentSrc);
+
+        if (idx === -1 && fromMedia) {
+            // Geometric fallback relative to current media rect
+            const base = fromMedia.getBoundingClientRect?.() || { top: window.innerHeight / 2, height: 0 };
+            const baseY = base.top + base.height / 2;
+            let best = null;
+            let bestScore = Infinity;
+            for (const m of sorted) {
+                if (m === fromMedia) continue;
+                const r = m.getBoundingClientRect();
+                const y = r.top + r.height / 2;
+                const dy = y - baseY;
+                if (direction > 0 && dy <= 4) continue;
+                if (direction < 0 && dy >= -4) continue;
+                const score = Math.abs(dy) + Math.abs((r.left + r.width / 2) - (base.left + base.width / 2)) * 0.05;
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = m;
+                }
+            }
+            return best;
+        }
+
+        if (idx === -1) {
+            // No current: pick closest to viewport center, then step once in direction
+            const centerY = window.innerHeight / 2;
+            let closest = 0;
+            let minDiff = Infinity;
+            sorted.forEach((m, i) => {
+                const r = m.getBoundingClientRect();
+                const diff = Math.abs(r.top + r.height / 2 - centerY);
+                if (diff < minDiff) { minDiff = diff; closest = i; }
+            });
+            idx = closest;
+        }
+
+        const targetIdx = idx + (direction > 0 ? 1 : -1);
+        if (targetIdx < 0 || targetIdx >= sorted.length) return null;
+        return sorted[targetIdx];
+    }
+
+    _findFreshNeighborAfterFetch(prevGalleryKeys, newGallery, direction, currentMedia) {
+        const sorted = this._sortMediaDocumentOrder(newGallery);
+        const curIdx = this._findGalleryIndex(sorted, currentMedia, this.state.currentSrc);
+
+        // Prefer first item in the requested direction that is not in previous window
+        if (curIdx !== -1) {
+            if (direction > 0) {
+                for (let i = curIdx + 1; i < sorted.length; i++) {
+                    const key = this._mediaKey(sorted[i]);
+                    if (!prevGalleryKeys.has(key)) return sorted[i];
+                }
+                // If all later items already known, still take immediate next if any
+                if (curIdx + 1 < sorted.length) return sorted[curIdx + 1];
+            } else {
+                for (let i = curIdx - 1; i >= 0; i--) {
+                    const key = this._mediaKey(sorted[i]);
+                    if (!prevGalleryKeys.has(key)) return sorted[i];
+                }
+                if (curIdx - 1 >= 0) return sorted[curIdx - 1];
+            }
+            return null;
+        }
+
+        // Current node recycled: choose nearest media in direction from viewport center
+        return this._pickDirectionalNeighbor(sorted, currentMedia, direction);
+    }
+
+    async _navigateImmersive(direction) {
+        // direction: 1 = next/down, -1 = prev/up
+        if (!this.cfg.state.isImmersive || window.__mix01State.isFetchingMore) return false;
+        this._ensureNavTrail();
+
+        // Seed trail with current item if empty
+        if (this._navTrailIndex < 0 && this.state.currentMedia) {
+            this._pushNavTrail(this.state.currentMedia, true);
+        }
+
+        const gallery = this.getGalleryImages();
+        const toastNext = direction > 0 ? '下一项 ⬇️' : '⬆️ 上一项';
+
+        // Mixed-direction UX: if we are not at trail end and user goes forward again,
+        // prefer replaying the already-viewed forward trail first (no déjà-vu reshuffle).
+        if (direction > 0 && this._navTrailIndex >= 0 && this._navTrailIndex < this._navTrail.length - 1) {
+            const entry = this._navTrail[this._navTrailIndex + 1];
+            const media = this._resolveTrailMedia(entry, gallery);
+            if (media) {
+                this._navTrailIndex += 1;
+                this.performSwitch(media, 1, toastNext, { fromTrail: true });
+                return true;
+            }
+        }
+        if (direction < 0 && this._navTrailIndex > 0) {
+            // Prefer trail history when going up after a chain of downs
+            const entry = this._navTrail[this._navTrailIndex - 1];
+            const media = this._resolveTrailMedia(entry, gallery);
+            if (media) {
+                this._navTrailIndex -= 1;
+                this.performSwitch(media, -1, toastNext, { fromTrail: true });
+                return true;
+            }
+        }
+
+        // Live directional neighbor in current stable gallery
+        const neighbor = this._pickDirectionalNeighbor(gallery, this.state.currentMedia, direction);
+        if (neighbor) {
+            this.performSwitch(neighbor, direction, toastNext);
+            return true;
+        }
+
+        // Boundary: scroll to fetch more, then pick a true directional fresh neighbor
+        window.__mix01State.isFetchingMore = true;
+        this.render.showToast(direction > 0 ? '⏳ 正在加载更多动态...' : '⏳ 正在向上翻阅...');
+
+        const prevKeys = new Set(gallery.map(m => this._mediaKey(m)));
+        const lockedMedia = this.state.currentMedia;
+        const lockedSrc = this.state.currentSrc;
+        this.state._galleryCacheDirty = true;
+
+        window.scrollBy({ top: direction > 0 ? window.innerHeight * 1.5 : -window.innerHeight * 1.5, behavior: 'smooth' });
+
+        await new Promise(resolve => this.waitForScrollEnd(resolve));
+
+        try {
+            this.state._galleryCacheDirty = true;
+            const newGallery = this.getGalleryImages();
+            if (!newGallery.length) {
+                this.render.showToast(direction > 0 ? '🚧 到底啦！没有更多内容了' : '🚧 到顶啦！');
+                return false;
+            }
+
+            // Keep current media identity even if node recycled
+            let current = lockedMedia;
+            if (!current || !current.isConnected) {
+                const idx = this._findGalleryIndex(newGallery, null, lockedSrc);
+                current = idx >= 0 ? newGallery[idx] : this.state.currentMedia;
+            }
+
+            const fresh = this._findFreshNeighborAfterFetch(prevKeys, newGallery, direction, current);
+            if (fresh && fresh !== this.state.currentMedia) {
+                this.performSwitch(fresh, direction, toastNext);
+                return true;
+            }
+
+            // Absolute last resort: geometric neighbor once more after layout settles
+            const retry = this._pickDirectionalNeighbor(newGallery, current || this.state.currentMedia, direction);
+            if (retry && retry !== this.state.currentMedia) {
+                this.performSwitch(retry, direction, toastNext);
+                return true;
+            }
+
+            this.render.showToast(direction > 0 ? '🚧 到底啦！没有更多内容了' : '🚧 到顶啦！');
+            return false;
+        } finally {
+            window.__mix01State.isFetchingMore = false;
+        }
+    }
+
     getGalleryImages() {
         if (!this.state._galleryCacheDirty && this.state._galleryCache) {
-            const arr = this.state._galleryCache.map(ref => ref.deref()).filter(Boolean);
-            if (arr.length > 0) return arr;
+            const arr = [];
+            let incomplete = false;
+            for (const ref of this.state._galleryCache) {
+                const el = ref?.deref?.();
+                if (el && el.isConnected) arr.push(el);
+                else incomplete = true;
+            }
+            // Never reuse a half-dead virtual-list snapshot
+            if (!incomplete && arr.length > 0) return arr;
+            this.state._galleryCacheDirty = true;
         }
 
         const adapter = window.Mix01Utils.getImmersiveAdapter();
         let result = [];
         if (adapter && adapter.getGalleryImages) {
-            result = adapter.getGalleryImages();
+            result = adapter.getGalleryImages() || [];
         } else {
-            // Prefer IntersectionObserver visible set; fall back to full scan only if sparse
             const candidates = this.visibleMediaElements.size > 0
                 ? Array.from(this.visibleMediaElements)
                 : Array.from(document.querySelectorAll('img, video'));
@@ -1284,48 +1628,41 @@ window.Mix01InputController = class InputController {
             result = candidates.filter(media => {
                 if (!media || !media.isConnected) return false;
                 if (media.id === 'zoom-img-xyz' || media.id === 'zoom-img-buffer-xyz' || media.id === 'zoom-video-xyz') return false;
-                
+
                 if (media.tagName === 'IMG') {
                     const src = media.src || '';
-                    
                     if (
-                        src.includes('tweet_video_thumb') || 
-                        src.includes('ext_tw_video_thumb') || 
+                        src.includes('tweet_video_thumb') ||
+                        src.includes('ext_tw_video_thumb') ||
                         src.includes('amplify_video_thumb') ||
                         src.includes('video-thumbnail') ||
                         src.includes('video_poster')
-                    ) {
-                        return false; 
-                    }
+                    ) return false;
 
                     if (
-                        media.closest('[data-testid="videoPlayer"]') || 
+                        media.closest('[data-testid="videoPlayer"]') ||
                         media.closest('[class*="video-player"]')
-                    ) {
-                        return false; 
-                    }
+                    ) return false;
 
                     const container = media.closest('article, [class*="video"], [class*="player"], [class*="media"], [class*="post"], [class*="card"]');
-                    if (container && container.querySelector('video')) {
-                        return false; 
-                    }
+                    if (container && container.querySelector('video')) return false;
                     if (media.parentElement) {
                         const siblingVideo = media.parentElement.querySelector('video');
-                        if (siblingVideo && siblingVideo !== media) {
-                            return false; 
-                        }
+                        if (siblingVideo && siblingVideo !== media) return false;
                     }
                 }
 
-                // Avoid layout thrash: use IO membership as proxy when available
                 if (this.visibleMediaElements.has(media)) {
                     return (media.clientWidth || 0) > 50 && (media.clientHeight || 0) > 50;
                 }
                 const rect = media.getBoundingClientRect();
-                return rect.width > 50 && rect.height > 50; 
+                return rect.width > 50 && rect.height > 50;
             });
         }
-        
+
+        // Stable reading order + identity dedupe (X virtual list can clone nodes)
+        result = this._dedupeMedia(this._sortMediaDocumentOrder(result));
+
         this.state._galleryCache = result.map(el => new WeakRef(el));
         this.state._galleryCacheDirty = false;
         return result;
@@ -1381,22 +1718,37 @@ window.Mix01InputController = class InputController {
         this._cancelScrollWait = cleanUp;
     }
 
-    performSwitch(nextImg, direction, msgText) {
+    performSwitch(nextImg, direction, msgText, options = {}) {
+        if (!nextImg) return;
         if (msgText) this.render.showToast(msgText);
         this.state.keyboardSwitchTime = Date.now();
-        
         this.state.lastSwitchDirection = direction;
+
+        // Trail bookkeeping: normal moves append; pure trail replay only moves cursor
+        if (!options.fromTrail) {
+            // Ensure current item is on trail before appending the destination
+            if (this.state.currentMedia) this._pushNavTrail(this.state.currentMedia);
+            this._pushNavTrail(nextImg);
+        } else if (this.state.currentMedia) {
+            // Keep weak refs fresh when replaying history
+            const trail = this._ensureNavTrail();
+            const cur = trail[this._navTrailIndex];
+            if (cur) cur.ref = new WeakRef(nextImg);
+        }
 
         this.triggerZoom(nextImg, { softSwitch: true });
 
-        nextImg.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        try {
+            nextImg.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } catch (e) {}
 
         this.waitForScrollEnd(() => {
-            if (this.state.currentMedia === nextImg) {
+            if (this.state.currentMedia === nextImg || this._mediaKey(this.state.currentMedia) === this._mediaKey(nextImg)) {
                 const newRect = nextImg.getBoundingClientRect();
                 window.lastMouseX = newRect.left + newRect.width / 2;
                 window.lastMouseY = newRect.top + newRect.height / 2;
-                this.state.cachedRect = newRect; 
+                this.state.cachedRect = newRect;
+                this._lastRectTime = performance.now();
                 this.updateRender();
                 this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
                 this._updateGalleryCounter();
@@ -1641,6 +1993,7 @@ window.Mix01InputController = class InputController {
                 this.exitImmersive();
             } else {
                 this.cfg.state.isImmersive = true;
+                this._resetNavTrail(this.state.currentMedia);
                 
                 const host = window.location.hostname;
                 if (host) {
@@ -1736,6 +2089,12 @@ window.Mix01InputController = class InputController {
                 }
                 this.cfg.state.mode = nextMode; 
 
+                this.state.lastRenderSignature = null;
+                this.state.isZoomManuallyChanged = false;
+                this.physics.targetZoom = this.cfg.state.zoom || 2;
+                this.physics.currentZoom = this.physics.targetZoom;
+                this.physics.targetPanX = 0; this.physics.currentPanX = 0;
+                this.physics.targetPanY = 0; this.physics.currentPanY = 0;
                 up = true; this._kickPhysics();
                 this.render.showToast(modeNames[this.state.currentMode]); 
             }
@@ -1774,111 +2133,16 @@ window.Mix01InputController = class InputController {
             if (!this.cfg.state.isImmersive || window.__mix01State.isFetchingMore) return;
 
             const now = Date.now();
-            if (now - (this._lastKeySwitchTime || 0) < 150) {
+            if (now - (this._lastKeySwitchTime || 0) < 140) {
                 e.preventDefault();
                 return;
             }
             this._lastKeySwitchTime = now;
 
-            const galleryImages = this.getGalleryImages();
-            if (galleryImages.length === 0) return;
-
-            let currentIndex = galleryImages.indexOf(this.state.currentMedia);
-            if (currentIndex === -1 && this.state.currentSrc) {
-                currentIndex = galleryImages.findIndex(media => (media.src||'video') === this.state.currentSrc);
-            }
-            
-            if (currentIndex === -1) {
-                let closestIdx = 0;
-                let minDiff = Infinity;
-                const centerY = window.innerHeight / 2; 
-                
-                galleryImages.forEach((media, idx) => {
-                    const rect = media.getBoundingClientRect();
-                    const mediaCenterY = rect.top + rect.height / 2;
-                    const diff = Math.abs(mediaCenterY - centerY);
-                    if (diff < minDiff) {
-                        minDiff = diff;
-                        closestIdx = idx; 
-                    }
-                });
-                currentIndex = closestIdx;
-            }
-
-            const isNext = (k === 'arrowdown');
-
-            if (isNext) {
-                if (currentIndex < galleryImages.length - 1) {
-                    this.performSwitch(galleryImages[currentIndex + 1], 1, "下一项 ⬇️");
-                } else {
-                    window.__mix01State.isFetchingMore = true;
-                    this.render.showToast("⏳ 正在加载更多动态...");
-                    
-                    let previousLastSrc = galleryImages[galleryImages.length - 1] ? (galleryImages[galleryImages.length - 1].src || 'video') : null;
-                    
-                    this.state._galleryCacheDirty = true;
-                    
-                    window.scrollBy({ top: window.innerHeight * 1.5, behavior: 'smooth' });
-                    
-                    this.waitForScrollEnd(() => {
-                        const newGallery = this.getGalleryImages();
-                        
-                        let newIdx = newGallery.indexOf(this.state.currentMedia);
-                        if (newIdx === -1) newIdx = newGallery.findIndex(media => (media.src||'video') === this.state.currentSrc);
-                        
-                        if (newIdx !== -1 && newIdx < newGallery.length - 1) {
-                            this.performSwitch(newGallery[newIdx + 1], 1, "下一项 ⬇️");
-                        } else {
-                            let currentLastSrc = newGallery[newGallery.length - 1]?.src || 'video';
-                            if (currentLastSrc !== previousLastSrc && currentLastSrc !== this.state.currentSrc) {
-                                this.performSwitch(newGallery[0], 1, "下一项 ⬇️");
-                            } else {
-                                this.render.showToast("🚧 到底啦！没有更多内容了");
-                            }
-                        }
-                        window.__mix01State.isFetchingMore = false;
-                    }); 
-                }
-            } else {
-                if (currentIndex > 0) {
-                    this.performSwitch(galleryImages[currentIndex - 1], -1, "⬆️ 上一项");
-                } else {
-                    window.__mix01State.isFetchingMore = true;
-                    this.render.showToast("⏳ 正在向上翻阅...");
-                    
-                    let previousFirstSrc = galleryImages[0] ? (galleryImages[0].src || 'video') : null;
-                    
-                    this.state._galleryCacheDirty = true;
-                    
-                    window.scrollBy({ top: -window.innerHeight * 1.5, behavior: 'smooth' });
-                    
-                    this.waitForScrollEnd(() => {
-                        const newGallery = this.getGalleryImages();
-                        if (newGallery.length === 0) {
-                            this.render.showToast("🚧 到顶啦！");
-                            window.__mix01State.isFetchingMore = false;
-                            return;
-                        }
-
-                        let newIdx = newGallery.indexOf(this.state.currentMedia);
-                        if (newIdx === -1) newIdx = newGallery.findIndex(media => (media.src||'video') === this.state.currentSrc);
-                        
-                        if (newIdx !== -1 && newIdx > 0) {
-                            this.performSwitch(newGallery[newIdx - 1], -1, "⬆️ 上一项");
-                        } else {
-                            let currentFirstSrc = newGallery[0].src || 'video';
-                            if (currentFirstSrc !== previousFirstSrc && currentFirstSrc !== this.state.currentSrc) {
-                                this.performSwitch(newGallery[newGallery.length - 1], -1, "⬆️ 上一项");
-                            } else {
-                                this.render.showToast("🚧 真的到顶啦！");
-                            }
-                        }
-                        window.__mix01State.isFetchingMore = false;
-                    });
-                }
-            }
-            e.preventDefault(); 
-            return; 
+            const direction = (k === 'arrowdown') ? 1 : -1;
+            e.preventDefault();
+            this._navigateImmersive(direction);
+            return;
         }
         
         if (up) { 
