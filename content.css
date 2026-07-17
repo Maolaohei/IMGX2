@@ -2,7 +2,7 @@
 
 :root {
     --mix01-bg-immersive: rgba(10, 10, 10, 0.75);
-    --mix01-blur-radius: 16px;
+    --mix01-blur-radius: 0px;
     --mix01-accent: #1da1f2;
     --mix01-text: rgba(255, 255, 255, 0.95);
     --mix01-ease-spring: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -52,7 +52,8 @@
     backface-visibility: hidden !important;
     transform-style: preserve-3d !important;
     contain: paint layout !important;
-    transition: transform 0.15s cubic-bezier(0.1, 0.9, 0.2, 1), opacity 0.25s ease-out !important;
+    /* Keep opacity fade only. Transform transitions fight rAF physics pan/zoom. */
+    transition: opacity 0.18s ease-out !important;
 }
 
 /* 🚀 核心优化 3：仅在查看器激活（带有 .is-active）时提升合成层，避开静态 will-change 导致的显存泄露 */
@@ -67,9 +68,10 @@
 #img-zoom-pro-viewer-xyz.mode-immersive {
     width: 100vw !important; 
     height: 100vh !important;
-    background-color: var(--mix01-bg-immersive) !important;
-    backdrop-filter: blur(var(--mix01-blur-radius)) saturate(180%) !important;
-    -webkit-backdrop-filter: blur(var(--mix01-blur-radius)) saturate(180%) !important;
+    background-color: rgba(0, 0, 0, 0.92) !important;
+    /* Drop full-viewport backdrop-filter: major GPU/compositor cost on long sessions. */
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
     pointer-events: auto !important;
 }
 
@@ -77,8 +79,8 @@
 #img-zoom-pro-viewer-xyz.mode-partial {
     border: 1px solid rgba(255, 255, 255, 0.15) !important;
     border-radius: 12px !important;
-    background-color: rgba(20, 20, 20, 0.85) !important;
-    backdrop-filter: blur(10px) !important;
+    background-color: rgba(16, 16, 16, 0.92) !important;
+    backdrop-filter: none !important;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7), inset 0 1px 1px rgba(255, 255, 255, 0.1) !important;
 }
 
@@ -86,8 +88,8 @@
 #img-zoom-pro-viewer-xyz.mode-full-follow {
     border: 1px solid rgba(255, 255, 255, 0.2) !important;
     border-radius: 8px !important;
-    background-color: rgba(15, 15, 15, 0.92) !important;
-    backdrop-filter: blur(8px) !important;
+    background-color: rgba(12, 12, 12, 0.94) !important;
+    backdrop-filter: none !important;
     box-shadow: var(--mix01-shadow-ambient) !important;
 }
 

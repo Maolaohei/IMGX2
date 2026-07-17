@@ -152,7 +152,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 document.body.appendChild(this.elements.toast);
                 if (!document.getElementById('mix01-ctx-menu'))      document.body.appendChild(this.elements.ctxMenu);
                 if (!document.getElementById('mix01-gallery-counter')) document.body.appendChild(this.elements.counter);
-                this._enforceTopLayer();
+                this._enforceTopLayer(true);
             }
         });
         const startGuard = () => this.domGuard.observe(document.body, { childList: true });
@@ -160,7 +160,11 @@ window.Mix01MediaRenderer = class MediaRenderer {
         else document.addEventListener('DOMContentLoaded', startGuard, { once: true });
     }
 
-    _enforceTopLayer() {
+    _enforceTopLayer(force = false) {
+        // Hot layout path calls this often; skip redundant style writes.
+        const now = performance.now();
+        if (!force && this._lastTopLayerAt && (now - this._lastTopLayerAt) < 800) return;
+        this._lastTopLayerAt = now;
         this.elements.viewer.style.setProperty('z-index', '2147483647', 'important');
         this.elements.toast.style.setProperty('z-index',  '2147483647', 'important');
         if (this.elements.ctxMenu)  this.elements.ctxMenu.style.setProperty('z-index',  '2147483647', 'important');
@@ -442,7 +446,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 if (singleToast._mix01Token !== token) return;
                 this._retireToast(singleToast, false);
             }, 180);
-        }, 280);
+        }, 900);
     }
 
     _retireToast(toast, immediate) {
@@ -517,6 +521,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     hide() {
+        this._immersiveShellReady = false;
         this.elements.viewer.style.setProperty('display', 'none', 'important');
 
         this.setStyles(this.elements.viewer, { cursor: 'default', 'pointer-events': 'none' });
@@ -890,13 +895,19 @@ window.Mix01MediaRenderer = class MediaRenderer {
         };
 
         if (this.cfg.state.isImmersive) {
-            this.setStyles(this.elements.viewer, {
-                display: 'block', position: 'fixed', width: '100vw', height: '100vh',
-                left: '0px', top: '0px', 'background-color': 'rgba(0,0,0,0.95)',
-                'background-image': 'none', border: 'none', 'border-radius': '0',
-                'pointer-events': 'auto', transform: 'none', overflow: 'hidden'
-            });
-            this._enforceTopLayer();
+            // Only set shell styles when first entering immersive or after hide().
+            if (!this._immersiveShellReady) {
+                this.setStyles(this.elements.viewer, {
+                    display: 'block', position: 'fixed', width: '100vw', height: '100vh',
+                    left: '0px', top: '0px', 'background-color': 'rgba(0,0,0,0.92)',
+                    'background-image': 'none', border: 'none', 'border-radius': '0',
+                    'pointer-events': 'auto', transform: 'none', overflow: 'hidden'
+                });
+                this._enforceTopLayer(true);
+                this._immersiveShellReady = true;
+            } else {
+                this.setStyle(this.elements.viewer, 'display', 'block');
+            }
 
             let vNw = isRotated ? nh : nw;
             let vNh = isRotated ? nw : nh;
@@ -1206,8 +1217,13 @@ window.Mix01MediaRenderer = class MediaRenderer {
                         window.__mix01State = window.__mix01State || {};
                         window.__mix01State.relationHudProbed = window.__mix01State.relationHudProbed || {};
                         const probedAt = window.__mix01State.relationHudProbed[states.authorName] || 0;
-                        if (Date.now() - probedAt > 60_000) {
-                            window.__mix01State.relationHudProbed[states.authorName] = Date.now();
+                        if (Date.now() - probedAt > 90_000) {
+                            const probeMap = window.__mix01State.relationHudProbed;
+                            probeMap[states.authorName] = Date.now();
+                            const pkeys = Object.keys(probeMap);
+                            if (pkeys.length > 80) {
+                                for (let i = 0; i < pkeys.length - 80; i++) delete probeMap[pkeys[i]];
+                            }
                             try {
                                 const probed = await adapter.probeRelation(container, currentMedia, false);
                                 if (this._pendingHudSrc !== currentSrc) return;
@@ -1288,14 +1304,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
         this.setStyle(this.elements.hint, 'opacity', '1');
 
         clearTimeout(this.hudState.hintTimer);
+        // Let users read status after phantom actions; idle controller still fades later.
         this.hudState.hintTimer = setTimeout(() => {
             this.setStyle(this.elements.hint, 'opacity', '0');
-            setTimeout(() => {
-                if (this.elements.hint.style.opacity === '0') {
-                    this.setStyle(this.elements.hint, 'display', 'none');
-                }
-            }, 300);
-        }, 750);
+        }, 1800);
     }
 
     setHUDOpacity(opacity) {
@@ -1304,20 +1316,14 @@ window.Mix01MediaRenderer = class MediaRenderer {
             this.elements.counter,
             this.elements.hint
         ];
+        // Keep nodes mounted; opacity-only hide avoids layout thrash when cursor resumes.
         hudElements.forEach(el => {
-            if (el) {
-                el.style.setProperty('transition', 'opacity 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)', 'important');
-                el.style.setProperty('opacity', opacity, 'important');
-                
-                if (opacity === '0') {
-                    setTimeout(() => {
-                        if (el.style.opacity === '0') {
-                            el.style.setProperty('display', 'none', 'important');
-                        }
-                    }, 400);
-                } else {
-                    el.style.setProperty('display', 'block', 'important');
-                }
+            if (!el) return;
+            el.style.setProperty('transition', 'opacity 0.35s cubic-bezier(0.2, 0.8, 0.2, 1)', 'important');
+            el.style.setProperty('opacity', opacity, 'important');
+            el.style.setProperty('pointer-events', 'none', 'important');
+            if (opacity !== '0' && el.style.display === 'none') {
+                el.style.setProperty('display', 'block', 'important');
             }
         });
     }

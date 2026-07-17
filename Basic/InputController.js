@@ -338,9 +338,10 @@ window.Mix01InputController = class InputController {
                 return;
             }
 
-            this.physics.currentZoom = lerp(this.physics.currentZoom, this.physics.targetZoom, 0.25);
-            this.physics.currentPanX = lerp(this.physics.currentPanX, this.physics.targetPanX, 0.25);
-            this.physics.currentPanY = lerp(this.physics.currentPanY, this.physics.targetPanY, 0.25);
+            // Slightly snappier settle reduces lingering rAF frames without overshoot.
+            this.physics.currentZoom = lerp(this.physics.currentZoom, this.physics.targetZoom, 0.32);
+            this.physics.currentPanX = lerp(this.physics.currentPanX, this.physics.targetPanX, 0.32);
+            this.physics.currentPanY = lerp(this.physics.currentPanY, this.physics.targetPanY, 0.32);
 
             this.updateRender();
             this._physicsFrameId = requestAnimationFrame(loop);
@@ -596,6 +597,8 @@ window.Mix01InputController = class InputController {
         // 页面底层的鼠标追踪（用于悬停发现和速度向量计算，保持不变）
         document.addEventListener('mousemove', (e) => {
             window.lastMouseX = e.clientX; window.lastMouseY = e.clientY;
+            // Keep latest event sample for rAF; never process a stale closure.
+            this._latestMouseEvent = e;
             const now = performance.now();
             const dt = now - this._mouseVector.timestamp;
             if (dt > 10) {
@@ -608,7 +611,8 @@ window.Mix01InputController = class InputController {
             }
             if (!this.state.isTicking) {
                 window.requestAnimationFrame(() => {
-                    this.handleMouseMove(e);
+                    const latest = this._latestMouseEvent || e;
+                    this.handleMouseMove(latest);
                     this.state.isTicking = false;
                 });
                 this.state.isTicking = true;
@@ -677,9 +681,33 @@ window.Mix01InputController = class InputController {
             });
         }, { signal: this._eventSignalController.signal });
 
-        window.addEventListener('blur', () => this.hideViewer(), { signal: this._eventSignalController.signal });
+        // Immersive sessions must survive Alt-Tab / DevTools blur; only close non-immersive lens.
+        window.addEventListener('blur', () => {
+            if (!this.cfg.state.isImmersive) this.hideViewer();
+        }, { signal: this._eventSignalController.signal });
         document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'hidden') this.hideViewer();
+            if (document.visibilityState === 'hidden') {
+                if (this.cfg.state.isImmersive) {
+                    // Pause expensive work while tab is hidden, but keep session state.
+                    this._killPhysicsLoop();
+                    if (this.render?.videoState?.isRunning && this.state.currentMedia?.tagName === 'VIDEO') {
+                        try { this.state.currentMedia.pause(); } catch (e) {}
+                        try { this.render.elements.videoClone?.pause(); } catch (e) {}
+                    }
+                    return;
+                }
+                this.hideViewer();
+                return;
+            }
+
+            // Resume immersive video playback when tab becomes active again.
+            if (this.cfg.state.isImmersive && this.state.isViewerVisible &&
+                this.state.currentMedia?.tagName === 'VIDEO' &&
+                !window.__mix01State?.userPaused) {
+                try { this.state.currentMedia.play().catch(() => {}); } catch (e) {}
+                try { this.render.elements.videoClone?.play()?.catch(() => {}); } catch (e) {}
+                this.updateRender();
+            }
         }, { signal: this._eventSignalController.signal });
     }
 
@@ -689,6 +717,13 @@ window.Mix01InputController = class InputController {
         if (this._globalDomObserver) this._globalDomObserver.disconnect();
         if (this.mediaObserver) this.mediaObserver.disconnect();
         if (this.mediaIO) this.mediaIO.disconnect();
+        if (this._preloadTimer) { clearTimeout(this._preloadTimer); this._preloadTimer = null; }
+        if (this._hoverDelayTimer) { clearTimeout(this._hoverDelayTimer); this._hoverDelayTimer = null; }
+        if (this._cursorHideTimer) { clearTimeout(this._cursorHideTimer); this._cursorHideTimer = null; }
+        if (this._hudIdleTimer) { clearTimeout(this._hudIdleTimer); this._hudIdleTimer = null; }
+        if (this._wheelToastTimer) { clearTimeout(this._wheelToastTimer); this._wheelToastTimer = null; }
+        if (this._cancelScrollWait) { this._cancelScrollWait(); this._cancelScrollWait = null; }
+        this._killPhysicsLoop();
 
         this.hideViewer();
 
@@ -699,13 +734,21 @@ window.Mix01InputController = class InputController {
         this.preloadedUrls.clear();
         this.preloadedUrlsQueue.length = 0;
         this.visibleMediaElements.clear();
+        this._latestMouseEvent = null;
+        this._scanQueue = [];
+        this._scanTimer = null;
     }
 
     getMediaUnderCursor(clientX, clientY, target) {
-        for (let el of Array.from(this.visibleMediaElements)) {
-            if (!el.isConnected) {
-                this.mediaIO.unobserve(el);
-                this.visibleMediaElements.delete(el);
+        // Opportunistic prune: only occasionally scan the full visible set.
+        const now = performance.now();
+        if (!this._lastVisiblePrune || now - this._lastVisiblePrune > 1200) {
+            this._lastVisiblePrune = now;
+            for (const el of this.visibleMediaElements) {
+                if (!el.isConnected) {
+                    this.mediaIO.unobserve(el);
+                    this.visibleMediaElements.delete(el);
+                }
             }
         }
 
@@ -719,13 +762,19 @@ window.Mix01InputController = class InputController {
         let minArea = Infinity;
 
         for (const el of elementsUnderCursor) {
-            if (el.id.includes('xyz') || el.id.includes('mix01')) continue;
+            const id = el.id || '';
+            if (id.includes('xyz') || id.includes('mix01')) continue;
 
             if ((el.tagName === 'IMG' || el.tagName === 'VIDEO') && this.visibleMediaElements.has(el)) {
                 if (!el.src && el.tagName !== 'VIDEO') continue;
 
-                const rect = el.getBoundingClientRect(); 
-                const area = rect.width * rect.height;
+                // Prefer layout boxes already known to the IO set; avoid rect read for tiny candidates later.
+                const w = el.clientWidth || 0;
+                const h = el.clientHeight || 0;
+                const area = (w > 0 && h > 0) ? (w * h) : (() => {
+                    const rect = el.getBoundingClientRect();
+                    return rect.width * rect.height;
+                })();
                 if (area < minArea) {
                     minArea = area;
                     found = el;
@@ -749,14 +798,14 @@ window.Mix01InputController = class InputController {
 
             // HUD DOM reads are expensive; refresh at most ~3Hz while moving
             const nowHud = performance.now();
-            if (nowHud - this._lastHudRefresh > 320) {
+            if (nowHud - this._lastHudRefresh > 480) {
                 this._lastHudRefresh = nowHud;
                 this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
             }
             // Immersive layout only needs frequent updates while dragging/zooming
             if (this._pointerTracker.isDragging || this.physics.active || this.state.isZoomManuallyChanged) {
                 this.updateRender(e);
-            } else if (nowHud - this._lastImmersiveLayoutRect > 120) {
+            } else if (nowHud - this._lastImmersiveLayoutRect > 180) {
                 this._lastImmersiveLayoutRect = nowHud;
                 this.updateRender(e);
             }
@@ -770,7 +819,7 @@ window.Mix01InputController = class InputController {
 
         const now = performance.now();
         let media = this.state.lastFoundMedia;
-        if (now - this._lastDetectTime > 100) {
+        if (now - this._lastDetectTime > 120) {
             this._lastDetectTime = now;
             media = this.getMediaUnderCursor(e.clientX, e.clientY, e.target);
             
@@ -944,19 +993,38 @@ window.Mix01InputController = class InputController {
         }
 
         if (this._preloadTimer) clearTimeout(this._preloadTimer);
-        this.imgPool.releaseAll(this.activePreloads);
-        this.activePreloads.clear();
-        this.render.clearBlobCache(); 
-        
-        if (this._preloadImgInstancesMap) {
-            for (let [url, img] of this._preloadImgInstancesMap) {
-                if (url !== target.src && url !== initialSrc) {
+
+        // Soft gallery switch keeps warm caches; hard open still flushes active work.
+        if (!softSwitch) {
+            this.imgPool.releaseAll(this.activePreloads);
+            this.activePreloads.clear();
+            this.render.clearBlobCache();
+
+            if (this._preloadImgInstancesMap) {
+                for (let [url, img] of this._preloadImgInstancesMap) {
+                    if (url !== target.src && url !== initialSrc) {
+                        this.imgPool.release(img);
+                    }
+                }
+                this._preloadImgInstancesMap.clear();
+            }
+            this._preloadInFlight = 0;
+            this.preloadedUrls.clear();
+            this.preloadedUrlsQueue.length = 0;
+        } else {
+            // Only cancel preloads that are not the destination media.
+            const keepUrls = new Set([target.src, initialSrc, hdUrl].filter(Boolean));
+            if (this._preloadImgInstancesMap) {
+                for (const [url, img] of [...this._preloadImgInstancesMap.entries()]) {
+                    if (keepUrls.has(url)) continue;
+                    // Keep a small ring of already-warmed URLs for reverse navigation.
+                    if (this.preloadedUrls.has(url) && this.preloadedUrlsQueue.includes(url)) continue;
+                    this._preloadImgInstancesMap.delete(url);
+                    this.activePreloads.delete(img);
                     this.imgPool.release(img);
                 }
             }
-            this._preloadImgInstancesMap.clear();
         }
-        this._preloadInFlight = 0;
         
         this.state.isRenderingLock = false;
         this.state.lastRenderSignature = null;
@@ -1043,23 +1111,31 @@ window.Mix01InputController = class InputController {
         this.render.prepareMediaSurface(false);
         this.render.setStyle(this.render.elements.img, 'max-width', 'none'); 
         this.render.setStyle(this.render.elements.img, 'max-height', 'none');
-        this.render.setStyle(this.render.elements.img, 'opacity', '0');
 
         this.state.currentHdUrl = isAlreadyDownloaded ? hdUrl : null;
-        this.render.elements.img.src = initialSrc;
+
+        // Soft switch: if browser already has the bitmap (preload/cache hit), skip fade-to-zero flash.
+        const imgEl = this.render.elements.img;
+        const sameDecoded = softSwitch && imgEl.complete && imgEl.naturalWidth > 0 && (imgEl.currentSrc === initialSrc || imgEl.src === initialSrc);
+        if (!sameDecoded) {
+            this.render.setStyle(imgEl, 'opacity', softSwitch ? '0.01' : '0');
+            if (imgEl.src !== initialSrc) imgEl.src = initialSrc;
+        } else {
+            this.render.setStyle(imgEl, 'opacity', '1');
+        }
         this.state.isViewerVisible = true; 
         
-        this.render.elements.img.decode().then(() => {
+        const reveal = () => {
             if (this.state.renderRequestId === savedSessionId && this.state.currentSrc === target.src) {
                 this.render.setStyle(this.render.elements.img, 'opacity', '1');
                 this.updateRender(); 
             }
-        }).catch(() => {
-            if (this.state.renderRequestId === savedSessionId && this.state.currentSrc === target.src) {
-                this.render.setStyle(this.render.elements.img, 'opacity', '1');
-                this.updateRender();
-            }
-        });
+        };
+        if (sameDecoded) {
+            reveal();
+        } else {
+            this.render.elements.img.decode().then(reveal).catch(reveal);
+        }
 
         if (this.cfg.state.smallImageOptimization) {
             if (this.state.cachedRect.width <= 50 && this.state.cachedRect.height <= 50) { this.physics.targetZoom = 9.0; this.state.isSmallOptimized = true; }
@@ -2281,7 +2357,7 @@ window.Mix01InputController = class InputController {
             if (!this.cfg.state.isImmersive || window.__mix01State.isFetchingMore) return;
 
             const now = Date.now();
-            if (now - (this._lastKeySwitchTime || 0) < 140) {
+            if (now - (this._lastKeySwitchTime || 0) < 90) {
                 e.preventDefault();
                 return;
             }

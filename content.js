@@ -95,7 +95,23 @@
             state.followAuthorCache = trimObj(state.followAuthorCache, 60);
             state.hdUrlMap = trimObj(state.hdUrlMap, 120);
             state.blobToUrlMap = trimObj(state.blobToUrlMap, 40);
+            state.relationHudProbed = trimObj(state.relationHudProbed, 60);
             window.__mix01State = state;
+
+            // Bound detect/video caches that live outside __mix01State
+            const trimMap = (map, max) => {
+                if (!map || typeof map.size !== 'number' || map.size <= max) return;
+                const overflow = map.size - max;
+                let i = 0;
+                for (const key of map.keys()) {
+                    map.delete(key);
+                    if (++i >= overflow) break;
+                }
+            };
+            trimMap(window.__mix01DetectCache, 60);
+            trimMap(window.__mix01DetectInflight, 20);
+            trimMap(window.__mix01TwVideoCache, 40);
+            trimMap(window.__mix01PixivApiCache, 40);
             return;
         }
         // Hard prune clears ephemeral hover pointers

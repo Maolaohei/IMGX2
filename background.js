@@ -375,7 +375,8 @@ async function handleImmersiveDownload(request, sendResponse) {
                     }
                     chunks.push(value);
                     chunkCount++;
-                    if (chunkCount % 100 === 0) {
+                    // Keep SW alive on long streams without hammering storage every few KB.
+                    if (chunkCount % 250 === 0) {
                         await chrome.storage.local.get('_sw_keep_alive_').catch(() => {});
                     }
                 }

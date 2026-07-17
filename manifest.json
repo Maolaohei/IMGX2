@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Mix01 Immersive Engine Core",
-  "version": "3.3.0",
+  "version": "3.3.1",
   "description": "极客级流媒体沉浸浏览与下载引擎 (终极性能版)",
   "permissions": [
     "storage",
