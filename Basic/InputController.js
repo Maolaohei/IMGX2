@@ -790,6 +790,23 @@ window.Mix01InputController = class InputController {
         this.resetImmersiveHUDTimeout();
 
         if (this.cfg.state.isImmersive && this.state.isViewerVisible) {
+            // X 虚拟列表翻页/滚动中会回收视口外节点：currentMedia 失联时静默
+            // 重定位到画廊中的同身份节点，绝不走 hideViewer（沉浸会话保持）。
+            if (this.state.currentMedia && !this.state.currentMedia.isConnected) {
+                const gallery = this.getGalleryImages();
+                const key = this._mediaKey(this.state.currentMedia);
+                let reloc = null;
+                for (const m of gallery) {
+                    if (this._mediaKey(m) === key) { reloc = m; break; }
+                }
+                if (reloc && this.state.currentSrc) {
+                    // 同身份节点重绑，保持画面不闪断
+                    this.state.currentMedia = reloc;
+                } else {
+                    // 找不到同身份节点：保持现状等待边界 fetch 补充，
+                    // 不做任何隐藏动作（用户显式退出才结束会话）。
+                }
+            }
             this.render.elements.viewer.style.setProperty('cursor', 'default', 'important');
             clearTimeout(this._cursorHideTimer);
             this._cursorHideTimer = setTimeout(() => {
@@ -824,7 +841,9 @@ window.Mix01InputController = class InputController {
             media = this.getMediaUnderCursor(e.clientX, e.clientY, e.target);
             
             if (media && (media !== this.state.currentMedia || (media.src||'video') !== this.state.currentSrc)) {
-                if (Date.now() - this.state.keyboardSwitchTime > 500) return;
+                // 键盘切换后 500ms 内抑制悬停探测（防抢焦点）；窗口过后必须恢复，
+                // 否则放大镜 hover 触发永久失效。守卫方向不得反转（fa8fc92 曾写反）。
+                if (Date.now() - this.state.keyboardSwitchTime < 500) return;
                 if (!this.isMediaFiltered(media)) { this.triggerZoom(media); }
                 return;
             }
@@ -1739,6 +1758,11 @@ window.Mix01InputController = class InputController {
         await new Promise(resolve => this.waitForScrollEnd(resolve));
 
         try {
+            // fetch 等待期间用户可能已显式退出沉浸/关闭 viewer：
+            // 此时绝不能 performSwitch 重新拉起 viewer（否则黑幕复活、状态错乱）。
+            if (!this.cfg.state.isImmersive || !this.state.isViewerVisible) {
+                return false;
+            }
             this.state._galleryCacheDirty = true;
             const newGallery = this.getGalleryImages();
             if (!newGallery.length) {
@@ -1914,6 +1938,8 @@ window.Mix01InputController = class InputController {
         } catch (e) {}
 
         this.waitForScrollEnd(() => {
+            // 滚动等待期间沉浸可能已被退出：不再刷新/复活 viewer
+            if (!this.cfg.state.isImmersive || !this.state.isViewerVisible) return;
             if (this.state.currentMedia === nextImg || this._mediaKey(this.state.currentMedia) === this._mediaKey(nextImg)) {
                 const newRect = nextImg.getBoundingClientRect();
                 window.lastMouseX = newRect.left + newRect.width / 2;
@@ -2212,6 +2238,11 @@ window.Mix01InputController = class InputController {
         }
 
         if (this.matchCombo(e, this.cfg.keys.immersive)) {
+            // 合成 Escape 守卫：dismissMenus 派发的 Escape 若恰好匹配用户自定义的
+            // 沉浸切换键（如裸 escape），不得触发进入/退出沉浸（双向误触）。
+            if (window.__mix01State && window.__mix01State.isDismissingMenu) {
+                return;
+            }
             e.preventDefault();
             if (this.cfg.state.isImmersive) {
                 this.exitImmersive();
@@ -2230,14 +2261,29 @@ window.Mix01InputController = class InputController {
                 this.render.showToast('🌌 开启沉浸音视频图库');
 
                 if (!this.state.currentMedia || !this.state.isViewerVisible) {
+                    // 沉浸会话保持原则：若本会话已在沉浸中（如 X 虚拟列表回收媒体后
+                    // 用户按切换键重定位），gallery 瞬空只提示不退出——避免翻页/懒加载
+                    // 间隙被误踢出沉浸。只有从未进入画廊时才退出。
                     const galleryImages = this.getGalleryImages();
                     if (galleryImages.length > 0) {
-                        const nextImg = galleryImages[0];
+                        // 页码起点：选视口中心最近的媒体（而非 gallery[0]），
+                        // 使进入沉浸时计数器从用户实际看到的媒体位置开始，而非恒为 1。
+                        const centerY = window.innerHeight / 2;
+                        let nextImg = galleryImages[0];
+                        let minDiff = Infinity;
+                        for (const m of galleryImages) {
+                            const r = m.getBoundingClientRect();
+                            const diff = Math.abs(r.top + r.height / 2 - centerY);
+                            if (diff < minDiff) { minDiff = diff; nextImg = m; }
+                        }
                         nextImg.scrollIntoView({ behavior: 'smooth', block: 'center' });
                         this.triggerZoom(nextImg);
-                    } else {
+                    } else if (!this._navTrail || this._navTrail.length === 0) {
+                        // 从未建立画廊（首次进入且页面无媒体）→ 退出
                         this.render.showToast("⚠️ 当前页面未发现可用媒体");
-                        this.exitImmersive(); 
+                        this.exitImmersive();
+                    } else {
+                        this.render.showToast("⏳ 媒体列表加载中，请稍候...");
                     }
                 } else {
                     this.render.handleImmersiveActivity(this.state.currentMedia, this.state.currentSrc, this.cfg.keys);
@@ -2335,6 +2381,11 @@ window.Mix01InputController = class InputController {
         }
         
         else if (e.key === 'Escape') {
+            // 合成 Escape（dismissMenus 关闭 X 菜单）：不得触发沉浸模式退出。
+            // 事件仍会正常派发到 X 自己的监听器（菜单照常关闭）。
+            if (window.__mix01State && window.__mix01State.isDismissingMenu) {
+                return;
+            }
             if (this.cfg.state.isImmersive) {
                 this.exitImmersive();
                 e.preventDefault(); return;

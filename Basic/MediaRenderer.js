@@ -730,6 +730,11 @@ window.Mix01MediaRenderer = class MediaRenderer {
             if (!window.__mix01State.userPaused && !videoEl.ended) {
                 if (videoEl.paused && videoEl.readyState >= 1) videoEl.play().catch(() => {});
                 if (vc.paused && vc.readyState >= 1) vc.play().catch(() => {});
+            } else {
+                // 用户暂停后压制 X 自身播放器的自动恢复（反-反暂停的逆操作）：
+                // X 的 React player 检测到视频在视口会自动 play()，必须持续压回。
+                if (!videoEl.paused) { try { videoEl.pause(); } catch (e) {} }
+                if (!vc.paused) { try { vc.pause(); } catch (e) {} }
             }
             this._videoKeepAliveId = setTimeout(() => {
                 if (!this.videoState.isRunning) return;

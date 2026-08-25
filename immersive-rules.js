@@ -325,6 +325,14 @@
         },
         // Open the tweet caret once to read Follow/Subscribe truth, then close. Session-cached per author.
         probeAuthorRelationViaMenu: async function (container, media, force = false) {
+            // 沉浸模式零菜单原则：自动探测绝不弹 caret「更多」菜单——菜单会抢
+            // 键盘焦点并导致沉浸黑幕被破坏/退出（用户实测反馈）。沉浸中只返回
+            // 当前 DOM/缓存可读状态（真实按钮 live 或 followAuthorCache），
+            // 订阅三态的菜单探测仅在非沉浸模式进行。
+            const immersive = !!(window.__mix01Engine?.config?.state?.isImmersive);
+            if (immersive && !force) {
+                return tools.resolveAuthorRelation(container, media);
+            }
             const article = (media && media.closest && media.closest('article')) ||
                 (container && container.closest && container.closest('article')) ||
                 container || null;
@@ -400,12 +408,18 @@
         },
         dismissMenus: function () {
             // Escape-only: never click body/viewer (immersive overlay would exit on background click).
+            // 合成 Escape 守卫：InputController 的 Escape 分支检查 isDismissingMenu，
+            // 合成 Escape 只用于关闭 X 菜单，绝不触发沉浸模式退出。
+            // dispatchEvent 是同步的：标志在派发期间为 true，派发完立即复位。
+            window.__mix01State = window.__mix01State || {};
+            window.__mix01State.isDismissingMenu = true;
             try {
                 document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
             } catch (e) {}
             try {
                 document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
             } catch (e) {}
+            window.__mix01State.isDismissingMenu = false;
             // Soft-close any open menus by re-clicking their caret if still open after a beat.
             // Avoid synthetic body clicks under immersive full-screen viewer.
         },
@@ -422,8 +436,31 @@
                 // pull the whole photo set so immersive can step photo1 -> photoN.
                 const allMedia = tools.collectCandidateMedia();
                 const viewportHeight = window.innerHeight;
-                const topBound = -viewportHeight * 2.5;
-                const bottomBound = viewportHeight * 3.5;
+                // 收集窗口以「当前媒体」为锚（而非视口）：边界滚动/翻页时窗口跟随
+                // 当前媒体滑动，当前媒体在窗口中的相对位置稳定 → 页码不因视口滑动而
+                // 重置跳变；新媒体仍会被窗口下方边界纳入，total 平滑增长。
+                // 无当前媒体（首次进入沉浸）时回退视口基准。
+                let anchorRect = null;
+                try {
+                    const cur = window.__mix01Engine?.controller?.state?.currentMedia;
+                    if (cur && cur.isConnected) {
+                        const r = cur.getBoundingClientRect();
+                        // 当前媒体滚出视口较远时（如退出沉浸后手动滚动再进入），把锚点
+                        // 中心夹回视口附近（±1.5vh ≥ 边界翻页位移 1.5vh，正常翻页不触发），
+                        // 避免锚定窗口整体偏离用户可见区域。
+                        const center = Math.max(Math.min((r.top + r.bottom) / 2, viewportHeight * 1.5), -viewportHeight * 1.5);
+                        anchorRect = {
+                            top: center - r.height / 2,
+                            bottom: center + r.height / 2
+                        };
+                    }
+                } catch (e) { /* non-fatal */ }
+                const topBound = anchorRect
+                    ? anchorRect.top - viewportHeight * 2.5
+                    : -viewportHeight * 2.5;
+                const bottomBound = anchorRect
+                    ? anchorRect.bottom + viewportHeight * 3.5
+                    : viewportHeight * 3.5;
 
                 const nearArticles = new Set();
                 const looseMedia = [];
@@ -576,8 +613,9 @@
                     if (author) window.__mix01State.followRelationCache[author] = rel;
                 };
 
-                const clickConfirmIfAny = async () => {
-                    await new Promise(r => setTimeout(r, 120));
+                const clickConfirmOnce = async () => {
+                    // 查一次取关确认按钮并点击（确认 sheet 可能延迟渲染，
+                    // 调用方在轮询循环里持续调用直到点到或超时）。
                     const confirm = document.querySelector('[data-testid="confirmationSheetConfirm"]');
                     if (confirm) { tools.forceClick(confirm); return true; }
                     const dialog = document.querySelector('[role="dialog"]');
@@ -610,14 +648,32 @@
                         }
                         if (!pick) continue;
                         tools.forceClick(pick.el);
-                        if (currentlyIn) await clickConfirmIfAny();
-                        // Give X a beat to flip the button label before we re-read.
-                        await new Promise(r => setTimeout(r, 180));
-                        const after = tools.resolveAuthorRelation(container, media);
-                        if (after && after.relation) {
-                            const inNow = after.isFollowed === true;
-                            remember(inNow, after.relation);
+                        // 轮询验证翻转（先等 React 渲染再读；取关确认 sheet 循环内持续点击）。
+                        // 只信 live 信号（liveRelation）——缓存回声会把取关谎报为已关注。
+                        let inNow = null;
+                        let afterLive = null;
+                        let confirmed = false;
+                        const verifyT0 = Date.now();
+                        while (Date.now() - verifyT0 < 1500) {
+                            if (currentlyIn && !confirmed) {
+                                confirmed = await clickConfirmOnce();
+                            }
+                            await new Promise(r => setTimeout(r, 150));
+                            const after = tools.resolveAuthorRelation(container, media);
+                            if (after && after.liveRelation) {
+                                inNow = after.isFollowed === true;
+                                afterLive = after;
+                                break;
+                            }
+                        }
+                        await tools.dismissMenus();
+                        if (inNow !== null) {
+                            remember(inNow, inNow ? (afterLive.relation || 'following') : 'follow');
                             return inNow;
+                        }
+                        if (currentlyIn && !confirmed) {
+                            // 取关确认未点到：诚实失败（不写缓存、不谎报）
+                            return null;
                         }
                         const nextIn = !currentlyIn;
                         const hint = currentlyIn
@@ -629,6 +685,10 @@
                     return null;
                 };
 
+                // 时间线推文无直接关注按钮（用户 DOM 实测：作者行只有 caret），
+                // 关注只能走 caret「更多」菜单：点开 → 文本匹配 Follow/Unfollow 项 →
+                // 点击 → dismissMenus 安全关闭（合成 Escape 有 isDismissingMenu 守卫，
+                // 不会触发沉浸模式退出）。
                 const toggleViaCaretMenu = async () => {
                     const caret = tools.findTweetCaret(article);
                     if (!caret) return null;
@@ -657,24 +717,49 @@
                     }
                     if (!targetBtn) { tools.dismissMenus(); return null; }
                     tools.forceClick(targetBtn);
-                    if (!willBeIn) await clickConfirmIfAny();
-                    else tools.dismissMenus();
-                    await new Promise(r => setTimeout(r, 180));
-                    const after = tools.resolveAuthorRelation(container, media);
-                    if (after && after.relation) {
-                        const inNow = after.isFollowed === true;
+                    // 取关：轮询点击确认 sheet（渲染慢不再漏点）；确认未点到 → 诚实失败。
+                    // 验证只信 live 翻转信号，缓存回声不得谎报（取关后仍显示已关注）。
+                    let confirmed = false;
+                    if (!willBeIn) {
+                        const confirmT0 = Date.now();
+                        while (Date.now() - confirmT0 < 1500 && !confirmed) {
+                            confirmed = await clickConfirmOnce();
+                            if (!confirmed) await new Promise(r => setTimeout(r, 150));
+                        }
+                        if (!confirmed) { tools.dismissMenus(); return null; }
+                    } else {
+                        tools.dismissMenus();
+                    }
+                    let inNow = null;
+                    let afterLive = null;
+                    const liveT0 = Date.now();
+                    while (Date.now() - liveT0 < 900) {
+                        await new Promise(r => setTimeout(r, 150));
+                        const after = tools.resolveAuthorRelation(container, media);
+                        if (after && after.liveRelation) {
+                            inNow = after.isFollowed === true;
+                            afterLive = after;
+                            break;
+                        }
+                    }
+                    await tools.dismissMenus();
+                    if (inNow !== null) {
                         // Menu may say Subscribe while live still only exposes Following.
                         const finalRel = (!inNow) ? 'follow'
-                            : (relationHint === 'subscribed' || after.relation === 'subscribed') ? 'subscribed'
-                            : (after.relation || relationHint || 'following');
+                            : (relationHint === 'subscribed' || afterLive.relation === 'subscribed') ? 'subscribed'
+                            : (afterLive.relation || relationHint || 'following');
                         remember(inNow, finalRel);
                         return inNow;
                     }
-                    remember(willBeIn, relationHint);
-                    return willBeIn;
+                    if (willBeIn || confirmed) {
+                        // 关注：菜单项点击已被处理；取关：确认已提交
+                        remember(willBeIn, willBeIn ? (relationHint || 'following') : 'follow');
+                        return willBeIn;
+                    }
+                    return null;
                 };
 
-                // Prefer in-tweet CTA; never click random primaryColumn buttons from other authors.
+                // Prefer in-tweet CTA (profile 页有直接按钮)；时间线无按钮时走 caret 菜单。
                 let result = await toggleViaDirectButton();
                 if (result === null) result = await toggleViaCaretMenu();
                 return result;
