@@ -37,8 +37,17 @@ window.Mix01Utils = {
 
         if (!url.includes('img-original/') && window.Mix01RuleEngine) {
             try {
-                const imgEl = document.querySelector(`img[src="${CSS.escape(url)}"], img[currentsrc="${CSS.escape(url)}"]`);
-                const hdUrl = await window.Mix01RuleEngine.getHighResUrl(imgEl, url);
+                // 反查顺序：精确 src 匹配的 img/video → 沉浸 viewer 当前媒体（带 _mixStatusId 绑定，
+                // 对 X 视频解析最可靠）→ 兜底 null（rules-engine 已判空，走 URL 正则/页面路径降级）
+                const esc = CSS.escape(url);
+                let mediaEl = document.querySelector(`img[src="${esc}"], img[currentsrc="${esc}"], video[src="${esc}"]`);
+                if (!mediaEl) {
+                    const cur = window.__mix01Engine?.controller?.state?.currentMedia;
+                    if (cur && cur.isConnected && ((cur.src || '') === url || (cur.currentSrc || '') === url)) {
+                        mediaEl = cur;
+                    }
+                }
+                const hdUrl = await window.Mix01RuleEngine.getHighResUrl(mediaEl, url);
                 if (hdUrl) url = hdUrl;
             } catch (e) {
                 console.warn("Mix01 高清 URL 升级失败，降级使用原链接", e);

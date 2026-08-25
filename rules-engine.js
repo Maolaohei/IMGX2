@@ -245,17 +245,18 @@ const tools = {
                     selectors: 'video',
                     processor: async (trigger) => {
                         // 🚀 核心改进：优先提取被永久绑定的 _mixStatusId，防止 React 虚拟重卷导致 article 丢失
-                        let statusId = trigger._mixStatusId;
+                        // trigger 可能为 null（下载链路按 src 反查 DOM 失败时），全程判空。
+                        let statusId = (trigger && trigger._mixStatusId) || '';
                         if (!statusId) {
                             const urlMatch = window.location.pathname.match(/\/status\/(\d+)/);
                             if (urlMatch) {
                                 statusId = urlMatch[1];
-                            } else {
+                            } else if (trigger && trigger.closest) {
                                 const statusLink = trigger.closest('article')?.querySelector('a[href*="/status/"]');
-                                if (statusLink) statusId = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
+                                if (statusLink) statusId = statusLink.href.split('/status/').pop().split(/[/?#]/).shift();
                             }
                         }
-                        if (!statusId) return trigger.src || '';
+                        if (!statusId) return (trigger && trigger.src) || '';
 
                         const cachedUrl = LRUCache.get('__mix01TwVideoCache', statusId);
                         if (cachedUrl) return cachedUrl;
@@ -275,14 +276,14 @@ const tools = {
                                 chrome.runtime.sendMessage({ action: "fetchTwitterGraphQL", statusId: statusId }, resolve);
                             });
 
-                            if (!response || !response.success || !response.data) return trigger.src || '';
+                            if (!response || !response.success || !response.data) return (trigger && trigger.src) || '';
 
-                            const finalUrl = extractVideoUrlFromTweet(response.data) || trigger.src || '';
+                            const finalUrl = extractVideoUrlFromTweet(response.data) || (trigger && trigger.src) || '';
                             if (finalUrl) {
                                 LRUCache.set('__mix01TwVideoCache', statusId, finalUrl, 30);
                             }
                             return finalUrl;
-                        } catch (e) { return trigger.src || ''; }
+                        } catch (e) { return (trigger && trigger.src) || ''; }
                     }
                 }
             ]
