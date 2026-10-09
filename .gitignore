@@ -1,9 +1,9 @@
-# --- 原有 ---
+# ===== 原有 =====
 .github/agents/performance-optimizer.agent.md
 node_modules/
 package-lock.json
 
-# --- 扩展可加载性：Chromium 拒绝扩展根目录下任何 `_` 前缀条目 ---
+# ===== 扩展可加载性：Chromium 拒绝扩展根目录下任何 `_` 前缀条目 =====
 # （`_metadata` 只在「内容恰好是 Chrome 自己生成的 DNR 索引规则集」时才豁免；
 #  一旦里面出现其它文件，加载会直接报
 #  "Cannot load extension with file or directory name _metadata. Filenames
@@ -11,8 +11,16 @@ package-lock.json
 #  因此 Chrome 托管的 _metadata/ 永不入库，测试工件一律放 test-artifacts/。）
 _metadata/
 
-# 测试产物（perf/e2e/可加载性报告与基线），非 `_` 前缀，不影响扩展加载
+# ===== 测试 / 构建产物（放扩展根目录但非 `_` 前缀，不影响加载）=====
 test-artifacts/
-
-# e2e / chrome-devtools 本地 profile
 .e2e-profile/
+
+# 打包产物（重新打包时排除 _metadata/ test-artifacts/ node_modules/ .git/ .reasonix/）
+IMGX2.zip
+*.crx
+*.pem
+
+# ===== 本机工具配置与状态（含绝对路径 / 会话状态，机器相关）=====
+.mcp.json
+reasonix.toml
+.reasonix/
