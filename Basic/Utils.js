@@ -138,14 +138,18 @@ window.Mix01Utils = {
         }
     },
 
-    async _downloadLocallyFallback(url, renderer, isVideo) {
+    async _downloadLocallyFallback(url, renderer, isVideo = false) {
         try {
             const response = await fetch(url, { mode: 'cors' });
             if (!response.ok) throw new Error("HTTP " + response.status);
             const blob = await response.blob();
+            if (!blob || blob.size === 0) throw new Error("empty payload");
             this._saveBlobLocally(blob, url);
+            renderer?.showToast(isVideo ? "✅ 已通过页面通道保存当前视频" : "✅ 已通过页面通道保存图片");
+            return true;
         } catch (err) {
-            renderer.showToast("❌ 降级下载失败，请尝试刷新当前页面");
+            renderer?.showToast("❌ 降级下载失败，请尝试刷新当前页面");
+            return false;
         }
     },
 

@@ -2,6 +2,8 @@
 // 背景：Utils._resolveDownloadUrl 按 src 反查 DOM 失败时传 null，
 // X 视频 processor 直接读 trigger._mixStatusId 导致
 // "Cannot read properties of null (reading '_mixStatusId')"。
+// 追加回归：null trigger + 图片 src 不得被 X 视频规则劫持成视频直链
+// （图片下载会先升到 name=orig，再经 _resolveDownloadUrl 二次校验）。
 const RESULTS = [];
 function log(name, pass, extra = '') {
     RESULTS.push({ name, pass });
@@ -76,6 +78,16 @@ if (!engine) { console.log('Mix01RuleEngine 未暴露'); process.exit(9); }
         msg = `降级返回=${r}`;
     } catch (e) { ok = false; msg = e.message; }
     log('R5 绑定节点解析失败时降级到 trigger.src', ok, String(msg).slice(0, 80));
+
+    // 场景6：同页已有视频缓存时，null trigger + 图片 URL 不得被视频规则劫持
+    // （rules-engine 内部 LRUCache 实为 window.__mix01TwVideoCache: Map<statusId, mp4>）
+    global.window.__mix01TwVideoCache = new Map([['1234567', 'https://video.twimg.com/amp/hijack.mp4']]);
+    try {
+        const r = await engine.getHighResUrl(null, 'https://pbs.twimg.com/media/ABC123?format=jpg&name=orig');
+        ok = r.includes('pbs.twimg.com') && !r.includes('video.twimg.com');
+        msg = r;
+    } catch (e) { ok = false; msg = e.message; }
+    log('R6 图片 URL 不被 X 视频规则劫持（防胖持）', ok, String(msg).slice(0, 90));
 
     const failed = RESULTS.filter(r => !r.pass);
     console.log(`\n===== 高清升级判空回归: ${RESULTS.length - failed.length}/${RESULTS.length} PASS =====`);

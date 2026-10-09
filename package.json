@@ -4,11 +4,15 @@
   "description": "![Version](https://img.shields.io/badge/version-2026.04-blue.svg)\r ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Edge-green.svg)\r ![License](https://img.shields.io/badge/license-MIT-orange.svg)",
   "main": "background.js",
   "scripts": {
-    "test": "node scripts/verify-gallery-anchor.js && node scripts/verify-escape-guard.js && node scripts/verify-unfollow.js && node scripts/verify-hover-guard.js && node scripts/verify-immersive-guard.js && node scripts/verify-safe-probe.js && node scripts/verify-immersive-regression.js && node scripts/verify-hd-null-trigger.js",
+    "test": "node scripts/verify-loadable.js && node scripts/verify-gallery-anchor.js && node scripts/verify-escape-guard.js && node scripts/verify-unfollow.js && node scripts/verify-hover-guard.js && node scripts/verify-immersive-guard.js && node scripts/verify-safe-probe.js && node scripts/verify-immersive-regression.js && node scripts/verify-hd-null-trigger.js && node scripts/verify-media-identity.js && node scripts/e2e-context-download.js",
+    "test:loadable": "node scripts/verify-loadable.js",
+    "test:loadable:static": "node scripts/verify-loadable.js --static",
     "test:e2e:x": "node scripts/e2e-immersive-x.js",
     "test:e2e:deep": "node scripts/e2e-immersive-deep.js",
     "test:e2e:video": "node scripts/e2e-video-pause.js",
-    "test:e2e:download": "node scripts/e2e-download-verify.js"
+    "test:e2e:download": "node scripts/e2e-download-verify.js",
+    "test:e2e:context-download": "node scripts/e2e-context-download.js",
+    "test:perf": "node scripts/perf-hotpath.js"
   },
   "repository": {
     "type": "git",

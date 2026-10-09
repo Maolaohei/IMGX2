@@ -243,7 +243,14 @@ const tools = {
                 { srcRegExp: '(\\w+\\.twimg\\.com/media/[^?#:]+)(@IMG@)(?::(?:large|medium|small|thumb))?$', processor: '$1$2:orig' },
                 {
                     selectors: 'video',
-                    processor: async (trigger) => {
+                    processor: async (trigger, src) => {
+                        // 🚀 防胖持：无触发元素（下载链路按 src 反查 DOM 失败）时，
+                        // 只有 src 本身像视频才允许走视频解析，否则会把同页图片下载劫持成视频直链。
+                        if (!trigger || !trigger.tagName) {
+                            const hint = src || (trigger && (trigger.currentSrc || trigger.src)) || '';
+                            const looksLikeVideo = hint.startsWith('blob:') || /\.(?:mp4|webm|mov|mkv|m3u8)(?:[?#]|$)/i.test(hint);
+                            if (!looksLikeVideo) return '';
+                        }
                         // 🚀 核心改进：优先提取被永久绑定的 _mixStatusId，防止 React 虚拟重卷导致 article 丢失
                         // trigger 可能为 null（下载链路按 src 反查 DOM 失败时），全程判空。
                         let statusId = (trigger && trigger._mixStatusId) || '';

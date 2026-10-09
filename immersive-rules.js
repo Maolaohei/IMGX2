@@ -28,7 +28,9 @@
             // Prefer a broader DOM sample than only currently-intersecting nodes.
             // Visible-set alone reshuffles when users reverse scroll direction.
             const engineVisible = window.__mix01Engine?.controller?.visibleMediaElements;
-            const fromDom = Array.from(document.querySelectorAll('article img, article video, img, video'));
+            // 注意：原选择器 'article img, article video, img, video' 会为每张图产生两条匹配，
+            // 使结果集翻倍、Set 去重与前置 QSA 成本翻倍；'img, video' 已覆盖前者。
+            const fromDom = Array.from(document.querySelectorAll('img, video'));
             if (!engineVisible || engineVisible.size === 0) return fromDom;
 
             const merged = [];
@@ -466,6 +468,15 @@
                 const looseMedia = [];
                 const videoRectsByArticle = new WeakMap();
 
+                // 一次重建期间布局不会变：同一元素只读一次 rect。
+                // 主循环、文章展开、视频封面检测都会读同一批节点，原实现重复读取约 2 倍。
+                const rectCache = new Map();
+                const rectOf = (el) => {
+                    let r = rectCache.get(el);
+                    if (r === undefined) { r = el.getBoundingClientRect(); rectCache.set(el, r); }
+                    return r;
+                };
+
                 const markArticle = (article, media, rect) => {
                     if (!article) {
                         looseMedia.push(media);
@@ -492,7 +503,7 @@
                     if (media.id === 'zoom-img-xyz' || media.id === 'zoom-img-buffer-xyz' || media.id === 'zoom-video-xyz') continue;
                     if (tools.isUtilityImage(media)) continue;
 
-                    const rect = media.getBoundingClientRect();
+                    const rect = rectOf(media);
                     // Seed with near-viewport media; multi-image expansion happens below.
                     if (rect.top < topBound || rect.bottom > bottomBound) continue;
                     if (rect.width <= 50 || rect.height <= 50) continue;
@@ -509,7 +520,7 @@
                     if (media.id === 'zoom-img-xyz' || media.id === 'zoom-img-buffer-xyz' || media.id === 'zoom-video-xyz') return;
                     if (tools.isUtilityImage(media)) return;
 
-                    const rect = media.getBoundingClientRect();
+                    const rect = rectOf(media);
                     const src = media.currentSrc || media.src || '';
                     const isNamedMediaAsset = media.tagName === 'VIDEO' ||
                         /\/media\//.test(src) || src.includes('twimg.com/media') || src.includes('pbs.twimg.com/media');
@@ -562,7 +573,7 @@
                     for (const m of mediaList) {
                         if (m.tagName === 'VIDEO') {
                             if (!videoRectsByArticle.has(article)) videoRectsByArticle.set(article, []);
-                            videoRectsByArticle.get(article).push(m.getBoundingClientRect());
+                            videoRectsByArticle.get(article).push(rectOf(m));
                         }
                     }
                     for (const m of mediaList) pushMedia(m, article);

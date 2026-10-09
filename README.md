@@ -21,6 +21,11 @@
 * **智能加载状态机**：无底图时显示推特蓝居中 Loading 环；高清图解析时右上角触发“电池充电式”扫描流光特效。
 * **自动翻页引擎**：使用左右方向键浏览时，到达底部会自动触发页面滚动并加载更多动态，真正实现“无限续杯”。
 
+### 📥 原生右键菜单下载 (X / Twitter 等)
+* 在 **图片 / 视频** 上右键 → `🌅 Mix01 引擎助手` → `📥 下载视频/图片`，无需进入沉浸模式。
+* 视频复用 `D` 键同一条链路：站点原生按钮 → GraphQL / React Fiber 逆向 → 最高码率 `.mp4`；图片复用高清原图链路（twimg `name=orig`）。
+* 视频 `src` 为 `blob:` 假直链时自动降级为页面内直抓当前流；彻底解析失败时只记录失败，不会生成损坏文件。
+
 ### 👻 幽灵交互系统 (Phantom Interaction)
 在完全黑屏的沉浸模式下，无需退出即可完成社交操作：
 * **无痕点赞 (`L`)**：自动寻找并触发当前媒体所属推文/作品的 Like 按钮。
@@ -74,6 +79,21 @@
 4. 点击左上角的 **加载已解压的扩展程序 (Load unpacked)**。
 5. 选择你刚刚解压的文件夹。
 6. *首次使用请点击右上角扩展图标，阅读并同意免责声明。*
+
+### ⚠️ 加载报错 “Filenames starting with "_" are reserved for use by the system”
+
+Chromium 的 unpacked 加载器拒绝扩展**根目录**下任何 `_` 前缀的文件/目录。Chrome 会自己往 `_metadata/`（DNR 索引规则集缓存）写文件，并且**只在它内容恰好是 Chrome 自己的布局时才豁免**：一旦里面有其它东西（比如把日志/报表写进去），下次加载就会直接报：
+
+```
+Cannot load extension with file or directory name _metadata.
+Filenames starting with "_" are reserved for use by the system.
+```
+
+修复：删掉扩展根目录下多余的下划线前缀条目即可（`_metadata/` 整个删掉也安全，Chrome 会自己重建）。本仓库已把测试产物改放 `test-artifacts/`，并提供自检：
+
+```bash
+npm run test:loadable   # 静态扫描保留名 + 真实浏览器 loadUnpacked 验证
+```
 
 ---
 

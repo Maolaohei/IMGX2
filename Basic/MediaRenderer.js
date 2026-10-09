@@ -321,8 +321,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     setupMessageListener() {
-        chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-            const getUrlAndProcess = async (actionFn) => {
+        // 保存引用：自愈/重载后必须能移除旧监听器，否则会出现重复应答与重复下载
+        this._runtimeMessageListener = (request, sender, sendResponse) => {
+            const getUrlAndProcess = async (actionFn, explicitMedia) => {
                 const src = request.clickedUrl || this.elements.img.src;
                 if (this._hdUrlCache.has(src)) {
                     actionFn(this._hdUrlCache.get(src));
@@ -336,9 +337,9 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 let hoveredMedia = window.lastHoveredMedia;
                 if (hoveredMedia instanceof WeakRef) hoveredMedia = hoveredMedia.deref();
 
-                const targetEl = request.clickedUrl
+                const targetEl = explicitMedia || (request.clickedUrl
                     ? (window.lastHoveredSrc === request.clickedUrl ? (hoveredMedia || document.createElement('img')) : document.createElement('img'))
-                    : this.elements.img;
+                    : this.elements.img);
                 
                 let targetUrl = src;
                 if (window.Mix01RuleEngine?.getHighResUrl) {
@@ -353,6 +354,20 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
             if (request.action === 'getHDUrl') {
                 getUrlAndProcess(url => sendResponse({ url })); return true;
+            } else if (request.action === 'downloadFromContextMenu') {
+                // 原生右键菜单「下载视频/图片」：完全复用沉浸模式的解析/下载链路
+                if (request.mediaType === 'video') {
+                    this.downloadContextVideo(request)
+                        .then(status => sendResponse({ status }))
+                        .catch(err => sendResponse({ status: 'error', error: String(err && err.message || err) }));
+                } else {
+                    const imgEl = this._findContextMedia(request.clickedUrl || '', 'IMG');
+                    getUrlAndProcess(url => {
+                        window.Mix01Utils.downloadMedia(url, this, false);
+                        sendResponse({ status: 'ok' });
+                    }, imgEl);
+                }
+                return true;
             } else if (request.action === 'copyHDUrl') {
                 getUrlAndProcess(url => { window.Mix01Utils.copyImageToClipboard(url, this); sendResponse({ status: 'ok' }); }); return true;
             } else if (request.action === 'saveHDUrl') {
@@ -365,7 +380,64 @@ window.Mix01MediaRenderer = class MediaRenderer {
                 }); 
                 return true;
             }
-        });
+        };
+        chrome.runtime.onMessage.addListener(this._runtimeMessageListener);
+    }
+
+    // ===== 原生右键菜单：视频下载（与 D 键同一条链路） =====
+    _findContextMedia(src, tagName) {
+        const tag = (tagName || '').toUpperCase();
+        const selector = tag === 'VIDEO' ? 'video' : 'img';
+        const candidates = Array.from(document.querySelectorAll(selector));
+
+        // 1) 精确匹配右键目标的 src/currentSrc（blob: 与普通 URL 都成立）
+        if (src) {
+            const exact = candidates.find(el => (el.currentSrc || el.src) === src);
+            if (exact) return exact;
+        }
+
+        // 2) 刚悬停/正在渲染的媒体（原生菜单弹出时鼠标离开页面，currentMedia 可能已被清理）
+        let hovered = window.lastHoveredMedia;
+        if (hovered instanceof WeakRef) hovered = hovered.deref();
+        if (hovered && hovered.isConnected && hovered.tagName === tag) return hovered;
+
+        const current = this.controller?.state?.currentMedia || window.__mix01Engine?.controller?.state?.currentMedia;
+        if (current && current.isConnected && current.tagName === tag) return current;
+
+        return null;
+    }
+
+    async downloadContextVideo(request) {
+        const src = request.clickedUrl || '';
+        const video = this._findContextMedia(src, 'VIDEO');
+        if (!video) {
+            this.showToast('❌ 未能在页面中定位该视频元素');
+            return 'not-found';
+        }
+
+        const controller = window.__mix01Engine?.controller || this.controller;
+        if (controller?.triggerGlobalDownloadWithParams) {
+            // 站点适配器（原生按钮）→ 规则引擎 GraphQL/Fiber → 最高码率 mp4 → 后台转存
+            const result = await controller.triggerGlobalDownloadWithParams(video, null, src || video.currentSrc || video.src || '');
+            const status = result && result.status;
+            if (status === 'ok' || status === 'native' || status === 'local') return 'ok';
+            // 失败时把状态回传给后台，让其决定是否走直链兜底（blob 会被后台拒绝）
+            return status === 'not-found' ? 'not-found' : 'failed';
+        }
+
+        // 引擎尚未就绪时的旁路：直接调用站点适配器
+        const adapter = window.Mix01Utils.getImmersiveAdapter();
+        if (adapter?.downloadVideo) {
+            const container = adapter.getContainer ? adapter.getContainer(video) : document.body;
+            const url = await adapter.downloadVideo(container, video);
+            if (url === 'NATIVE_CLICKED') { this.showToast('✅ 已调用站点原生下载'); return 'native'; }
+            if (url && !url.startsWith('blob:') && !url.startsWith('data:')) {
+                window.Mix01Utils.downloadMedia(url, this, true);
+                return 'ok';
+            }
+        }
+        this.showToast('❌ 无法解析该视频的直链');
+        return 'failed';
     }
 
     setStyle(el, prop, val) {
@@ -522,6 +594,7 @@ window.Mix01MediaRenderer = class MediaRenderer {
 
     hide() {
         this._immersiveShellReady = false;
+        this._hudOpacity = null; // 下次会话必须能重新显示 HUD
         this.elements.viewer.style.setProperty('display', 'none', 'important');
 
         this.setStyles(this.elements.viewer, { cursor: 'default', 'pointer-events': 'none' });
@@ -558,6 +631,8 @@ window.Mix01MediaRenderer = class MediaRenderer {
     destroy() {
         this.hide();
         if (this.domGuard) this.domGuard.disconnect();
+        try { if (this._runtimeMessageListener) chrome.runtime.onMessage.removeListener(this._runtimeMessageListener); } catch (e) {}
+        this._runtimeMessageListener = null;
         
         if (this._activeToastQueue) {
             [...this._activeToastQueue].forEach(t => this._retireToast(t, true));
@@ -685,9 +760,16 @@ window.Mix01MediaRenderer = class MediaRenderer {
         if (videoEl.readyState < 2) {
             this.setStyle(this.elements.spinner, 'display', 'block');
             const onCanPlay = () => {
+                cleanCanPlayListeners();
                 this.setStyle(this.elements.spinner, 'display', 'none');
                 launchPlayback();
             };
+            const cleanCanPlayListeners = () => {
+                videoEl.removeEventListener('canplay', onCanPlay);
+                videoEl.removeEventListener('loadeddata', onCanPlay);
+                if (this._videoCanPlayCleanup === cleanCanPlayListeners) this._videoCanPlayCleanup = null;
+            };
+            this._videoCanPlayCleanup = cleanCanPlayListeners;
             videoEl.addEventListener('canplay', onCanPlay, { once: true });
             videoEl.addEventListener('loadeddata', onCanPlay, { once: true });
             // Still attempt play; some X videos never fire canplay while already decoding frames
@@ -756,6 +838,10 @@ window.Mix01MediaRenderer = class MediaRenderer {
     stopVideoRender() {
         this.videoState.isRunning = false;
         this._lastProgressPct = null;
+        if (this._videoCanPlayCleanup) {
+            this._videoCanPlayCleanup();
+            this._videoCanPlayCleanup = null;
+        }
         if (this._videoKeepAliveId) {
             clearTimeout(this._videoKeepAliveId);
             this._videoKeepAliveId = null;
@@ -1083,9 +1169,12 @@ window.Mix01MediaRenderer = class MediaRenderer {
         return activeZoom;
     }
 
-    showContextMenu(x, y, callbacks) {
+    showContextMenu(x, y, callbacks, opts = {}) {
         const menu = this.elements.ctxMenu;
         if (!menu) return;
+
+        const saveItem = menu.querySelector('[data-action="save"]');
+        if (saveItem) saveItem.textContent = opts.isVideo ? '💾 保存视频' : '💾 保存图片';
 
         const disableItem = menu.querySelector('[data-action="disable-site"]');
         if (disableItem) {
@@ -1316,6 +1405,12 @@ window.Mix01MediaRenderer = class MediaRenderer {
     }
 
     setHUDOpacity(opacity) {
+        // 热路径：沉浸模式下每次 mousemove 都会调用本函数，
+        // 而 opacity 在显示期间保持不变（仅空闲 2.5s 后才切换一次），
+        // 因此这里必须做状态去抖，否则每帧 12 次冗余样式写入会持续触发样式失效。
+        if (this._hudOpacity === opacity) return;
+        this._hudOpacity = opacity;
+
         const hudElements = [
             this.elements.status,
             this.elements.counter,

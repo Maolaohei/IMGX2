@@ -151,6 +151,8 @@ window.Mix01InputController = class InputController {
         this._lastDetectTime = 0;
         this._lastRectTime = 0;
         this._physicsFrameId = null; 
+        // 视觉去抖状态（沉浸热路径：cursor 每帧调用不得重复写样式）
+        this._cursorState = null;
 
         this._mouseVector = { lastX: 0, lastY: 0, dx: 0, dy: 0, speed: 0, timestamp: 0 };
 
@@ -195,42 +197,57 @@ window.Mix01InputController = class InputController {
     }
 
     initPassiveDOMScanner() {
+        // 同一篇文章的媒体槽位表在一次扫描内只计算一次（原实现对每张图重算 article.querySelectorAll → O(n²)）
+        const collectArticleMediaNodes = (article) => Array.from(article.querySelectorAll('img, video')).filter(node => {
+            if (!node || node.id === 'zoom-img-xyz' || node.id === 'zoom-img-buffer-xyz' || node.id === 'zoom-video-xyz') return false;
+            if (node.tagName === 'IMG') {
+                const s = node.currentSrc || node.src || '';
+                if (!s) return false;
+                if (s.includes('profile_images') || s.includes('emoji') || s.includes('hashflag')) return false;
+                if (s.includes('tweet_video_thumb') || s.includes('ext_tw_video_thumb') ||
+                    s.includes('amplify_video_thumb') || s.includes('video_poster') || s.includes('video-thumbnail')) return false;
+                // Prefer real photo assets; keep large non-twimg fallbacks.
+                if (!s.includes('/media/') && !s.includes('twimg.com') && (node.clientWidth || 0) < 80) return false;
+            }
+            return true;
+        });
+
         const scanAndObserve = (root) => {
-            const els = root.querySelectorAll ? root.querySelectorAll('img, video') : [];
+            const els = Array.from(root.querySelectorAll ? root.querySelectorAll('img, video') : []);
+            if (els.length === 0) return;
+
+            const articleOf = new Map();   // el -> article（避免重复 closest）
+            const statusIdOf = new Map();  // article -> statusId（同一篇只查一次链接）
+            const slotNodesOf = new Map(); // article -> 已过滤媒体列表（同一篇只算一次）
+
             els.forEach(el => {
                 if (!el._mix01Observed) { el._mix01Observed = true; this.mediaIO.observe(el); }
-                
-                if (!el._mixStatusId) {
-                    const article = el.closest('article');
-                    if (article) {
+
+                const article = el.closest('article');
+                articleOf.set(el, article);
+
+                if (!el._mixStatusId && article) {
+                    if (!statusIdOf.has(article)) {
                         const statusLink = article.querySelector('a[href*="/status/"]');
-                        if (statusLink) {
-                            const id = statusLink.href.split('/status/').pop().split(/[\/?#]/).shift();
-                            if (id) el._mixStatusId = id;
-                        }
+                        statusIdOf.set(article, statusLink ? statusLink.href.split('/status/').pop().split(/[\/?#]/).shift() : '');
                     }
+                    const id = statusIdOf.get(article);
+                    if (id) el._mixStatusId = id;
                 }
-                // Stable per-tweet media slot for multi-image posts (photo 1..N)
-                if (!Number.isInteger(el._mixMediaSlot) || el._mixMediaSlot < 0) {
-                    const article = el.closest('article');
-                    if (article) {
-                        const mediaNodes = Array.from(article.querySelectorAll('img, video')).filter(node => {
-                            if (!node || node.id === 'zoom-img-xyz' || node.id === 'zoom-img-buffer-xyz' || node.id === 'zoom-video-xyz') return false;
-                            if (node.tagName === 'IMG') {
-                                const s = node.currentSrc || node.src || '';
-                                if (!s) return false;
-                                if (s.includes('profile_images') || s.includes('emoji') || s.includes('hashflag')) return false;
-                                if (s.includes('tweet_video_thumb') || s.includes('ext_tw_video_thumb') ||
-                                    s.includes('amplify_video_thumb') || s.includes('video_poster') || s.includes('video-thumbnail')) return false;
-                                // Prefer real photo assets; keep large non-twimg fallbacks.
-                                if (!s.includes('/media/') && !s.includes('twimg.com') && (node.clientWidth || 0) < 80) return false;
-                            }
-                            return true;
-                        });
-                        const slot = mediaNodes.indexOf(el);
-                        if (slot >= 0) el._mixMediaSlot = slot;
-                    }
+            });
+
+            // Stable per-tweet media slot for multi-image posts (photo 1..N)
+            els.forEach(el => {
+                if (Number.isInteger(el._mixMediaSlot) && el._mixMediaSlot >= 0) return;
+                const article = articleOf.get(el);
+                if (!article) return;
+                let mediaNodes = slotNodesOf.get(article);
+                if (!mediaNodes) {
+                    mediaNodes = collectArticleMediaNodes(article);
+                    slotNodesOf.set(article, mediaNodes);
                 }
+                const slot = mediaNodes.indexOf(el);
+                if (slot >= 0) el._mixMediaSlot = slot;
             });
         };
         scanAndObserve(document);
@@ -240,13 +257,19 @@ window.Mix01InputController = class InputController {
 
         const processScanQueue = () => {
             if (this._scanQueue.length === 0) return;
-            const batch = [...this._scanQueue];
+            const batch = this._scanQueue;
             this._scanQueue = [];
+            const inBatch = new Set(batch);
 
             batch.forEach(node => {
-                if (!node.isConnected) return; 
-                
-                scanAndObserve(node);
+                if (!node.isConnected) return;
+
+                // 同一批次中祖先已入队时，后代的媒体会被祖先的扫描覆盖：跳过重复扫描
+                let coveredByAncestor = false;
+                for (let p = node.parentElement; p && p !== document.body; p = p.parentElement) {
+                    if (inBatch.has(p)) { coveredByAncestor = true; break; }
+                }
+                if (!coveredByAncestor) scanAndObserve(node);
 
                 if (node.tagName === 'VIDEO' && this.state.currentMedia) {
                     const currentArt = this.state.currentMedia.closest('article');
@@ -288,6 +311,9 @@ window.Mix01InputController = class InputController {
                                     node._mix01Observed = true;
                                     this.mediaIO.observe(node);
                                 }
+            } else if (node.childElementCount === 0) {
+                                // 叶子节点不可能含媒体后代；X 每次渲染会插入大量文本/图标节点
+                                continue;
                             }
                             queueNodeForScan(node);
                         }
@@ -295,7 +321,27 @@ window.Mix01InputController = class InputController {
                 }
             }
         });
+        this._scanAndObserve = scanAndObserve;
         this._globalDomObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+        this._domObserverActive = true;
+    }
+
+    // 全局突变观察只在「站点启用 + 页面可见」时挂载：
+    // 否则浏览器仍会为该子树持续记录突变（X 这种高动态页面代价明显）。
+    _setGlobalDomObserver(active) {
+        if (!this._globalDomObserver) return;
+        const shouldRun = !!active && this.cfg.isSiteEnabled();
+        if (shouldRun === this._domObserverActive) return;
+        this._domObserverActive = shouldRun;
+
+        if (shouldRun) {
+            // 暂停期间的 DOM 变化（虚拟列表回收/新增）在恢复时统一补扫
+            this.state._galleryCacheDirty = true;
+            this._globalDomObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+            try { this._scanAndObserve?.(document); } catch (e) {}
+        } else {
+            this._globalDomObserver.disconnect();
+        }
     }
 
     _toggleVideoPlay() {
@@ -678,7 +724,7 @@ window.Mix01InputController = class InputController {
                     if (this.cfg.state.isImmersive) this.exitImmersive();
                     else this.hideViewer();
                 }
-            });
+            }, { isVideo: lockedMedia?.tagName === 'VIDEO' });
         }, { signal: this._eventSignalController.signal });
 
         // Immersive sessions must survive Alt-Tab / DevTools blur; only close non-immersive lens.
@@ -686,6 +732,8 @@ window.Mix01InputController = class InputController {
             if (!this.cfg.state.isImmersive) this.hideViewer();
         }, { signal: this._eventSignalController.signal });
         document.addEventListener('visibilitychange', () => {
+            this._setGlobalDomObserver(document.visibilityState !== 'hidden');
+
             if (document.visibilityState === 'hidden') {
                 if (this.cfg.state.isImmersive) {
                     // Pause expensive work while tab is hidden, but keep session state.
@@ -737,6 +785,8 @@ window.Mix01InputController = class InputController {
         this._latestMouseEvent = null;
         this._scanQueue = [];
         this._scanTimer = null;
+        this._cursorState = null;
+        this._domObserverActive = false;
     }
 
     getMediaUnderCursor(clientX, clientY, target) {
@@ -807,9 +857,15 @@ window.Mix01InputController = class InputController {
                     // 不做任何隐藏动作（用户显式退出才结束会话）。
                 }
             }
-            this.render.elements.viewer.style.setProperty('cursor', 'default', 'important');
+            // 热路径去抖：cursor 已是 default 时不再重写样式；
+            // 隐藏定时器仍逐次重挂（保证「最后一次移动后 2s 隐藏」的原有手感）
+            if (this._cursorState !== 'default') {
+                this._cursorState = 'default';
+                this.render.elements.viewer.style.setProperty('cursor', 'default', 'important');
+            }
             clearTimeout(this._cursorHideTimer);
             this._cursorHideTimer = setTimeout(() => {
+                this._cursorState = 'none';
                 this.render.elements.viewer.style.setProperty('cursor', 'none', 'important');
             }, 2000);
 
@@ -855,17 +911,22 @@ window.Mix01InputController = class InputController {
                 return;
             }
 
-            const currentElement = document.elementFromPoint(e.clientX, e.clientY);
-            const isMouseOverTarget = this.state.currentMedia.contains(currentElement) || 
-                                      (currentElement && currentElement.id === 'zoom-img-xyz') || 
-                                      (currentElement && currentElement.id === 'img-zoom-pro-viewer-xyz');
-
-            if (Date.now() - this.state.keyboardSwitchTime > 500 && !isMouseOverTarget) {
-                const margin = 12; 
-                if (e.clientX < this.state.cachedRect.left - margin || e.clientX > this.state.cachedRect.right + margin || 
-                    e.clientY < this.state.cachedRect.top - margin || e.clientY > this.state.cachedRect.bottom + margin) {
-                    this.hideViewer(); 
-                    return;
+            if (Date.now() - this.state.keyboardSwitchTime > 500) {
+                const margin = 12;
+                const r = this.state.cachedRect;
+                const outsideRect = e.clientX < r.left - margin || e.clientX > r.right + margin ||
+                                    e.clientY < r.top - margin || e.clientY > r.bottom + margin;
+                // 只在指针真正离开媒体矩形时才做命中测试（判断是否落在我们自己的
+                // viewer/放大镜上）；矩形内无需 elementFromPoint 的强制布局命中测试。
+                if (outsideRect) {
+                    const currentElement = document.elementFromPoint(e.clientX, e.clientY);
+                    const isMouseOverTarget = this.state.currentMedia.contains(currentElement) ||
+                                              (currentElement && currentElement.id === 'zoom-img-xyz') ||
+                                              (currentElement && currentElement.id === 'img-zoom-pro-viewer-xyz');
+                    if (!isMouseOverTarget) {
+                        this.hideViewer();
+                        return;
+                    }
                 }
             }
             this.updateRender(e);
@@ -1320,6 +1381,8 @@ window.Mix01InputController = class InputController {
         this.state.customLensHeight = null;
         this.state.isZoomManuallyChanged = false;
         this.state.lastRenderSignature = null;
+        // 视觉去抖状态归零：新会话必须能重新设置 cursor
+        this._cursorState = null;
         window.__mix01State.isFetchingMore = false;
         this.state.isRenderingLock = false;
     }
@@ -1361,6 +1424,8 @@ window.Mix01InputController = class InputController {
     resetImmersiveHUDTimeout() {
         if (!this.cfg.state.isImmersive || !this.state.isViewerVisible) return;
 
+        // 只去抖样式写入（setHUDOpacity 内部判断），定时器仍逐次重挂，
+        // 保证「最后一次移动后 2.5s 淡出」的原有手感不变。
         this.render.setHUDOpacity('1');
 
         clearTimeout(this._hudIdleTimer);
@@ -1428,107 +1493,26 @@ window.Mix01InputController = class InputController {
     // 3) Mixed up/down uses a visit trail so "down after up" restores history
     // 4) Boundary fetch never jumps to window head/tail (that caused déjà-vu)
 
+    // 媒体身份判定已抽到 Basic/mediaIdentity.js（可独立测试的纯 DOM 逻辑），
+    // 这里保留薄委托以维持既有调用点与语义不变。
     _normalizeAssetSrc(src) {
-        if (!src || src === 'video') return '';
-        // Blob/MSE are ephemeral; never use them as durable identity.
-        if (src.startsWith('blob:') || src.startsWith('mediasource:')) return '';
-        try {
-            const u = new URL(src, location.href);
-            // X rotates ?name=small/large; pathname (media id) is stable per asset.
-            return `${u.origin}${u.pathname}`;
-        } catch (e) {
-            return src.split('?')[0].split('#')[0];
-        }
+        return window.Mix01MediaIdentity.normalizeAssetSrc(src);
     }
 
     _mediaSlotInArticle(media) {
-        if (!media || !media.isConnected) return -1;
-        if (Number.isInteger(media._mixMediaSlot) && media._mixMediaSlot >= 0) {
-            return media._mixMediaSlot;
-        }
-        const article = media.closest?.('article') || media.closest?.('[data-testid="tweet"]');
-        if (!article) return -1;
-        const siblings = Array.from(article.querySelectorAll('img, video')).filter(el => {
-            if (!el || el === media) return true;
-            if (el.id === 'zoom-img-xyz' || el.id === 'zoom-img-buffer-xyz' || el.id === 'zoom-video-xyz') return false;
-            if (el.tagName === 'IMG') {
-                const s = el.currentSrc || el.src || '';
-                if (!s) return false;
-                if (s.includes('profile_images') || s.includes('emoji') || s.includes('hashflag')) return false;
-                if (s.includes('tweet_video_thumb') || s.includes('ext_tw_video_thumb') ||
-                    s.includes('amplify_video_thumb') || s.includes('video_poster') || s.includes('video-thumbnail')) return false;
-            }
-            return (el.clientWidth || 0) > 40 && (el.clientHeight || 0) > 40;
-        });
-        // Keep only real media-ish siblings for slot numbering
-        const mediaLike = siblings.filter(el => {
-            if (el.tagName === 'VIDEO') return true;
-            const s = el.currentSrc || el.src || '';
-            return !!(s && (s.includes('/media/') || s.includes('twimg.com') || el.naturalWidth > 0 || el.clientWidth > 80));
-        });
-        const list = mediaLike.length ? mediaLike : siblings;
-        const idx = list.indexOf(media);
-        if (idx >= 0) media._mixMediaSlot = idx;
-        return idx;
+        return window.Mix01MediaIdentity.mediaSlotInArticle(media);
     }
 
     _mediaKey(media) {
-        if (!media) return '';
-
-        // 1) Durable asset URL wins (critical for multi-image tweets).
-        //    Never collapse same-status multi photos into one key.
-        const rawSrc = media.currentSrc || media.src || '';
-        const asset = this._normalizeAssetSrc(rawSrc);
-        if (asset) {
-            // Keep status as soft namespace only when present; asset path is the uniqueness.
-            if (media._mixStatusId && /\/media\//.test(asset)) {
-                return `asset:${media._mixStatusId}:${asset}`;
-            }
-            return `src:${asset}`;
-        }
-
-        // 2) Blob/MSE video (and rare empty-src nodes): status + slot / role.
-        if (media._mixStatusId) {
-            if (media.tagName === 'VIDEO') return `vid:${media._mixStatusId}`;
-            const slot = this._mediaSlotInArticle(media);
-            if (slot >= 0) return `sid:${media._mixStatusId}#${slot}`;
-            return `sid:${media._mixStatusId}#${media.tagName}`;
-        }
-
-        // 3) Last resort geometric fingerprint
-        const slot = this._mediaSlotInArticle(media);
-        if (slot >= 0) return `slot:${slot}:${media.tagName}:${Math.round(media.clientWidth)}x${Math.round(media.clientHeight)}`;
-        return `el:${media.tagName}:${Math.round(media.clientWidth)}x${Math.round(media.clientHeight)}`;
+        return window.Mix01MediaIdentity.mediaKey(media);
     }
 
     _sortMediaDocumentOrder(list) {
-        if (!list || list.length < 2) return list || [];
-        // documentPosition is stable for connected nodes and matches reading order
-        return list
-            .filter(el => el && el.isConnected)
-            .map((el, idx) => ({ el, idx }))
-            .sort((a, b) => {
-                if (a.el === b.el) return 0;
-                const rel = a.el.compareDocumentPosition(b.el);
-                if (rel & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-                if (rel & Node.DOCUMENT_POSITION_PRECEDING) return 1;
-                // disconnected / uncommon: keep original relative order
-                return a.idx - b.idx;
-            })
-            .map(x => x.el);
+        return window.Mix01MediaIdentity.sortMediaDocumentOrder(list);
     }
 
     _dedupeMedia(list) {
-        const seen = new Set();
-        const out = [];
-        for (const el of list) {
-            if (!el || !el.isConnected) continue;
-            const key = this._mediaKey(el);
-            if (!key || seen.has(key)) continue;
-            seen.add(key);
-            out.push(el);
-        }
-        return out;
+        return window.Mix01MediaIdentity.dedupeMedia(list);
     }
 
     _ensureNavTrail() {
@@ -1875,6 +1859,7 @@ window.Mix01InputController = class InputController {
         }
         this.cfg.save({ disabledSites: this.cfg.disabledSites });
         const isEnabled = this.cfg.isSiteEnabled();
+        this._setGlobalDomObserver(isEnabled);
         this.render.showToast(isEnabled ? '✅ 已在此站点启用引擎' : '🚫 已在此站点禁用引擎');
     }
 
@@ -2088,7 +2073,7 @@ window.Mix01InputController = class InputController {
     }
 
     triggerGlobalDownloadWithParams(media, hdUrl, fallbackSrc) {
-        if (!media) return;
+        if (!media) return Promise.resolve({ status: 'no-media' });
         const adapter = window.Mix01Utils.getImmersiveAdapter();
         const isVideo = media.tagName === 'VIDEO';
 
@@ -2096,24 +2081,41 @@ window.Mix01InputController = class InputController {
             if (adapter && adapter.downloadVideo) {
                 this.render.showToast("⏳ 正在打通后台提取视频流...");
                 const container = adapter.getContainer ? adapter.getContainer(media) : document.body;
-                adapter.downloadVideo(container, media).then(videoUrl => {
-                    if (videoUrl === 'NATIVE_CLICKED') {
-                        this.render.showToast("✅ 已调用浏览器插件原生下载机制！");
-                    } else if (videoUrl) {
-                        window.Mix01Utils.downloadMedia(videoUrl, this.render, true);
-                    } else {
+                return Promise.resolve()
+                    .then(() => adapter.downloadVideo(container, media))
+                    .then(videoUrl => {
+                        if (videoUrl === 'NATIVE_CLICKED') {
+                            this.render.showToast("✅ 已调用浏览器插件原生下载机制！");
+                            return { status: 'native' };
+                        }
+                        if (videoUrl && !videoUrl.startsWith('blob:') && !videoUrl.startsWith('data:')) {
+                            window.Mix01Utils.downloadMedia(videoUrl, this.render, true);
+                            return { status: 'ok', url: videoUrl };
+                        }
+                        // 解析失败（多数是 MSE 的 blob: 假直链）：尝试页面内直接抓取当前播放流兜底
+                        const localSrc = videoUrl || media.currentSrc || media.src || '';
+                        if (localSrc.startsWith('blob:')) {
+                            return window.Mix01Utils._downloadLocallyFallback(localSrc, this.render, true)
+                                .then(ok => ({ status: ok ? 'local' : 'failed' }));
+                        }
                         this.render.showToast("❌ 无法解析该视频的直链");
-                    }
-                });
-            } else {
-                this.render.showToast("⚠️ 当前站点暂未适配一键视频提取");
+                        return { status: 'failed' };
+                    })
+                    .catch(err => {
+                        this.render.showToast("❌ 视频解析异常: " + (err?.message || err));
+                        return { status: 'error' };
+                    });
             }
-        } else {
-            const downloadUrl = hdUrl || fallbackSrc;
-            if (downloadUrl) {
-                window.Mix01Utils.downloadMedia(downloadUrl, this.render, false);
-            }
+            this.render.showToast("⚠️ 当前站点暂未适配一键视频提取");
+            return Promise.resolve({ status: 'unsupported' });
         }
+
+        const downloadUrl = hdUrl || fallbackSrc;
+        if (downloadUrl) {
+            window.Mix01Utils.downloadMedia(downloadUrl, this.render, false);
+            return Promise.resolve({ status: 'ok', url: downloadUrl });
+        }
+        return Promise.resolve({ status: 'failed' });
     }
 
     triggerPreload() {
