@@ -6,6 +6,9 @@
 //   * 按 manifest 顺序注入真实源码，并按 content.js 的方式装配引擎
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const http = require('http');
+const { spawn } = require('child_process');
 const { chromium } = require('playwright');
 
 const ROOT = path.join(__dirname, '..', '..');
@@ -182,6 +185,74 @@ async function bootMix01Engine(page) {
     });
 }
 
+// 用 CDP `Extensions.loadUnpacked` 做真实浏览器加载验证
+// （与 chrome://extensions 的「加载已解压的扩展程序」同一代码路径）
+function cdpGetJSON(port, p) {
+    return new Promise((resolve) => {
+        const req = http.get({ host: '127.0.0.1', port, path: p }, res => {
+            let d = ''; res.on('data', c => d += c);
+            res.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { resolve(null); } });
+        });
+        req.on('error', () => resolve(null));
+        req.setTimeout(3000, () => { req.destroy(); resolve(null); });
+    });
+}
+
+async function loadUnpackedViaCDP(exe, dir) {
+    const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'mix01-loadable-'));
+    const port = 9850 + Math.floor(Math.random() * 120);
+    const child = spawn(exe, [
+        `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
+        '--no-first-run', '--no-default-browser-check', '--headless=new',
+        '--enable-unsafe-extension-debugging', '--window-position=-32000,-32000', 'about:blank'
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', d => stderr += d.toString());
+
+    const cleanup = async () => {
+        child.kill('SIGKILL');
+        await new Promise(r => setTimeout(r, 200));
+        try { fs.rmSync(profile, { recursive: true, force: true }); } catch (e) {}
+    };
+
+    let wsUrl = null;
+    for (let i = 0; i < 30 && !wsUrl; i++) {
+        await new Promise(r => setTimeout(r, 250));
+        const v = await cdpGetJSON(port, '/json/version');
+        if (v && v.webSocketDebuggerUrl) wsUrl = v.webSocketDebuggerUrl;
+    }
+    if (!wsUrl) {
+        await cleanup();
+        return { ok: false, error: 'devtools endpoint unavailable', stderr: stderr.slice(0, 300) };
+    }
+
+    let WSImpl;
+    try { WSImpl = require('playwright-core/lib/utilsBundle').ws; } catch (e) { WSImpl = null; }
+    if (!WSImpl) {
+        await cleanup();
+        return { ok: false, error: 'ws implementation unavailable' };
+    }
+
+    const result = await new Promise((resolve) => {
+        const ws = new WSImpl(wsUrl);
+        const done = (v) => { try { ws.close(); } catch (e) {} resolve(v); };
+        ws.on('error', (e) => done({ ok: false, error: String(e && e.message || e) }));
+        ws.on('open', () => {
+            ws.send(JSON.stringify({ id: 1, method: 'Extensions.loadUnpacked', params: { path: dir } }));
+        });
+        ws.on('message', (m) => {
+            const msg = JSON.parse(m.toString());
+            if (msg.id !== 1) return;
+            if (msg.error) done({ ok: false, error: msg.error.message || JSON.stringify(msg.error) });
+            else done({ ok: true, id: (msg.result && msg.result.id) || null });
+        });
+        setTimeout(() => done({ ok: false, error: 'loadUnpacked timeout' }), 20000);
+    });
+
+    await cleanup();
+    return result;
+}
+
 module.exports = {
     ROOT,
     MIX01_SCRIPTS,
@@ -191,5 +262,6 @@ module.exports = {
     createHarnessPage,
     installChromeMockInPage,
     injectMix01Source,
-    bootMix01Engine
+    bootMix01Engine,
+    loadUnpackedViaCDP
 };

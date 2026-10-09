@@ -17,7 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const {
-    ROOT, findBrowserExecutable, describeBrowser
+    ROOT, findBrowserExecutable, describeBrowser, loadUnpackedViaCDP
 } = require('./lib/mix01-harness');
 
 const REPORT_PATH = path.join(ROOT, 'test-artifacts', 'loadable-report.json');
@@ -71,73 +71,7 @@ function scanReservedEntries(root) {
     return { violations, chromeGenerated, foreignFiles };
 }
 
-function getJSON(port, p) {
-    return new Promise((resolve) => {
-        const req = require('http').get({ host: '127.0.0.1', port, path: p }, res => {
-            let d = ''; res.on('data', c => d += c);
-            res.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { resolve(null); } });
-        });
-        req.on('error', () => resolve(null));
-        req.setTimeout(3000, () => { req.destroy(); resolve(null); });
-    });
-}
-
-async function loadUnpackedViaCDP(exe, dir) {
-    // 用注入脚本读 window 上的结果，避免依赖 playwright
-    const profile = fs.mkdtempSync(path.join(require('os').tmpdir(), 'mix01-loadable-'));
-    const port = 9850 + Math.floor(Math.random() * 120);
-    const child = spawn(exe, [
-        `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
-        '--no-first-run', '--no-default-browser-check', '--headless=new',
-        '--enable-unsafe-extension-debugging', '--window-position=-32000,-32000', 'about:blank'
-    ], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = '';
-    child.stderr.on('data', d => stderr += d.toString());
-
-    let wsUrl = null;
-    for (let i = 0; i < 30 && !wsUrl; i++) {
-        await new Promise(r => setTimeout(r, 250));
-        const v = await getJSON(port, '/json/version');
-        if (v && v.webSocketDebuggerUrl) wsUrl = v.webSocketDebuggerUrl;
-    }
-    if (!wsUrl) {
-        child.kill('SIGKILL');
-        fs.rmSync(profile, { recursive: true, force: true });
-        return { ok: false, error: 'devtools endpoint unavailable', stderr: stderr.slice(0, 300) };
-    }
-
-    let WSImpl;
-    try { WSImpl = require('playwright-core/lib/utilsBundle').ws; } catch (e) { WSImpl = null; }
-    if (!WSImpl) {
-        child.kill('SIGKILL');
-        fs.rmSync(profile, { recursive: true, force: true });
-        return { ok: false, error: 'ws implementation unavailable' };
-    }
-
-    const result = await new Promise((resolve) => {
-        const ws = new WSImpl(wsUrl);
-        const done = (v) => { try { ws.close(); } catch (e) {} resolve(v); };
-        ws.on('error', (e) => done({ ok: false, error: String(e && e.message || e) }));
-        ws.on('open', () => {
-            ws.send(JSON.stringify({
-                id: 1, method: 'Extensions.loadUnpacked', params: { path: dir }
-            }));
-        });
-        ws.on('message', (m) => {
-            const msg = JSON.parse(m.toString());
-            if (msg.id !== 1) return;
-            if (msg.error) done({ ok: false, error: msg.error.message || JSON.stringify(msg.error) });
-            else done({ ok: true, id: (msg.result && msg.result.id) || null });
-        });
-        setTimeout(() => done({ ok: false, error: 'loadUnpacked timeout' }), 20000);
-    });
-
-    child.kill('SIGKILL');
-    await new Promise(r => setTimeout(r, 200));
-    fs.rmSync(profile, { recursive: true, force: true });
-    return result;
-}
-
+// 真实浏览器加载验证复用共享实现（scripts/lib/mix01-harness.js），避免两份拷贝漂移
 (async () => {
     const report = {
         test: 'verify-loadable',

@@ -12,7 +12,9 @@
     "test:e2e:video": "node scripts/e2e-video-pause.js",
     "test:e2e:download": "node scripts/e2e-download-verify.js",
     "test:e2e:context-download": "node scripts/e2e-context-download.js",
-    "test:perf": "node scripts/perf-hotpath.js"
+    "test:perf": "node scripts/perf-hotpath.js",
+    "pack": "node scripts/pack.js",
+    "pack:quick": "node scripts/pack.js --no-verify"
   },
   "repository": {
     "type": "git",

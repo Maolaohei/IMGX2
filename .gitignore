@@ -16,7 +16,7 @@ test-artifacts/
 .e2e-profile/
 
 # 打包产物（重新打包时排除 _metadata/ test-artifacts/ node_modules/ .git/ .reasonix/）
-IMGX2.zip
+IMGX2*.zip
 *.crx
 *.pem
 

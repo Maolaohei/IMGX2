@@ -2,7 +2,7 @@
 
 > 测量基座：`scripts/perf-hotpath.js`（真实 Chrome headless + 真实源码 + 合成 X 时间线，无网络）
 > 工件：`test-artifacts/perf-hotpath-baseline.json`（修复前）、`test-artifacts/perf-hotpath-report.json`（当前 + 基线对比）
-> 运行：`npm run test:perf`（17 项预算断言）、`npm test`（82 项，含右键下载 E2E 17 项 + 媒体身份 16 项）
+> 运行：`npm run test:perf`（17 项预算断言）、`npm test`（87 项，含右键下载 E2E 17 项 + 媒体身份 16 项）、`npm run pack`（10 项打包校验）
 
 ---
 
@@ -144,6 +144,7 @@ npm test                          # 87 项：可加载性守护 + 纯 Node 回�
 npm run test:loadable             # 扩展可加载性：静态 + 真实浏览器 loadUnpacked（推荐改完先跑这个）
 npm run test:e2e:context-download # 仅右键下载 E2E（真实 Chrome，自动定位本机 Chrome/Edge）
 npm run test:perf                 # 热路径体检：17 项预算 + 与基线的对比表
+npm run pack                      # 打可分发包（IMGX2-v<版本>-<日期>.zip）并验证解压后可加载
 ```
 
 工件（均在 `test-artifacts/`，已 gitignore）：
@@ -151,5 +152,6 @@ npm run test:perf                 # 热路径体检：17 项预算 + 与基线�
 * `test-artifacts/e2e-context-download-report.json`：菜单树、消息载荷、下载记录、失败记录
 * `test-artifacts/perf-hotpath-baseline.json` / `test-artifacts/perf-hotpath-report.json`：修复前后测量与 `delta`
 * `test-artifacts/loadable-report.json`：保留名扫描结果 + 真实浏览器加载得到的 extensionId
+* `test-artifacts/pack-report.json`：包内结构检查 + 解压后真实浏览器加载结果
 
 > ⚠️ 不要把任何测试产物写进扩展根目录的 `_metadata/`（Chrome 托管目录）：会让 `_` 保留名豁免失效，扩展直接无法加载——详见 §2.13。
